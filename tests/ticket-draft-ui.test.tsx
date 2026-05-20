@@ -6,28 +6,32 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   activeRunElapsedLabel,
+  BoardView,
   canRedraftTicket,
+  CodexCollapsedStatusIndicator,
+  CodexSidebarStatus,
   CreateTicketDraftMessage,
   DraftIntakeQuestionsPanel,
   DraftingTicketDetailLoading,
   emptyColumnMessage,
   FloatingTicketComposer,
+  getCodexStatusDisplay,
   RepositoryChatPanelContent,
   TicketCardContent,
   TicketMarkdownTabs,
   TicketDetailPrimaryClarifications,
-  TicketSuggestionsModalContent,
   TicketAuthoringStatePill,
   TicketChecklistPill,
   TicketRunElapsedPill,
   TicketRunStatusPill
 } from "../src/renderer/src/App";
 import {
+  type CodexStatus,
   DEFAULT_COLUMNS,
   type ClarificationQuestion,
   type DraftIntakeResult,
+  type BoardSnapshot,
   type TicketRecord,
-  type TicketSuggestion,
   type TicketSummary
 } from "../src/shared/schemas";
 
@@ -35,6 +39,15 @@ const renderWithQueryClient = (element: ReactElement): string => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return renderToStaticMarkup(<QueryClientProvider client={queryClient}>{element}</QueryClientProvider>);
 };
+
+const codexStatus = (patch: Partial<CodexStatus> = {}): CodexStatus => ({
+  sdkAvailable: true,
+  cliAvailable: false,
+  cliVersion: null,
+  authenticated: null,
+  message: "Checking Codex...",
+  ...patch
+});
 
 const ticketSummary = (patch: Partial<TicketSummary> = {}): TicketSummary => ({
   schemaVersion: 1,
@@ -90,6 +103,25 @@ const ticketRecord = (patch: Partial<TicketRecord["frontMatter"]> = {}): TicketR
   };
 };
 
+const boardSnapshot = (): BoardSnapshot => ({
+  project: {
+    projectId: "prj_ticket_draft_ui",
+    name: "Relay",
+    path: "/tmp/project",
+    exists: true,
+    isGitRepository: true,
+    relayInitialized: true,
+    health: "ok",
+    healthMessages: [],
+    activeRunCount: 0,
+    swimlanes: []
+  },
+  config: null,
+  columns: DEFAULT_COLUMNS,
+  tickets: [],
+  invalidTickets: []
+});
+
 test("empty column copy is status-aware for standard workflow columns", () => {
   assert.deepEqual(emptyColumnMessage("Todo"), {
     title: "No tickets to triage",
@@ -128,6 +160,121 @@ test("empty column copy keeps a generic fallback for custom columns", () => {
     detail: "Tickets will settle here when work reaches this stage."
   });
   assert.deepEqual(emptyColumnMessage("  ready  "), emptyColumnMessage("Ready"));
+});
+
+test("codex sidebar status display uses simple connected labels", () => {
+  assert.deepEqual(getCodexStatusDisplay(undefined, { isLoading: true }), {
+    tone: "loading",
+    label: "Codex: Checking..."
+  });
+  assert.deepEqual(getCodexStatusDisplay(undefined, { isError: true }), {
+    tone: "error",
+    label: "Codex: Unavailable"
+  });
+  assert.deepEqual(
+    getCodexStatusDisplay(
+      codexStatus({
+        cliAvailable: true,
+        cliVersion: "codex-cli 0.130.0",
+        authenticated: true,
+        message: "Codex is available."
+      })
+    ),
+    {
+      tone: "ok",
+      label: "Codex: Connected"
+    }
+  );
+  assert.deepEqual(
+    getCodexStatusDisplay(
+      codexStatus({
+        cliAvailable: true,
+        cliVersion: "codex-cli 0.130.0",
+        authenticated: false,
+        message: "Codex CLI is available, but no Codex auth file or API key was found."
+      })
+    ),
+    {
+      tone: "warning",
+      label: "Codex: Not connected"
+    }
+  );
+  assert.deepEqual(
+    getCodexStatusDisplay(
+      codexStatus({
+        authenticated: false,
+        message: "Codex CLI was not found in the SDK bundle or on PATH."
+      })
+    ),
+    {
+      tone: "error",
+      label: "Codex: Not installed"
+    }
+  );
+});
+
+test("codex sidebar status renders compact footer markup", () => {
+  const warningMarkup = renderToStaticMarkup(
+    <CodexSidebarStatus
+      codexStatus={codexStatus({
+        cliAvailable: true,
+        cliVersion: "codex-cli 0.130.0",
+        authenticated: false,
+        message: "Codex CLI is available, but no Codex auth file or API key was found."
+      })}
+      isLoading={false}
+      isError={false}
+      onRefresh={() => undefined}
+    />
+  );
+  assert.match(warningMarkup, /sidebar-codex-status warning/);
+  assert.match(warningMarkup, /Codex: Not connected/);
+
+  const healthyMarkup = renderToStaticMarkup(
+    <CodexSidebarStatus
+      codexStatus={codexStatus({
+        cliAvailable: true,
+        cliVersion: "codex-cli 0.130.0",
+        authenticated: true,
+        message: "Codex is available."
+      })}
+      isLoading={false}
+      isError={false}
+      onRefresh={() => undefined}
+    />
+  );
+  assert.match(healthyMarkup, /sidebar-codex-status ok connected/);
+  assert.match(healthyMarkup, /Codex: Connected/);
+});
+
+test("collapsed codex indicator uses green connected and red disconnected floating buttons", () => {
+  const connectedMarkup = renderToStaticMarkup(
+    <CodexCollapsedStatusIndicator
+      codexStatus={codexStatus({
+        cliAvailable: true,
+        cliVersion: "codex-cli 0.130.0",
+        authenticated: true,
+        message: "Codex is available."
+      })}
+      onRefresh={() => undefined}
+    />
+  );
+  assert.match(connectedMarkup, /sidebar-codex-indicator-button connected/);
+  assert.match(connectedMarkup, /aria-label="Codex: Connected"/);
+
+  const disconnectedMarkup = renderToStaticMarkup(
+    <CodexCollapsedStatusIndicator
+      codexStatus={codexStatus({
+        cliAvailable: true,
+        cliVersion: "codex-cli 0.130.0",
+        authenticated: false,
+        message: "Codex CLI is available, but no Codex auth file or API key was found."
+      })}
+      onRefresh={() => undefined}
+    />
+  );
+  assert.match(disconnectedMarkup, /sidebar-codex-indicator-button disconnected/);
+  assert.match(disconnectedMarkup, /aria-label="Codex: Not connected"/);
 });
 
 test("drafting ticket status pill renders an active spinner indicator", () => {
@@ -318,90 +465,6 @@ test("ticket detail primary clarifications render pending answer composer", () =
   assert.match(markup, /Submit Answer/);
 });
 
-const suggestion: TicketSuggestion = {
-  title: "Tighten board keyboard focus",
-  priority: "medium",
-  labels: ["frontend", "accessibility"],
-  rationale: "Board navigation has adjacent shortcut behavior that should stay predictable.",
-  request: "Draft a task to tighten board keyboard focus handling."
-};
-
-test("ticket suggestions modal content renders loading, error, and empty states", () => {
-  const noop = (): void => undefined;
-  const loadingMarkup = renderToStaticMarkup(
-    <TicketSuggestionsModalContent
-      state="loading"
-      suggestions={[]}
-      errorMessage={null}
-      createStates={{}}
-      createErrors={{}}
-      onCreate={noop}
-    />
-  );
-  assert.match(loadingMarkup, /role="status"/);
-  assert.match(loadingMarkup, /aria-busy="true"/);
-  assert.match(loadingMarkup, /The agent is reviewing the local project and current board/);
-  assert.match(loadingMarkup, /spin/);
-
-  const errorMarkup = renderToStaticMarkup(
-    <TicketSuggestionsModalContent
-      state="error"
-      suggestions={[]}
-      errorMessage="Codex is not authenticated."
-      createStates={{}}
-      createErrors={{}}
-      onCreate={noop}
-      onRetry={noop}
-    />
-  );
-  assert.match(errorMarkup, /role="alert"/);
-  assert.match(errorMarkup, /Codex is not authenticated/);
-  assert.match(errorMarkup, /Retry/);
-
-  const emptyMarkup = renderToStaticMarkup(
-    <TicketSuggestionsModalContent
-      state="ready"
-      suggestions={[]}
-      errorMessage={null}
-      createStates={{}}
-      createErrors={{}}
-      onCreate={noop}
-    />
-  );
-  assert.match(emptyMarkup, /No suggestions returned/);
-});
-
-test("ticket suggestions rows render create, creating, created, and error semantics", () => {
-  const markup = renderToStaticMarkup(
-    <TicketSuggestionsModalContent
-      state="ready"
-      suggestions={[
-        suggestion,
-        { ...suggestion, title: "Refresh draft status", request: "Draft a task to refresh draft status." },
-        { ...suggestion, title: "Stabilize generation retry", request: "Draft a task to stabilize generation retry." }
-      ]}
-      errorMessage={null}
-      createStates={{ 1: "created", 2: "creating" }}
-      createErrors={{ 0: "Codex draft failed to start." }}
-      onCreate={() => undefined}
-    />
-  );
-
-  assert.match(markup, /ticket-suggestions-list/);
-  assert.match(markup, /Tighten board keyboard focus/);
-  assert.match(markup, /Draft a task to tighten board keyboard focus handling/);
-  assert.match(markup, />Create</);
-  assert.match(markup, />Creating\.\.\.</);
-  assert.match(markup, />Created</);
-  assert.match(markup, /aria-label="Create draft for Tighten board keyboard focus"/);
-  assert.match(markup, /aria-label="Created draft for Refresh draft status"/);
-  assert.match(markup, /aria-busy="true"/);
-  assert.match(markup, /disabled=""/);
-  assert.match(markup, /role="alert"/);
-  assert.match(markup, /Codex draft failed to start/);
-  assert.match(markup, /title="Draft a task to stabilize generation retry\."/);
-});
-
 test("create ticket draft messages expose status and alert roles", () => {
   const infoMarkup = renderToStaticMarkup(<CreateTicketDraftMessage kind="info" message="Creating a pending ticket." busy />);
 
@@ -454,6 +517,34 @@ test("floating ticket composer submit button is disabled for blank ideas", () =>
   );
 
   assert.match(markup, /floating-ticket-submit" disabled=""/);
+});
+
+test("board view renders the ticket composer inside the workspace region", () => {
+  const markup = renderWithQueryClient(
+    <BoardView
+      board={boardSnapshot()}
+      projectPath="/tmp/project"
+      defaultEffort="medium"
+      composerRef={undefined}
+      onCreated={() => undefined}
+      query=""
+      ticketNavigationEnabled
+      onQuery={() => undefined}
+      onToggleRepositoryChat={() => undefined}
+      onOpenTicket={() => undefined}
+      onMove={() => undefined}
+      gitMetadata={undefined}
+      repositoryChatOpen={false}
+      onOpenProjectInEditor={async () => ({ ok: false, message: "not implemented" })}
+      setToast={() => undefined}
+    />
+  );
+
+  assert.match(markup, /class="workspace"/);
+  assert.match(markup, /class="workspace-composer-region"/);
+  assert.match(markup, /class="floating-ticket-composer"/);
+  assert.match(markup, /class="board"/);
+  assert.doesNotMatch(markup, /id="repository-chat-panel"/);
 });
 
 test("draft intake question panel renders editable recommended answers", () => {

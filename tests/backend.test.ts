@@ -1030,6 +1030,67 @@ test("codex status reports unavailable when no CLI candidate works", async () =>
   assert.deepEqual(attempted, ["/sdk/codex", "codex"]);
 });
 
+test("codex status reports unauthenticated when the CLI is installed without auth file or API key", async () => {
+  const status = await getCodexStatus({
+    resolveCodexCli: async () => ({ candidate: { source: "path", command: "codex" }, version: "codex-cli 0.130.0" }),
+    hasApiKey: async () => false,
+    hasAuthFile: async () => false
+  });
+
+  assert.equal(status.cliAvailable, true);
+  assert.equal(status.cliVersion, "codex-cli 0.130.0");
+  assert.equal(status.authenticated, false);
+  assert.equal(status.message, "Codex CLI is available, but no Codex auth file or API key was found.");
+});
+
+test("codex status reports authenticated when an API key is available", async () => {
+  const status = await getCodexStatus({
+    resolveCodexCli: async () => ({ candidate: { source: "path", command: "codex" }, version: "codex-cli 0.130.0" }),
+    hasApiKey: async () => true,
+    hasAuthFile: async () => false
+  });
+
+  assert.equal(status.cliAvailable, true);
+  assert.equal(status.cliVersion, "codex-cli 0.130.0");
+  assert.equal(status.authenticated, true);
+  assert.equal(status.message, "Codex is available.");
+});
+
+test("codex status resolves auth checks in parallel with cli discovery", async () => {
+  const order: string[] = [];
+  const status = await getCodexStatus({
+    resolveCodexCli: async () => {
+      order.push("cli");
+      return { candidate: { source: "path", command: "codex" }, version: "codex-cli 0.130.0" };
+    },
+    hasApiKey: async () => {
+      order.push("api-key");
+      return false;
+    },
+    hasAuthFile: async () => {
+      order.push("auth-file");
+      return true;
+    }
+  });
+
+  assert.equal(status.authenticated, true);
+  assert.ok(order.includes("cli"));
+  assert.ok(order.includes("api-key"));
+  assert.ok(order.includes("auth-file"));
+});
+
+test("codex status returns a terminal unavailable payload when cli discovery hangs", async () => {
+  const status = await getCodexStatus({
+    resolveCodexCli: () => new Promise(() => undefined),
+    hasApiKey: async () => false,
+    hasAuthFile: async () => false
+  });
+
+  assert.equal(status.cliAvailable, false);
+  assert.equal(status.authenticated, false);
+  assert.match(status.message, /timed out/i);
+});
+
 test("createCodex passes the resolved CLI candidate as codexPathOverride", async () => {
   const candidates: CodexCliCandidate[] = [
     { source: "bundled", command: "/sdk/codex" },

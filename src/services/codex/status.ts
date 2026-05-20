@@ -6,17 +6,16 @@ import { resolveAvailableCodexCli, type CodexCliResolution } from "./cli";
 
 export type CodexStatusDependencies = {
   resolveCodexCli?: () => Promise<CodexCliResolution | null>;
+  hasApiKey?: () => Promise<boolean>;
+  hasAuthFile?: () => Promise<boolean>;
 };
 
-const getCodexStatusPromise = async (dependencies: CodexStatusDependencies = {}): Promise<CodexStatus> => {
-  const cliResolution = await (dependencies.resolveCodexCli ?? resolveAvailableCodexCli)();
-  const cliAvailable = Boolean(cliResolution);
-  const cliVersion = cliResolution?.version ?? null;
-
-  let authenticated: boolean | null = null;
-  const hasApiKey = await runBackendEffect(
+const resolveHasApiKey = (): Promise<boolean> =>
+  runBackendEffect(
     ElectronApp.use((electronApp) => electronApp.env.pipe(Effect.map((env) => Boolean(env.OPENAI_API_KEY || env.CODEX_API_KEY))))
   );
+
+const resolveHasAuthFile = async (): Promise<boolean> => {
   try {
     await runBackendEffect(
       Effect.gen(function*() {
@@ -27,10 +26,34 @@ const getCodexStatusPromise = async (dependencies: CodexStatusDependencies = {})
         yield* fs.readFileString(path.join(home, ".codex", "auth.json"), "utf8");
       })
     );
-    authenticated = true;
+    return true;
   } catch {
-    authenticated = hasApiKey ? true : false;
+    return false;
   }
+};
+
+const CODEX_STATUS_RESOLVE_TIMEOUT_MS = 12_000;
+
+const unavailableCodexStatus = (message: string): CodexStatus => ({
+  sdkAvailable: true,
+  cliAvailable: false,
+  cliVersion: null,
+  authenticated: false,
+  message
+});
+
+const getCodexStatusPromise = async (dependencies: CodexStatusDependencies = {}): Promise<CodexStatus> => {
+  const resolveCodexCli = dependencies.resolveCodexCli ?? resolveAvailableCodexCli;
+  const hasApiKey = dependencies.hasApiKey ?? resolveHasApiKey;
+  const hasAuthFile = dependencies.hasAuthFile ?? resolveHasAuthFile;
+  const [cliResolution, apiKeyPresent, authFilePresent] = await Promise.all([
+    resolveCodexCli(),
+    hasApiKey(),
+    hasAuthFile()
+  ]);
+  const cliAvailable = Boolean(cliResolution);
+  const cliVersion = cliResolution?.version ?? null;
+  const authenticated = authFilePresent || apiKeyPresent;
 
   return {
     sdkAvailable: true,
@@ -38,12 +61,28 @@ const getCodexStatusPromise = async (dependencies: CodexStatusDependencies = {})
     cliVersion,
     authenticated,
     message: cliAvailable
-      ? authenticated === true
+      ? authenticated
         ? "Codex is available."
         : "Codex CLI is available, but no Codex auth file or API key was found."
       : "Codex CLI was not found in the SDK bundle or on PATH."
   };
 };
 
-export const getCodexStatus = (dependencies: CodexStatusDependencies = {}): Promise<CodexStatus> =>
-  getCodexStatusPromise(dependencies);
+export const getCodexStatus = async (dependencies: CodexStatusDependencies = {}): Promise<CodexStatus> => {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      getCodexStatusPromise(dependencies),
+      new Promise<CodexStatus>((resolve) => {
+        timeoutHandle = setTimeout(
+          () => resolve(unavailableCodexStatus("Codex status check timed out.")),
+          CODEX_STATUS_RESOLVE_TIMEOUT_MS
+        );
+      })
+    ]);
+  } catch {
+    return unavailableCodexStatus("Codex status check failed.");
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+};

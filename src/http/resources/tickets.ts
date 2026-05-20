@@ -1,12 +1,11 @@
 import { Effect } from "effect";
 import { ticketEndpoints } from "@shared/http";
-import type { TicketDraftStartResult, TicketSuggestionsGenerateResult } from "@shared/schemas";
+import type { TicketDraftStartResult } from "@shared/schemas";
 import { fromPromise } from "../../runtime";
 import { BoardWorkflows, TicketWorkflows } from "../../workflows";
 import {
   cancelTicketUpdateRun,
   createDraftIntake,
-  generateTicketSuggestions,
   maybeResumeTicketDraftAfterClarification,
   reconcileTicketQueueState,
   startTicketDraftRun,
@@ -33,15 +32,6 @@ export const ticketRoutes = [
     fromPromise(async (): Promise<TicketDraftStartResult> => {
       try {
         return { ok: true, ...(await startTicketRedraftRun(input, { runEventSink: httpRunEventSink() })) };
-      } catch (error) {
-        return { ok: false, error: ticketDraftErrorToPayload(error) };
-      }
-    })
-  ),
-  route(ticketEndpoints.generateSuggestions, ({ projectPath }) =>
-    fromPromise(async (): Promise<TicketSuggestionsGenerateResult> => {
-      try {
-        return { ok: true, suggestions: await generateTicketSuggestions(projectPath) };
       } catch (error) {
         return { ok: false, error: ticketDraftErrorToPayload(error) };
       }

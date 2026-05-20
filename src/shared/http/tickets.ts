@@ -16,8 +16,7 @@ import {
   ticketRecordSchema,
   ticketRedraftInputSchema,
   ticketReferenceCandidateSchema,
-  ticketSaveInputSchema,
-  ticketSuggestionsGenerateResultSchema
+  ticketSaveInputSchema
 } from "../schemas";
 import { arrayOf, defineEndpoint } from "./contract";
 import {
@@ -45,12 +44,6 @@ export const ticketEndpoints = {
     path: "/api/tickets/redraft",
     request: { location: "body", schema: ticketRedraftInputSchema },
     response: ticketDraftStartResultSchema
-  }),
-  generateSuggestions: defineEndpoint({
-    method: "POST",
-    path: "/api/tickets/suggestions",
-    request: { location: "body", schema: projectPathRequestSchema },
-    response: ticketSuggestionsGenerateResultSchema
   }),
   createManual: defineEndpoint({
     method: "POST",

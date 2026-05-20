@@ -36,15 +36,13 @@ import {
   type TicketDraftErrorCode,
   type TicketDraftErrorPayload,
   type TicketRedraftInput,
-  type TicketRecord,
-  type TicketSuggestion
+  type TicketRecord
 } from "@shared/schemas";
 import { resolvedBlockerLabel, resolveTicketBlockers } from "@shared/blockers";
 import {
   agentTicketUpdateSchema,
   draftIntakeResultSchema,
-  ticketDraftSchema,
-  ticketSuggestionsResponseSchema
+  ticketDraftSchema
 } from "@shared/schemas";
 import { extractClarificationRequest } from "../clarificationParser";
 import { type BackendEffect, type BackendServices, fromPromise, runBackendEffect } from "../../runtime";
@@ -561,32 +559,6 @@ const agentTicketUpdateSchemaJson = {
   }
 } as const;
 
-const ticketSuggestionSchemaJson = {
-  type: "object",
-  additionalProperties: false,
-  required: ["title", "priority", "labels", "rationale", "request"],
-  properties: {
-    title: { type: "string" },
-    priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
-    labels: { type: "array", items: { type: "string" } },
-    rationale: { type: "string" },
-    request: { type: "string" }
-  }
-} as const;
-
-const ticketSuggestionsResponseSchemaJson = {
-  type: "object",
-  additionalProperties: false,
-  required: ["suggestions"],
-  properties: {
-    suggestions: {
-      type: "array",
-      maxItems: 10,
-      items: ticketSuggestionSchemaJson
-    }
-  }
-} as const;
-
 const parseJsonResponse = (value: string): unknown => {
   try {
     return JSON.parse(value);
@@ -674,14 +646,6 @@ const createCodexStructuredAgentProvider = (
 
 const structuredAgentProviderForDraft = (dependencies: TicketDraftDependencies): StructuredAgentProvider =>
   dependencies.agentProvider ?? createCodexStructuredAgentProvider({ createCodexClient: dependencies.createCodexClient });
-
-export type TicketSuggestionDependencies = {
-  getStatus?: () => Promise<CodexStatus>;
-  createCodexClient?: () => TicketDraftCodexClient;
-  createRequestId?: () => string;
-  nowMs?: () => number;
-  abortController?: AbortController;
-};
 
 export type RepositoryChatThread = Pick<Thread, "run"> & Partial<Pick<Thread, "id">>;
 
@@ -851,45 +815,6 @@ const normalizeTicketDraftError = (
   );
 };
 
-const normalizeTicketSuggestionError = (
-  error: unknown,
-  context: {
-    requestId: string;
-    durationMs: number;
-    signalAborted: boolean;
-  }
-): TicketDraftServiceError => {
-  if (error instanceof TicketDraftServiceError) return error;
-  if (context.signalAborted || isAbortLikeError(error)) {
-    return ticketDraftError(
-      "cancelled",
-      context.requestId,
-      context.durationMs,
-      "Agent ticket suggestion generation was cancelled.",
-      "codex_suggestion_generation_cancelled",
-      { cause: error }
-    );
-  }
-  if (isRelaySchemaError(error) || error instanceof SyntaxError || errorMessage(error, "").includes("valid JSON")) {
-    return ticketDraftError(
-      "invalid_response",
-      context.requestId,
-      context.durationMs,
-      "The agent returned invalid ticket suggestions. Retry generation when ready.",
-      "invalid_codex_suggestion_response",
-      { cause: error }
-    );
-  }
-  return ticketDraftError(
-    "backend_failure",
-    context.requestId,
-    context.durationMs,
-    errorMessage(error, "Ticket suggestion generation failed."),
-    "codex_suggestion_backend_failure",
-    { cause: error }
-  );
-};
-
 export const ticketDraftErrorToPayload = (error: unknown): TicketDraftErrorPayload => {
   if (error instanceof TicketDraftServiceError) return error.toPayload();
   return {
@@ -1010,39 +935,11 @@ const reportTicketDraftProgress = async (dependencies: TicketDraftDependencies, 
   }
 };
 
-const TICKET_SUGGESTION_LIMIT = 10;
-
 const truncatePromptText = (value: string, maxLength: number): string => {
   const normalized = normalizeWhitespace(value);
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
 };
-
-const normalizeSuggestionLabels = (labels: string[]): string[] => {
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-  for (const label of labels) {
-    const next = normalizeWhitespace(label);
-    if (!next || seen.has(next)) continue;
-    seen.add(next);
-    normalized.push(next);
-  }
-  return normalized;
-};
-
-const normalizeTicketSuggestion = (suggestion: TicketSuggestion): TicketSuggestion => ({
-  title: normalizeWhitespace(suggestion.title),
-  priority: suggestion.priority,
-  labels: normalizeSuggestionLabels(suggestion.labels),
-  rationale: normalizeWhitespace(suggestion.rationale) || "Suggested after reviewing the local project and current board.",
-  request: normalizeWhitespace(suggestion.request)
-});
-
-const normalizeTicketSuggestions = (suggestions: TicketSuggestion[]): TicketSuggestion[] =>
-  suggestions
-    .map(normalizeTicketSuggestion)
-    .filter((suggestion) => suggestion.title.length > 0 && suggestion.request.length > 0)
-    .slice(0, TICKET_SUGGESTION_LIMIT);
 
 const formatBoardTicketsForSuggestionPrompt = (board: Awaited<ReturnType<typeof readBoard>>): string => {
   if (board.tickets.length === 0) return "No existing tickets are on the board.";
@@ -1388,96 +1285,6 @@ export const sendRepositoryChatMessage = async (
       durationMs: durationMs()
     });
     throw error;
-  }
-};
-
-export const generateTicketSuggestions = async (
-  projectPath: string,
-  dependencies: TicketSuggestionDependencies = {}
-): Promise<TicketSuggestion[]> => {
-  const requestId = dependencies.createRequestId?.() ?? newId("tsg");
-  const startedAt = dependencies.nowMs?.() ?? Date.now();
-  const nowMs = dependencies.nowMs ?? Date.now;
-  const durationMs = (): number => Math.max(0, nowMs() - startedAt);
-  const abortController = dependencies.abortController ?? new AbortController();
-  const logBase = { requestId, projectPath };
-
-  await logInfo("codex:suggestions", "starting ticket suggestion generation", logBase);
-
-  try {
-    const status = await (dependencies.getStatus ?? getCodexStatus)();
-    if (!status.cliAvailable) {
-      await logWarn("codex:suggestions", "codex cli unavailable", { ...logBase, durationMs: durationMs(), status });
-      throw ticketDraftError(
-        "codex_unavailable",
-        requestId,
-        durationMs(),
-        "Codex CLI was not found in the SDK bundle or on PATH. Install or expose Codex before generating ticket suggestions.",
-        "codex_cli_unavailable"
-      );
-    }
-    if (status.authenticated === false) {
-      await logWarn("codex:suggestions", "codex auth unavailable", { ...logBase, durationMs: durationMs(), status });
-      throw ticketDraftError(
-        "codex_unauthenticated",
-        requestId,
-        durationMs(),
-        "Codex is not authenticated. Run `codex login` in your terminal, then try generating ticket suggestions again.",
-        "codex_auth_unavailable"
-      );
-    }
-
-    const [config, board] = await Promise.all([readProjectConfig(projectPath), readBoard(projectPath)]);
-    const codex = dependencies.createCodexClient?.() ?? (await createCodex());
-    const thread = codex.startThread(await ticketUpdateThreadOptionsForProject(projectPath));
-    const prompt = `You are helping Relay suggest project tickets for a local software project.
-
-Review the local project in read-only mode and propose up to ${TICKET_SUGGESTION_LIMIT} task-sized ticket ideas that a coding agent could turn into implementation-ready drafts.
-
-Rules:
-- Do not create, edit, move, rename, or delete tickets or project files.
-- Do not implement any suggestion.
-- Network access and web search are disabled; rely on local files plus the board context below.
-- Avoid obvious duplicates of existing board tickets.
-- Prefer concrete, scoped tasks over vague cleanup or broad epics.
-- Each suggestion request should be concise because it will be passed directly to Relay's existing createDraft flow with preferredTicketType "task".
-
-Return only data matching the requested schema. Use:
-- title: concise ticket title.
-- priority: one of low, medium, high, urgent.
-- labels: short project-relevant labels.
-- rationale: one short reason this is worth drafting now.
-- request: a short rough idea string suitable for createDraft.
-
-Project path: ${projectPath}
-Project name: ${config.name}
-Current board columns: ${config.columns.map((column) => column.name).join(", ")}
-
-Current board tickets:
-${formatBoardTicketsForSuggestionPrompt(board)}`;
-
-    const turn = await thread.run(prompt, { outputSchema: ticketSuggestionsResponseSchemaJson, signal: abortController.signal });
-    const parsed = parseSchema(ticketSuggestionsResponseSchema, parseJsonResponse(turn.finalResponse));
-    const suggestions = normalizeTicketSuggestions(parsed.suggestions);
-    await logInfo("codex:suggestions", "ticket suggestion generation completed", {
-      ...logBase,
-      durationMs: durationMs(),
-      suggestionCount: suggestions.length
-    });
-    return suggestions;
-  } catch (error) {
-    const suggestionError = normalizeTicketSuggestionError(error, {
-      requestId,
-      durationMs: durationMs(),
-      signalAborted: abortController.signal.aborted
-    });
-    const failureMeta = { ...logBase, ...suggestionError.toPayload() };
-    if (suggestionError.code === "timeout" || suggestionError.code === "cancelled") {
-      await logWarn("codex:suggestions", "ticket suggestion generation did not complete", failureMeta);
-    } else {
-      await logError("codex:suggestions", "ticket suggestion generation failed", suggestionError, failureMeta);
-    }
-    throw suggestionError;
   }
 };
 

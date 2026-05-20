@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks2mr9r43r8xe0kkyzz7cdez",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks2mr9r8maad9snt5vwt7p9f",
+  "runId": "run_01ks2mr9r43r8xe0kkyzz7cdez",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks2mr9r8maad9snt5vwt7p9f:run_01ks2mr9r43r8xe0kkyzz7cdez",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-20T12:11:19.179Z",
+  "updatedAt": "2026-05-20T12:13:41.682Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks2mr9reb9rjsz7f1gg6gnfq",
+    "leaseToken": "lease_01ks2mr9re6gqeehk7stqjvpm0",
+    "executor": "agent",
+    "providerId": "codex",
+    "claimedAt": "2026-05-20T12:11:19.182Z",
+    "heartbeatAt": "2026-05-20T12:11:19.183Z",
+    "startedAt": "2026-05-20T12:11:19.183Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "When i open the chat panel it works but when i close it again then the UI breaks, so doesnt close properly and restore",
+    "priority": "medium",
+    "effort": "medium",
+    "preferredTicketType": "task",
+    "draftScope": "quick_bug",
+    "runIntake": true,
+    "runId": "run_01ks2mr9r43r8xe0kkyzz7cdez",
+    "ticketId": "tkt_01ks2mr9r8maad9snt5vwt7p9f"
+  },
+  "metadata": {
+    "providerId": "codex",
+    "executor": "agent"
+  },
+  "message": "Ticket draft completed.",
+  "result": {
+    "ticketId": "tkt_01ks2mr9r8maad9snt5vwt7p9f",
+    "title": "Fix repository chat close path so the renderer layout fully restores"
+  }
+}

@@ -36,7 +36,6 @@ export const relayQueryKeys = {
   ticketClarifications: (projectPath: ProjectPath, ticketId: TicketId) =>
     ["relay", "ticket", projectPath ?? null, ticketId ?? null, "clarifications"] as const,
   ticketReferences: (projectPath: ProjectPath) => ["relay", "ticket-references", projectPath ?? null] as const,
-  ticketSuggestions: (projectPath: ProjectPath) => ["relay", "ticket-suggestions", projectPath ?? null] as const,
   codexStatus: ["relay", "codex", "status"] as const,
   gitMetadata: (projectPath: ProjectPath) => ["relay", "git-metadata", projectPath ?? null] as const,
   runEvents: (projectPath: ProjectPath, ticketId: TicketId, runId: RunId) =>
@@ -102,25 +101,14 @@ export const useTicketReferencesQuery = (projectPath: ProjectPath) =>
     enabled: Boolean(projectPath)
   });
 
-export const useTicketSuggestionsQuery = (projectPath: ProjectPath, enabled: boolean) =>
-  useQuery({
-    queryKey: relayQueryKeys.ticketSuggestions(projectPath),
-    queryFn: () => relayApi.tickets.generateSuggestions({ projectPath: projectPath as string }),
-    enabled: Boolean(projectPath) && enabled,
-    staleTime: 0
-  });
-
 export const useCodexStatusQuery = () =>
   useQuery({
     queryKey: relayQueryKeys.codexStatus,
     queryFn: () => relayApi.codex.status(),
-    initialData: {
-      sdkAvailable: false,
-      cliAvailable: false,
-      cliVersion: null,
-      authenticated: null,
-      message: "Checking Codex..."
-    } satisfies CodexStatus
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 4_000)
   });
 
 export const useProjectGitMetadataQuery = (projectPath: ProjectPath, options?: GitMetadataOptions) =>
@@ -181,7 +169,12 @@ export const useRefreshCodexStatusMutation = () => {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => relayApi.codex.status(),
-    onSuccess: (status) => queryClient.setQueryData(relayQueryKeys.codexStatus, status)
+    onSuccess: (status) => {
+      queryClient.setQueryData(relayQueryKeys.codexStatus, status);
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: relayQueryKeys.codexStatus });
+    }
   });
 };
 

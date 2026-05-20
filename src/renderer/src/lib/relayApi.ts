@@ -44,8 +44,7 @@ import type {
   TicketRecord,
   TicketRedraftInput,
   TicketReferenceCandidate,
-  TicketSaveInput,
-  TicketSuggestionsGenerateResult
+  TicketSaveInput
 } from "@shared/schemas";
 
 type RelayApiConfig = {
@@ -83,7 +82,6 @@ export type RelayApiClient = {
     readonly intakeDraft: (input: DraftIntakeInput) => Promise<DraftIntakeResult>;
     readonly createDraft: (input: CreateDraftInput) => Promise<TicketDraftStartResult>;
     readonly redraft: (input: TicketRedraftInput) => Promise<TicketDraftStartResult>;
-    readonly generateSuggestions: (input: { readonly projectPath: string }) => Promise<TicketSuggestionsGenerateResult>;
     readonly createManual: (input: { readonly projectPath: string; readonly input: TicketCreateInput }) => Promise<TicketRecord>;
     readonly createSubticket: (input: EpicSubticketCreateInput) => Promise<TicketRecord>;
     readonly linkSubticket: (input: EpicSubticketLinkInput) => Promise<BoardSnapshot>;
@@ -203,7 +201,6 @@ export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => 
     intakeDraft: (input) => call(config, ticketEndpoints.intakeDraft, input),
     createDraft: (input) => call(config, ticketEndpoints.createDraft, input),
     redraft: (input) => call(config, ticketEndpoints.redraft, input),
-    generateSuggestions: (input) => call(config, ticketEndpoints.generateSuggestions, input),
     createManual: (input) => call(config, ticketEndpoints.createManual, input),
     createSubticket: (input) => call(config, ticketEndpoints.createSubticket, input),
     linkSubticket: (input) => call(config, ticketEndpoints.linkSubticket, input),
@@ -268,7 +265,6 @@ export const relayApi: RelayApiClient = {
     intakeDraft: (input) => activeClient().tickets.intakeDraft(input),
     createDraft: (input) => activeClient().tickets.createDraft(input),
     redraft: (input) => activeClient().tickets.redraft(input),
-    generateSuggestions: (input) => activeClient().tickets.generateSuggestions(input),
     createManual: (input) => activeClient().tickets.createManual(input),
     createSubticket: (input) => activeClient().tickets.createSubticket(input),
     linkSubticket: (input) => activeClient().tickets.linkSubticket(input),

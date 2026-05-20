@@ -2,9 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { openProjectInEditorFromHeader, ProjectEditorDropdown, ProjectSidebar } from "../src/renderer/src/App";
-import type { ProjectEditorId, ProjectOpenInEditorInput, ProjectSummary } from "../src/shared/schemas";
+import type { CodexStatus, ProjectEditorId, ProjectOpenInEditorInput, ProjectSummary } from "../src/shared/schemas";
 
 const projectPath = "/tmp/relay-sidebar-project";
+
+const codexStatus = (patch: Partial<CodexStatus> = {}): CodexStatus => ({
+  sdkAvailable: true,
+  cliAvailable: true,
+  cliVersion: "codex-cli 0.130.0",
+  authenticated: true,
+  message: "Codex is available.",
+  ...patch
+});
 
 const project = (patch: Partial<ProjectSummary> = {}): ProjectSummary => ({
   projectId: "prj_sidebar",
@@ -40,6 +49,11 @@ const renderSidebar = (
       onReveal={() => undefined}
       onToggleVisibility={() => undefined}
       toggleShortcutLabel={toggleShortcutLabel}
+      codexStatus={codexStatus()}
+      codexStatusLoading={false}
+      codexStatusError={false}
+      codexStatusRefreshing={false}
+      onRefreshCodexStatus={() => undefined}
       defaultExpandedProjectPaths={defaultExpandedProjectPaths}
     />
   );
@@ -63,6 +77,19 @@ test("project sidebar heading exposes hide and add project controls", () => {
   assert.match(markup, /aria-expanded="true"/);
   assert.match(markup, /aria-keyshortcuts="Meta\+B Control\+B"/);
   assert.match(markup, /aria-label="Add project"/);
+});
+
+test("project sidebar renders per-project reveal and remove icon actions", () => {
+  const markup = renderSidebar([project()], [], null);
+
+  assert.match(markup, /class="project-folder-actions"/);
+  assert.match(markup, /aria-label="Reveal Sidebar Project in Finder"/);
+  assert.match(markup, /title="Reveal in Finder"/);
+  assert.match(markup, /aria-label="Remove Sidebar Project from Relay"/);
+  assert.match(markup, /title="Remove from Relay"/);
+  assert.doesNotMatch(markup, /class="sidebar-actions"/);
+  assert.doesNotMatch(markup, />Reveal</);
+  assert.doesNotMatch(markup, />Remove</);
 });
 
 test("expanded project sidebar shows all swimlanes including zero-count lanes", () => {

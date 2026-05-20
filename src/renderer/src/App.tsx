@@ -10,7 +10,7 @@ import {
   Clock,
   Code2,
   Copy,
-  ExternalLink,
+  Eye,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -20,13 +20,14 @@ import {
   Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
+  PlugZap,
   Play,
   Plus,
   RefreshCw,
   Save,
   Search,
   Send,
-  Sparkles,
   Trash2,
   X
 } from "lucide-react";
@@ -37,6 +38,7 @@ import { RELAY_IN_PROGRESS_STATUS } from "@shared/schemas";
 import type {
   BoardSnapshot,
   ClarificationQuestion,
+  CodexStatus,
   CodexRunPreflightResult,
   DraftIntakeQuestion,
   DraftIntakeResult,
@@ -55,7 +57,6 @@ import type {
   TicketPriority,
   TicketReferenceCandidate,
   TicketRecord,
-  TicketSuggestion,
   TicketSummary,
   TicketType
 } from "@shared/schemas";
@@ -69,7 +70,7 @@ import { AgentActivityPanel, AgentLogViewer, AgentProgressSummary } from "./comp
 import { ClarificationPanel } from "./components/ClarificationPanel";
 import { GitMetadataPill, loadingGitMetadata } from "./components/GitMetadata";
 import { MarkdownBlock } from "./components/MarkdownBlock";
-import { Button, Dialog, DialogBackdrop, Dropdown, DropdownSelect, Field, Input, Select, Textarea } from "./components/ui";
+import { Button, Dialog, DialogBackdrop, Dropdown, DropdownSelect, Field, IconButton, Input, Select, Textarea } from "./components/ui";
 import { formatElapsedDuration, isAgentSessionActive, mergeRunEvents } from "./lib/agentProgress";
 import {
   attachmentMarkdownBlock,
@@ -110,7 +111,6 @@ import {
   usePreflightRunMutation,
   useProjectGitMetadataQuery,
   useProjectsQuery,
-  useRefreshCodexStatusMutation,
   useRemoveProjectMutation,
   useRedraftTicketMutation,
   useRepositoryChatMutation,
@@ -126,7 +126,6 @@ import {
   useTicketClarificationsQuery,
   useTicketQuery,
   useTicketReferencesQuery,
-  useTicketSuggestionsQuery,
   useUnlinkSubticketMutation
 } from "./lib/relayQueries";
 import {
@@ -136,11 +135,30 @@ import {
   type TicketMentionToken
 } from "./lib/ticketReferences";
 
-type Toast = { kind: "info" | "error" | "success"; message: string } | null;
-type TicketSuggestionCreateState = "idle" | "creating" | "created";
-type TicketSuggestionLoadState = "loading" | "error" | "ready";
+export type Toast = { kind: "info" | "error" | "success"; message: string } | null;
 type TicketMarkdownMode = "preview" | "edit";
+type CodexRailTone = "loading" | "ok" | "warning" | "error";
 export type RepositoryChatMessage = { id: string; role: "user" | "assistant"; text: string };
+export type RepositoryChatShellState = {
+  repositoryChatActive: boolean;
+  repositoryChatPanelVisible: boolean;
+};
+
+export function getRepositoryChatShellState({
+  board,
+  selectedPath,
+  repositoryChatOpen
+}: {
+  board: BoardSnapshot | null;
+  selectedPath: string | null;
+  repositoryChatOpen: boolean;
+}): RepositoryChatShellState {
+  const repositoryChatActive = Boolean(board && selectedPath && repositoryChatOpen);
+  return {
+    repositoryChatActive,
+    repositoryChatPanelVisible: repositoryChatActive
+  };
+}
 type DraftMessageKind = "info" | "error";
 type ActiveTicketReferenceMention = {
   token: TicketMentionToken;
@@ -168,6 +186,36 @@ export type TicketReferenceMenuLayoutInput = {
   desiredMaxHeight?: number;
   minimumUsableHeight?: number;
 };
+
+export const TOAST_AUTO_DISMISS_MS = 5000;
+
+export const toastRole = (toast: Exclude<Toast, null>): "alert" | "status" => (toast.kind === "error" ? "alert" : "status");
+
+export const scheduleToastDismissal = (
+  toast: Toast,
+  dismiss: () => void,
+  schedule: (callback: () => void, delay: number) => ReturnType<typeof setTimeout> = setTimeout
+): ReturnType<typeof setTimeout> | null => {
+  if (!toast) return null;
+  return schedule(dismiss, TOAST_AUTO_DISMISS_MS);
+};
+
+export function ToastNotification({
+  toast,
+  onDismiss
+}: {
+  toast: Exclude<Toast, null>;
+  onDismiss: () => void;
+}): ReactElement {
+  return (
+    <div className={clsx("toast", toast.kind)} role={toastRole(toast)}>
+      <div className="toast-message">{toast.message}</div>
+      <IconButton className="toast-dismiss" onClick={onDismiss} aria-label="Dismiss notification">
+        <X size={16} />
+      </IconButton>
+    </div>
+  );
+}
 
 export const getTicketReferenceMenuLayout = ({
   anchorRect,
@@ -689,6 +737,119 @@ export const emptyColumnMessage = (columnName: string): { title: string; detail:
   };
 };
 
+export type CodexStatusDisplayOptions = {
+  readonly isLoading?: boolean;
+  readonly isError?: boolean;
+};
+
+export const getCodexStatusDisplay = (
+  codexStatus: CodexStatus | undefined,
+  options: CodexStatusDisplayOptions = {}
+): { tone: CodexRailTone; label: string } => {
+  const isLoading = options.isLoading ?? false;
+  const isError = options.isError ?? false;
+
+  if (!codexStatus) {
+    if (isLoading) {
+      return { tone: "loading", label: "Codex: Checking..." };
+    }
+    if (isError) {
+      return { tone: "error", label: "Codex: Unavailable" };
+    }
+    return { tone: "loading", label: "Codex: Checking..." };
+  }
+  if (codexStatus.authenticated === null) {
+    if (!codexStatus.cliAvailable) {
+      return { tone: "error", label: "Codex: Not installed" };
+    }
+    return { tone: "warning", label: "Codex: Not connected" };
+  }
+  if (!codexStatus.cliAvailable) {
+    return { tone: "error", label: "Codex: Not installed" };
+  }
+  if (codexStatus.authenticated === true) {
+    return { tone: "ok", label: "Codex: Connected" };
+  }
+  return { tone: "warning", label: "Codex: Not connected" };
+};
+
+export const codexStatusConnected = (tone: CodexRailTone): boolean => tone === "ok";
+
+/** @deprecated Use {@link getCodexStatusDisplay}. */
+export const getCodexStatusRailDisplay = getCodexStatusDisplay;
+
+export function CodexCollapsedStatusIndicator({
+  codexStatus,
+  isLoading = false,
+  isError = false,
+  isRefreshing = false,
+  onRefresh
+}: {
+  codexStatus: CodexStatus | undefined;
+  isLoading?: boolean;
+  isError?: boolean;
+  isRefreshing?: boolean;
+  onRefresh: () => void;
+}): ReactElement {
+  const display = getCodexStatusDisplay(codexStatus, { isLoading, isError });
+  const connected = codexStatusConnected(display.tone);
+  const busy = isLoading || isRefreshing;
+
+  return (
+    <Button
+      type="button"
+      className={clsx(
+        "sidebar-floating-button",
+        "sidebar-codex-indicator-button",
+        connected ? "connected" : "disconnected"
+      )}
+      onClick={onRefresh}
+      aria-label={display.label}
+      title={display.label}
+      aria-busy={busy || undefined}
+    >
+      {busy ? <Loader2 className="spin" size={16} /> : connected ? <PlugZap size={16} /> : <Plug size={16} />}
+    </Button>
+  );
+}
+
+export function CodexSidebarStatus({
+  codexStatus,
+  isLoading = false,
+  isError = false,
+  isRefreshing = false,
+  onRefresh
+}: {
+  codexStatus: CodexStatus | undefined;
+  isLoading?: boolean;
+  isError?: boolean;
+  isRefreshing?: boolean;
+  onRefresh: () => void;
+}): ReactElement {
+  const display = getCodexStatusDisplay(codexStatus, { isLoading, isError });
+  const connected = codexStatusConnected(display.tone);
+
+  return (
+    <div className={clsx("sidebar-codex-status", display.tone, connected && "connected")}>
+      <span className="sidebar-codex-status-label">{display.label}</span>
+      <Button
+        type="button"
+        className="sidebar-codex-status-refresh"
+        onClick={onRefresh}
+        aria-label="Refresh Codex status"
+        title="Refresh Codex status"
+        aria-busy={isRefreshing || undefined}
+        disabled={isRefreshing}
+      >
+        {isRefreshing ? <Loader2 className="spin" size={12} /> : <RefreshCw size={12} />}
+      </Button>
+    </div>
+  );
+}
+
+/** @deprecated Use {@link CodexSidebarStatus}. */
+export const CodexStatusRail = CodexSidebarStatus;
+
 // Markdown audit: create-ticket drafts, ticket detail bodies, clarification text,
 // and generated Codex completion/final-response console events use MarkdownBlock.
 // Board excerpts and command output stay plain text because they are summaries/logs.
@@ -754,6 +915,11 @@ export function ProjectSidebar({
   onReveal,
   onToggleVisibility,
   toggleShortcutLabel,
+  codexStatus,
+  codexStatusLoading,
+  codexStatusError,
+  codexStatusRefreshing,
+  onRefreshCodexStatus,
   defaultExpandedProjectPaths = []
 }: {
   projects: ProjectSummary[];
@@ -765,6 +931,11 @@ export function ProjectSidebar({
   onReveal: (projectPath: string) => void;
   onToggleVisibility: () => void;
   toggleShortcutLabel: string;
+  codexStatus: CodexStatus | undefined;
+  codexStatusLoading: boolean;
+  codexStatusError: boolean;
+  codexStatusRefreshing: boolean;
+  onRefreshCodexStatus: () => void;
   defaultExpandedProjectPaths?: string[];
 }): ReactElement {
   const [expandedProjectPaths, setExpandedProjectPaths] = useState<Set<string>>(
@@ -830,28 +1001,52 @@ export function ProjectSidebar({
           const projectActiveLabel = project.activeRunCount > 0 ? `, ${activeTaskCountLabel(project.activeRunCount)}` : "";
           return (
             <div className="project-group" key={project.path} role="listitem">
-              <Button
-                type="button"
+              <div
                 className={clsx("project-folder-row", selectedPath === project.path && "selected", expanded && "expanded")}
-                onClick={() => handleProjectClick(project.path)}
-                aria-current={selectedPath === project.path ? "page" : undefined}
-                aria-expanded={expanded}
-                aria-controls={swimlaneListId}
-                aria-label={`${expanded ? "Collapse" : "Expand"} ${project.name} swimlanes${projectActiveLabel}`}
               >
-                <ProjectFolderIcon className="project-folder-icon" size={18} aria-hidden="true" />
-                <span className="project-folder-name" title={project.name}>
-                  {project.name}
-                </span>
-                <span className="project-folder-status" aria-hidden="true">
-                  {project.health !== "ok" && <AlertTriangle size={13} />}
-                  {project.activeRunCount > 0 && (
-                    <span className="project-folder-active" title={activeTaskCountLabel(project.activeRunCount)}>
-                      <CircleDashed size={13} />
-                    </span>
-                  )}
-                </span>
-              </Button>
+                <button
+                  type="button"
+                  className="project-folder-main"
+                  onClick={() => handleProjectClick(project.path)}
+                  aria-current={selectedPath === project.path ? "page" : undefined}
+                  aria-expanded={expanded}
+                  aria-controls={swimlaneListId}
+                  aria-label={`${expanded ? "Collapse" : "Expand"} ${project.name} swimlanes${projectActiveLabel}`}
+                >
+                  <ProjectFolderIcon className="project-folder-icon" size={18} aria-hidden="true" />
+                  <span className="project-folder-name" title={project.name}>
+                    {project.name}
+                  </span>
+                  <span className="project-folder-status" aria-hidden="true">
+                    {project.health !== "ok" && <AlertTriangle size={13} />}
+                    {project.activeRunCount > 0 && (
+                      <span className="project-folder-active" title={activeTaskCountLabel(project.activeRunCount)}>
+                        <CircleDashed size={13} />
+                      </span>
+                    )}
+                  </span>
+                </button>
+                <div className="project-folder-actions">
+                  <Button
+                    type="button"
+                    className="project-folder-action-button"
+                    onClick={() => onReveal(project.path)}
+                    aria-label={`Reveal ${project.name} in Finder`}
+                    title="Reveal in Finder"
+                  >
+                    <Eye size={14} aria-hidden="true" />
+                  </Button>
+                  <Button
+                    type="button"
+                    className="project-folder-action-button"
+                    onClick={() => onRemove(project.path)}
+                    aria-label={`Remove ${project.name} from Relay`}
+                    title="Remove from Relay"
+                  >
+                    <Trash2 size={14} aria-hidden="true" />
+                  </Button>
+                </div>
+              </div>
               {expanded && (
                 <div id={swimlaneListId} className="project-swimlane-list" role="list" aria-label={`${project.name} swimlanes`}>
                   {project.swimlanes.length > 0 ? (
@@ -893,18 +1088,15 @@ export function ProjectSidebar({
         })}
       </div>
 
-      {selectedPath && (
-        <div className="sidebar-actions">
-          <Button className="sidebar-action-button" onClick={() => onReveal(selectedPath)}>
-            <ExternalLink size={15} />
-            Reveal
-          </Button>
-          <Button className="sidebar-action-button" onClick={() => onRemove(selectedPath)}>
-            <X size={15} />
-            Remove
-          </Button>
-        </div>
-      )}
+      <div className="sidebar-footer">
+        <CodexSidebarStatus
+          codexStatus={codexStatus}
+          isLoading={codexStatusLoading}
+          isError={codexStatusError}
+          isRefreshing={codexStatusRefreshing}
+          onRefresh={onRefreshCodexStatus}
+        />
+      </div>
     </aside>
   );
 }
@@ -1081,12 +1273,15 @@ function DraggableCard({
   );
 }
 
-function BoardView({
+export function BoardView({
   board,
+  projectPath,
+  defaultEffort,
+  composerRef,
+  onCreated,
   query,
   ticketNavigationEnabled,
   onQuery,
-  onGenerateTickets,
   onToggleRepositoryChat,
   onOpenTicket,
   onMove,
@@ -1096,10 +1291,13 @@ function BoardView({
   setToast
 }: {
   board: BoardSnapshot;
+  projectPath: string;
+  defaultEffort: TicketEffort;
+  composerRef?: RefObject<HTMLTextAreaElement | null>;
+  onCreated: () => void | Promise<void>;
   query: string;
   ticketNavigationEnabled: boolean;
   onQuery: (query: string) => void;
-  onGenerateTickets: () => void;
   onToggleRepositoryChat: () => void;
   onOpenTicket: (ticketId: string) => void;
   onMove: (event: DragEndEvent) => void;
@@ -1234,14 +1432,6 @@ function BoardView({
           >
             <MessageCircle size={16} />
           </Button>
-          <Button
-            className="topbar-button topbar-generate-button"
-            onClick={onGenerateTickets}
-            title="Generate ticket suggestions"
-          >
-            <Sparkles size={16} />
-            Generate Tickets
-          </Button>
         </div>
       </div>
 
@@ -1259,148 +1449,47 @@ function BoardView({
         </div>
       )}
 
-      <DndContext sensors={sensors} onDragEnd={onMove}>
-        <p className="sr-only" id="ticket-navigation-shortcuts">
-          Use {ticketNavigationShortcutLabel} to move between tickets. Tab moves through controls normally.
-        </p>
-        <div
-          ref={boardRef}
-          className={clsx("board", selectedTicketId && "board-has-focus")}
-          tabIndex={orderedTicketIds.length > 0 ? 0 : undefined}
-          aria-describedby="ticket-navigation-shortcuts"
-          aria-keyshortcuts="ArrowDown ArrowUp ArrowRight ArrowLeft J K"
-          title={`Move between tickets: ${ticketNavigationShortcutLabel}. Tab moves through controls normally.`}
-        >
-          {board.columns.map((column) => (
-            <DroppableColumn
-              key={column.id}
-              column={column}
-              tickets={orderedTickets.filter((ticket) => ticket.status === column.id)}
-              allTickets={board.tickets}
-              columns={board.columns}
-              selectedTicketId={selectedTicketId}
-              onOpen={onOpenTicket}
-              onTicketFocus={setSelectedTicketId}
-              onTicketButtonRef={setTicketButtonRef}
-              now={now}
-            />
-          ))}
-        </div>
-      </DndContext>
-    </main>
-  );
-}
-
-export function TicketSuggestionsModalContent({
-  state,
-  suggestions,
-  errorMessage,
-  createStates,
-  createErrors,
-  onCreate,
-  onRetry
-}: {
-  state: TicketSuggestionLoadState;
-  suggestions: TicketSuggestion[];
-  errorMessage: string | null;
-  createStates: Record<number, TicketSuggestionCreateState>;
-  createErrors: Record<number, string | undefined>;
-  onCreate: (index: number) => void;
-  onRetry?: () => void;
-}): ReactElement {
-  if (state === "loading") {
-    return (
-      <div className="draft-message ticket-suggestions-status" role="status" aria-busy="true">
-        <Loader2 className="spin" size={15} />
-        <span>The agent is reviewing the local project and current board.</span>
-      </div>
-    );
-  }
-
-  if (state === "error") {
-    return (
-      <div className="draft-message error ticket-suggestions-status" role="alert">
-        <AlertTriangle size={15} />
-        <span>{errorMessage ?? "Unable to generate ticket suggestions."}</span>
-        {onRetry && (
-          <Button type="button" onClick={onRetry}>
-            <RefreshCw size={14} />
-            Retry
-          </Button>
-        )}
-      </div>
-    );
-  }
-
-  if (suggestions.length === 0) {
-    return (
-      <div className="ticket-suggestions-empty" role="status">
-        <strong>No suggestions returned</strong>
-        <span>The agent did not find a task-sized ticket that was distinct from the current board.</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="ticket-suggestions-list" aria-label="Generated ticket suggestions">
-      {suggestions.map((suggestion, index) => {
-        const createState = createStates[index] ?? "idle";
-        const createError = createErrors[index];
-        const created = createState === "created";
-        const creating = createState === "creating";
-        return (
-          <article
-            className={clsx("ticket-suggestion-row", created && "created")}
-            key={`${suggestion.title}-${index}`}
-            aria-busy={creating || undefined}
+      <div className="workspace-board-region">
+        <DndContext sensors={sensors} onDragEnd={onMove}>
+          <p className="sr-only" id="ticket-navigation-shortcuts">
+            Use {ticketNavigationShortcutLabel} to move between tickets. Tab moves through controls normally.
+          </p>
+          <div
+            ref={boardRef}
+            className={clsx("board", selectedTicketId && "board-has-focus")}
+            tabIndex={orderedTicketIds.length > 0 ? 0 : undefined}
+            aria-describedby="ticket-navigation-shortcuts"
+            aria-keyshortcuts="ArrowDown ArrowUp ArrowRight ArrowLeft J K"
+            title={`Move between tickets: ${ticketNavigationShortcutLabel}. Tab moves through controls normally.`}
           >
-            <div className="ticket-suggestion-main">
-              <div className="ticket-suggestion-heading">
-                <h3 title={suggestion.title}>{suggestion.title}</h3>
-                <span
-                  className={clsx("priority", suggestion.priority)}
-                  title={`${suggestion.priority} priority`}
-                  aria-label={`${suggestion.priority} priority`}
-                >
-                  {suggestion.priority}
-                </span>
-              </div>
-              {suggestion.labels.length > 0 && (
-                <div className="labels ticket-suggestion-labels">
-                  {suggestion.labels.map((label) => (
-                    <span key={label} title={label}>
-                      {label}
-                    </span>
-                  ))}
-                </div>
-              )}
-              <p title={suggestion.rationale}>{suggestion.rationale}</p>
-              <div className="ticket-suggestion-request">
-                <span>Request</span>
-                <strong title={suggestion.request}>{suggestion.request}</strong>
-              </div>
-              {createError && (
-                <div className="draft-message error ticket-suggestion-create-error" role="alert">
-                  <AlertTriangle size={14} />
-                  <span>{createError}</span>
-                </div>
-              )}
-            </div>
-            <Button
-              type="button"
-              className="primary-button ticket-suggestion-create"
-              onClick={() => onCreate(index)}
-              disabled={creating || created}
-              aria-busy={creating || undefined}
-              aria-label={`${created ? "Created draft for" : "Create draft for"} ${suggestion.title}`}
-            >
-              {creating ? <Loader2 className="spin" size={16} /> : created ? <Check size={16} /> : <Plus size={16} />}
-              {creating ? "Creating..." : created ? "Created" : "Create"}
-            </Button>
-          </article>
-        );
-      })}
-    </div>
+            {board.columns.map((column) => (
+              <DroppableColumn
+                key={column.id}
+                column={column}
+                tickets={orderedTickets.filter((ticket) => ticket.status === column.id)}
+                allTickets={board.tickets}
+                columns={board.columns}
+                selectedTicketId={selectedTicketId}
+                onOpen={onOpenTicket}
+                onTicketFocus={setSelectedTicketId}
+                onTicketButtonRef={setTicketButtonRef}
+                now={now}
+              />
+            ))}
+          </div>
+        </DndContext>
+        <div className="workspace-composer-region">
+          <FloatingTicketComposer
+            key={projectPath}
+            projectPath={projectPath}
+            defaultEffort={defaultEffort}
+            composerRef={composerRef}
+            onCreated={onCreated}
+            setToast={setToast}
+          />
+        </div>
+      </div>
+    </main>
   );
 }
 
@@ -1589,116 +1678,6 @@ function RepositoryChatPanel({
       onAnswerCopied={(kind) => setToast(copyToast(kind))}
       onAnswerCopyError={(error) => setToast({ kind: "error", message: error instanceof Error ? error.message : "Unable to copy." })}
     />
-  );
-}
-
-function TicketSuggestionsModal({
-  projectPath,
-  onClose,
-  onCreated,
-  setToast
-}: {
-  projectPath: string;
-  onClose: () => void;
-  onCreated: () => void | Promise<void>;
-  setToast: (toast: Toast) => void;
-}): ReactElement {
-  const [createStates, setCreateStates] = useState<Record<number, TicketSuggestionCreateState>>({});
-  const [createErrors, setCreateErrors] = useState<Record<number, string | undefined>>({});
-  const suggestionsQuery = useTicketSuggestionsQuery(projectPath, true);
-  const createDraftMutation = useCreateDraftMutation();
-  const suggestionsResult = suggestionsQuery.data;
-  const state: TicketSuggestionLoadState =
-    suggestionsQuery.isLoading || suggestionsQuery.isFetching ? "loading" : suggestionsQuery.error || suggestionsResult?.ok === false ? "error" : "ready";
-  const suggestions = suggestionsResult?.ok ? suggestionsResult.suggestions : [];
-  const errorMessage = suggestionsQuery.error
-    ? relayErrorMessage(suggestionsQuery.error, "Unable to generate ticket suggestions.")
-    : suggestionsResult?.ok === false
-      ? suggestionsResult.error.message
-      : null;
-
-  useShortcutOverlay({
-    id: "ticket-suggestions-modal",
-    priority: 100,
-    onEscape: () => {
-      onClose();
-      return true;
-    }
-  });
-
-  useEffect(() => {
-    if (errorMessage) setToast({ kind: "error", message: errorMessage });
-  }, [errorMessage, setToast]);
-
-  const startGeneration = useCallback((): void => {
-    setCreateStates({});
-    setCreateErrors({});
-    void suggestionsQuery.refetch();
-  }, [suggestionsQuery]);
-
-  const createSuggestion = async (index: number): Promise<void> => {
-    const suggestion = suggestions[index];
-    if (!suggestion) return;
-
-    setCreateStates((current) => ({ ...current, [index]: "creating" }));
-    setCreateErrors((current) => ({ ...current, [index]: undefined }));
-    try {
-      const result = await createDraftMutation.mutateAsync({
-        projectPath,
-        idea: suggestion.request,
-        preferredTicketType: "task",
-        runIntake: true
-      });
-      if (!result.ok) {
-        setCreateStates((current) => ({ ...current, [index]: "idle" }));
-        setCreateErrors((current) => ({ ...current, [index]: result.error.message }));
-        setToast({ kind: "error", message: result.error.message });
-        return;
-      }
-
-      setCreateStates((current) => ({ ...current, [index]: "created" }));
-      setToast({ kind: "info", message: `Agent draft started for ${result.ticket.frontMatter.title}.` });
-      try {
-        await onCreated();
-      } catch (error) {
-        setToast({ kind: "error", message: error instanceof Error ? error.message : "Unable to refresh board." });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to create a draft from this suggestion.";
-      setCreateStates((current) => ({ ...current, [index]: "idle" }));
-      setCreateErrors((current) => ({ ...current, [index]: message }));
-      setToast({ kind: "error", message });
-    }
-  };
-
-  return (
-    <DialogBackdrop>
-      <Dialog className="modal ticket-suggestions-modal" aria-labelledby="ticket-suggestions-title">
-        <header>
-          <div>
-            <h2 id="ticket-suggestions-title">Generate Tickets</h2>
-            <p>The agent suggests task-sized drafts from the local project and current board.</p>
-          </div>
-          <Button className="icon-button" onClick={onClose} aria-label="Close generated ticket suggestions dialog">
-            <X size={18} />
-          </Button>
-        </header>
-
-        <TicketSuggestionsModalContent
-          state={state}
-          suggestions={suggestions}
-          errorMessage={errorMessage}
-          createStates={createStates}
-          createErrors={createErrors}
-          onCreate={(index) => void createSuggestion(index)}
-          onRetry={startGeneration}
-        />
-
-        <div className="modal-footer">
-          <Button onClick={onClose}>Close</Button>
-        </div>
-      </Dialog>
-    </DialogBackdrop>
   );
 }
 
@@ -3441,7 +3420,6 @@ function RelayApp(): ReactElement {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState<Toast>(null);
-  const [ticketSuggestionsOpen, setTicketSuggestionsOpen] = useState(false);
   const [repositoryChatOpen, setRepositoryChatOpen] = useState(false);
   const [openTicketId, setOpenTicketId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -3455,6 +3433,9 @@ function RelayApp(): ReactElement {
   const board = boardQuery.data ?? null;
   const codexStatusQuery = useCodexStatusQuery();
   const codexStatus = codexStatusQuery.data;
+  const codexStatusLoading = !codexStatus && (codexStatusQuery.isPending || codexStatusQuery.isFetching);
+  const codexStatusError = codexStatusQuery.isError && !codexStatus;
+  const codexStatusRefreshing = codexStatusQuery.isFetching && Boolean(codexStatus);
   const gitMetadataQuery = useProjectGitMetadataQuery(board?.project.path ?? selectedPath, { force: true });
   const selectedGitMetadata = gitMetadataQuery.data ?? (gitMetadataQuery.error ? gitMetadataError(relayErrorMessage(gitMetadataQuery.error, "Unable to load Git metadata.")) : undefined);
   const addProjectMutation = useAddProjectMutation();
@@ -3462,14 +3443,19 @@ function RelayApp(): ReactElement {
   const revealProjectMutation = useRevealProjectMutation();
   const openProjectInEditorMutation = useOpenProjectInEditorMutation();
   const moveTicketMutation = useMoveTicketMutation();
-  const refreshCodexStatusMutation = useRefreshCodexStatusMutation();
   const loading = projectsQuery.isLoading || addProjectMutation.isPending;
+
+  useEffect(() => {
+    const timeoutId = scheduleToastDismissal(toast, () => setToast(null));
+    return () => {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    };
+  }, [toast]);
 
   const selectProject = useCallback(
     (projectPath: string | null) => {
       if (projectPath === selectedPath) return;
       setOpenTicketId(null);
-      setTicketSuggestionsOpen(false);
       setRepositoryChatOpen(false);
       setQuery("");
       setSelectedPath(projectPath);
@@ -3495,7 +3481,6 @@ function RelayApp(): ReactElement {
 
   useEffect(() => {
     setOpenTicketId(null);
-    setTicketSuggestionsOpen(false);
     setRepositoryChatOpen(false);
   }, [selectedPath]);
 
@@ -3551,7 +3536,25 @@ function RelayApp(): ReactElement {
     () => events.filter((event) => event.projectPath === selectedPath && event.ticketId === openTicketId),
     [events, openTicketId, selectedPath]
   );
-  const createShortcutEnabled = Boolean(board && selectedPath && !ticketSuggestionsOpen && !repositoryChatOpen && !openTicketId);
+  const repositoryChatShellState = useMemo(
+    () => getRepositoryChatShellState({ board, selectedPath, repositoryChatOpen }),
+    [board, repositoryChatOpen, selectedPath]
+  );
+  const createShortcutEnabled = Boolean(board && selectedPath && !repositoryChatShellState.repositoryChatActive && !openTicketId);
+  const openRepositoryChat = useCallback((): void => {
+    if (!board || !selectedPath) return;
+    setRepositoryChatOpen(true);
+  }, [board, selectedPath]);
+  const closeRepositoryChat = useCallback((): void => {
+    setRepositoryChatOpen(false);
+  }, []);
+  const toggleRepositoryChat = useCallback((): void => {
+    if (repositoryChatShellState.repositoryChatActive) {
+      closeRepositoryChat();
+      return;
+    }
+    openRepositoryChat();
+  }, [closeRepositoryChat, openRepositoryChat, repositoryChatShellState.repositoryChatActive]);
 
   useKeyboardShortcut({
     id: "toggle-sidebar",
@@ -3580,8 +3583,7 @@ function RelayApp(): ReactElement {
         "app-shell",
         sidebarCollapsed && "sidebar-collapsed",
         openTicketId && "detail-open",
-        repositoryChatOpen && "chat-open",
-        ticketSuggestionsOpen && "modal-open"
+        repositoryChatShellState.repositoryChatActive && "chat-open"
       )}
     >
       <ProjectSidebar
@@ -3597,34 +3599,51 @@ function RelayApp(): ReactElement {
         onReveal={(projectPath) => void revealProjectMutation.mutate(projectPath)}
         onToggleVisibility={toggleSidebar}
         toggleShortcutLabel={sidebarShortcutLabel}
+        codexStatus={codexStatus}
+        codexStatusLoading={codexStatusLoading}
+        codexStatusError={codexStatusError}
+        codexStatusRefreshing={codexStatusRefreshing}
+        onRefreshCodexStatus={() => void codexStatusQuery.refetch()}
       />
 
       {sidebarCollapsed && (
-        <Button
-          className="sidebar-restore-button"
-          onClick={toggleSidebar}
-          aria-label={`Show sidebar (${sidebarShortcutLabel})`}
-          title={`Show sidebar (${sidebarShortcutLabel})`}
-          aria-controls="project-sidebar"
-          aria-expanded={false}
-          aria-keyshortcuts="Meta+B Control+B"
-        >
-          <PanelLeftOpen size={17} />
-        </Button>
+        <>
+          <Button
+            className="sidebar-floating-button sidebar-restore-button"
+            onClick={toggleSidebar}
+            aria-label={`Show sidebar (${sidebarShortcutLabel})`}
+            title={`Show sidebar (${sidebarShortcutLabel})`}
+            aria-controls="project-sidebar"
+            aria-expanded={false}
+            aria-keyshortcuts="Meta+B Control+B"
+          >
+            <PanelLeftOpen size={17} />
+          </Button>
+          <CodexCollapsedStatusIndicator
+            codexStatus={codexStatus}
+            isLoading={codexStatusLoading}
+            isError={codexStatusError}
+            isRefreshing={codexStatusRefreshing}
+            onRefresh={() => void codexStatusQuery.refetch()}
+          />
+        </>
       )}
 
-      {board ? (
+      {board && selectedPath ? (
         <BoardView
           board={board}
+          projectPath={selectedPath}
+          defaultEffort={board.config?.settings.defaultTicketEffort ?? "medium"}
+          composerRef={floatingComposerRef}
+          onCreated={refreshAll}
           query={query}
-          ticketNavigationEnabled={!ticketSuggestionsOpen && !openTicketId}
+          ticketNavigationEnabled={!openTicketId}
           onQuery={setQuery}
-          onGenerateTickets={() => setTicketSuggestionsOpen(true)}
-          onToggleRepositoryChat={() => setRepositoryChatOpen((open) => !open)}
+          onToggleRepositoryChat={toggleRepositoryChat}
           onOpenTicket={setOpenTicketId}
           onMove={(event) => void moveTicket(event)}
           gitMetadata={selectedGitMetadata}
-          repositoryChatOpen={repositoryChatOpen}
+          repositoryChatOpen={repositoryChatShellState.repositoryChatActive}
           onOpenProjectInEditor={(input) => openProjectInEditorMutation.mutateAsync(input)}
           setToast={setToast}
         />
@@ -3639,45 +3658,12 @@ function RelayApp(): ReactElement {
         </main>
       )}
 
-      <aside className="status-rail">
-        <div className={clsx("codex-status", codexStatus.cliAvailable && "ok")}>
-          <Code2 size={17} />
-          <div>
-            <strong>Codex</strong>
-            <span>{codexStatus.cliVersion ?? codexStatus.message}</span>
-          </div>
-          <Button onClick={() => refreshCodexStatusMutation.mutate()} aria-label="Refresh Codex status">
-            <RefreshCw size={14} />
-          </Button>
-        </div>
-      </aside>
-
-      {board && selectedPath && repositoryChatOpen && (
+      {repositoryChatShellState.repositoryChatPanelVisible && board && selectedPath && (
         <RepositoryChatPanel
           key={selectedPath}
           projectPath={selectedPath}
           projectName={board.project.name}
-          onClose={() => setRepositoryChatOpen(false)}
-          setToast={setToast}
-        />
-      )}
-
-      {board && selectedPath && (
-        <FloatingTicketComposer
-          key={selectedPath}
-          projectPath={selectedPath}
-          defaultEffort={board.config?.settings.defaultTicketEffort ?? "medium"}
-          composerRef={floatingComposerRef}
-          onCreated={refreshAll}
-          setToast={setToast}
-        />
-      )}
-
-      {board && selectedPath && ticketSuggestionsOpen && (
-        <TicketSuggestionsModal
-          projectPath={selectedPath}
-          onClose={() => setTicketSuggestionsOpen(false)}
-          onCreated={refreshAll}
+          onClose={closeRepositoryChat}
           setToast={setToast}
         />
       )}
@@ -3695,15 +3681,7 @@ function RelayApp(): ReactElement {
         />
       )}
 
-      {toast && (
-        <div
-          className={clsx("toast", toast.kind)}
-          onClick={() => setToast(null)}
-          role={toast.kind === "error" ? "alert" : "status"}
-        >
-          {toast.message}
-        </div>
-      )}
+      {toast && <ToastNotification toast={toast} onDismiss={() => setToast(null)} />}
     </div>
   );
 }

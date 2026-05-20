@@ -8,7 +8,6 @@ export type AgentWorkKind =
   | "ticket.draft_intake"
   | "ticket.update"
   | "ticket.implementation"
-  | "ticket.suggestions"
   | "repository.chat";
 
 export type AgentWebSearchMode = "disabled" | "cached" | "live";

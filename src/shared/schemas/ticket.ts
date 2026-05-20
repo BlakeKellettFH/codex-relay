@@ -205,25 +205,6 @@ export const ticketDraftStartResultSchema = Schema.Union([
 ]);
 export type TicketDraftStartResult = SchemaType<typeof ticketDraftStartResultSchema>;
 
-export const ticketSuggestionSchema = strictStruct({
-  title: Schema.String,
-  priority: ticketPrioritySchema,
-  labels: stringArrayWithDefault(),
-  rationale: Schema.String,
-  request: Schema.String
-});
-export type TicketSuggestion = SchemaType<typeof ticketSuggestionSchema>;
-
-export const ticketSuggestionsResponseSchema = strictStruct({
-  suggestions: withDefault(mutableArray(ticketSuggestionSchema), () => [])
-});
-
-export const ticketSuggestionsGenerateResultSchema = Schema.Union([
-  Schema.Struct({ ok: Schema.Literal(true), suggestions: mutableArray(ticketSuggestionSchema) }),
-  Schema.Struct({ ok: Schema.Literal(false), error: ticketDraftErrorPayloadSchema })
-]);
-export type TicketSuggestionsGenerateResult = SchemaType<typeof ticketSuggestionsGenerateResultSchema>;
-
 export const agentTicketUpdateSchema = strictStruct({
   title: nonEmptyString,
   priority: ticketPrioritySchema,

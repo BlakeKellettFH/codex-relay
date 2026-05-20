@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks2kpdhxkxhb8pkb0pp4ebrq",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks2kpdj26bj6mafvmamgh0zx",
+  "runId": "run_01ks2kpdhxkxhb8pkb0pp4ebrq",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks2kpdj26bj6mafvmamgh0zx:run_01ks2kpdhxkxhb8pkb0pp4ebrq",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-20T11:52:48.967Z",
+  "updatedAt": "2026-05-20T11:55:02.651Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks2kpdjc1rvykk818407m2tk",
+    "leaseToken": "lease_01ks2kpdjcfb20m2gnzrg05pk9",
+    "executor": "agent",
+    "providerId": "codex",
+    "claimedAt": "2026-05-20T11:52:48.972Z",
+    "heartbeatAt": "2026-05-20T11:52:48.973Z",
+    "startedAt": "2026-05-20T11:52:48.973Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "there are alert popups for like ticket created, agent started etc thats at the bottom of the window, though there is no way to close these. I want these to have a close button and also have a automatic close after 5 seconds",
+    "priority": "medium",
+    "effort": "medium",
+    "preferredTicketType": "task",
+    "draftScope": "task",
+    "runIntake": true,
+    "runId": "run_01ks2kpdhxkxhb8pkb0pp4ebrq",
+    "ticketId": "tkt_01ks2kpdj26bj6mafvmamgh0zx"
+  },
+  "metadata": {
+    "providerId": "codex",
+    "executor": "agent"
+  },
+  "message": "Ticket draft completed.",
+  "result": {
+    "ticketId": "tkt_01ks2kpdj26bj6mafvmamgh0zx",
+    "title": "Add dismissible auto-closing toast notifications"
+  }
+}

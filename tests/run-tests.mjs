@@ -22,13 +22,14 @@ const entryPoints = [
   path.join(testsDir, "markdown-block.test.tsx"),
   path.join(testsDir, "http-rest-api.test.ts"),
   path.join(testsDir, "project-sidebar.test.tsx"),
+  path.join(testsDir, "repository-chat-shell-state.test.ts"),
   path.join(testsDir, "renderer-query-hooks.test.tsx"),
   path.join(testsDir, "run-events.test.ts"),
   path.join(testsDir, "schemas.test.ts"),
   path.join(testsDir, "ticket-references.test.ts"),
   path.join(testsDir, "ticket-draft.test.ts"),
-  path.join(testsDir, "ticket-suggestions.test.ts"),
   path.join(testsDir, "ticket-draft-ui.test.tsx"),
+  path.join(testsDir, "toast-notification.test.tsx"),
   path.join(testsDir, "ticket-update.test.ts")
 ];
 const electronShimPlugin = {

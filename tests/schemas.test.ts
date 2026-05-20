@@ -8,8 +8,7 @@ import {
   rendererRunEventSchema,
   runLogLineSchema,
   ticketDraftSchema,
-  ticketFrontMatterSchema,
-  ticketSuggestionsResponseSchema
+  ticketFrontMatterSchema
 } from "../src/shared/schemas";
 import { isRelaySchemaError, parseSchema } from "../src/services/schemas";
 import type { TicketDraftSubticket } from "../src/shared/schemas";
@@ -245,41 +244,6 @@ test("ticket draft schema rejects task drafts with subtickets", () => {
   });
 
   assert.equal(epic.subtickets.length, 1);
-});
-
-test("ticket suggestion schema validates strict suggestion responses", () => {
-  const parsed = parseSchema(ticketSuggestionsResponseSchema, {
-    suggestions: [
-      {
-        title: "Add focused ticket generation",
-        priority: "medium",
-        labels: ["tickets"],
-        rationale: "Board-level suggestions help seed draft work.",
-        request: "Draft a task for focused ticket suggestion generation."
-      }
-    ]
-  });
-
-  assert.equal(parsed.suggestions.length, 1);
-  parsed.suggestions[0].labels.push("mutable");
-  assert.deepEqual(parsed.suggestions[0].labels, ["tickets", "mutable"]);
-
-  assert.throws(
-    () =>
-      parseSchema(ticketSuggestionsResponseSchema, {
-        suggestions: [
-          {
-            title: "Unexpected extra",
-            priority: "medium",
-            labels: [],
-            rationale: "Extras should be rejected.",
-            request: "Draft a task.",
-            extra: "rejected"
-          }
-        ]
-      }),
-    (error) => expectSchemaError(error, /Unexpected key/)
-  );
 });
 
 test("event schemas decode timestamps, preserve record payloads, and reject invalid inputs", () => {

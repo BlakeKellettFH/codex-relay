@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks2kajj7ys9yah32cm49bdsc",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks2jdyht7jkbte7a9vjtv814",
+  "runId": "run_01ks2kajj7ys9yah32cm49bdsc",
+  "subject": "ticket",
+  "action": "update",
+  "kind": "ticket.update",
+  "idempotencyKey": "ticket.update:/Users/blakekellett/repos/codex-relay:tkt_01ks2jdyht7jkbte7a9vjtv814:run_01ks2kajj7ys9yah32cm49bdsc",
+  "status": "failed",
+  "attempts": 1,
+  "createdAt": "2026-05-20T11:46:20.885Z",
+  "updatedAt": "2026-05-20T11:46:27.237Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks2kajknzp3md7bhycp8f1x5",
+    "leaseToken": "lease_01ks2kajknx4csztxbk80ncm3q",
+    "executor": "agent",
+    "providerId": "codex",
+    "claimedAt": "2026-05-20T11:46:20.917Z",
+    "heartbeatAt": "2026-05-20T11:46:20.918Z",
+    "startedAt": "2026-05-20T11:46:20.918Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks2jdyht7jkbte7a9vjtv814",
+    "request": "I dont need to see CLI version, instead i just want to see the rail stating \"connected\" in green",
+    "runId": "run_01ks2kajj7ys9yah32cm49bdsc"
+  },
+  "metadata": {
+    "providerId": "codex",
+    "executor": "agent"
+  },
+  "message": "{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_json_schema\",\n    \"message\": \"Invalid schema for response_format 'codex_output_schema': In context=('properties', 'patch'), 'required' is required to be supplied and to be an array including every key in properties. Missing 'fullMarkdown'.\",\n    \"param\": \"text.format.schema\"\n  },\n  \"status\": 400\n}",
+  "error": {
+    "message": "{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_json_schema\",\n    \"message\": \"Invalid schema for response_format 'codex_output_schema': In context=('properties', 'patch'), 'required' is required to be supplied and to be an array including every key in properties. Missing 'fullMarkdown'.\",\n    \"param\": \"text.format.schema\"\n  },\n  \"status\": 400\n}",
+    "finalStatus": "failed"
+  }
+}
