@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -17,8 +17,10 @@ import {
   type TicketDraftStartDependencies,
   type TicketDraftThread
 } from "../src/services/codex";
+import { parseOpenClarificationQuestionsFromMarkdown } from "../src/services/clarificationParser";
 import {
   answerClarificationQuestion,
+  createClarificationQuestions,
   createTicket,
   initializeProject,
   readBoard,
@@ -109,9 +111,12 @@ const assertStrictSchemaRequiresAllProperties = (schema: unknown, label = "$"): 
   if (objectSchema.items) assertStrictSchemaRequiresAllProperties(objectSchema.items, `${label}[]`);
 };
 
+const samplePlannedFiles = (slug: string): string[] => [`src/${slug}.ts`, `tests/${slug}.test.ts`];
+
 const validDraftJson = (title: string): string =>
   JSON.stringify({
     title,
+    summary: `Lean summary for ${title}.`,
     priority: "medium",
     labels: ["codex"],
     context: "Context from Codex.",
@@ -122,7 +127,8 @@ const validDraftJson = (title: string): string =>
     acceptanceCriteria: ["The requested behavior is covered."],
     clarificationQuestions: [],
     assumptions: [],
-    implementationNotes: ["Keep the change focused."]
+    implementationNotes: ["Keep the change focused."],
+    plannedFiles: samplePlannedFiles(title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))
   });
 
 test("ticket draft output schema requires every declared property for strict response format", async () => {
@@ -146,7 +152,12 @@ test("ticket draft output schema requires every declared property for strict res
 const validDraftIntakeJson = (patch: Partial<Record<string, unknown>> = {}): string =>
   JSON.stringify({
     scope: "quick_bug",
+    planKind: "feature_tree",
     confidence: 0.82,
+    estimatedTouchPoints: 2,
+    rationale: "Small surgical fix with few touch points.",
+    matchedEpicId: null,
+    matchedFeatureId: null,
     knownFacts: ["The bug report names the settings dialog."],
     relatedTicketIds: ["tkt_related_settings"],
     questions: [
@@ -204,7 +215,12 @@ test("draft intake rejects blocker questions without recommended answers", async
       createDraftCodexClient(async () => ({
         finalResponse: JSON.stringify({
           scope: "task",
+          planKind: "feature_tree",
           confidence: 0.6,
+          estimatedTouchPoints: 4,
+          rationale: "Medium feature work.",
+          matchedEpicId: null,
+          matchedFeatureId: null,
           knownFacts: [],
           relatedTicketIds: [],
           questions: [{ question: "Which mode?", whyItMatters: "It changes behavior." }]
@@ -221,6 +237,7 @@ test("draft intake rejects blocker questions without recommended answers", async
 const validEpicDraftJson = (): string =>
   JSON.stringify({
     title: "Account migration epic",
+    summary: "Coordinate account migration across API, UI, and persistence.",
     ticketType: "epic",
     priority: "high",
     labels: ["accounts"],
@@ -229,40 +246,34 @@ const validEpicDraftJson = (): string =>
     requirements: ["Coordinate API, UI, and persistence changes."],
     implementationPlan: ["Create child tickets for each independently shippable slice."],
     testPlan: ["Run the relevant account migration tests for each child ticket."],
-    acceptanceCriteria: ["All generated subtickets can be reviewed before storage."],
+    acceptanceCriteria: ["All generated feature stubs can be reviewed before storage."],
     clarificationQuestions: [],
-    assumptions: ["Use normal task tickets for every child scope."],
+    assumptions: ["Use feature stubs for every child capability."],
     implementationNotes: ["Nested epics are not supported."],
-    subtickets: [
+    subtickets: [],
+    featureStubs: [
       {
         title: "Account API migration",
+        summary: "Move account endpoints to the new API.",
         priority: "high",
         labels: ["api"],
         context: "Move account endpoints to the new API.",
-        researchFindings: ["API routes were identified."],
         requirements: ["Preserve existing account behavior."],
-        implementationPlan: ["Update API handlers and tests."],
-        testPlan: ["Run account API tests."],
-        acceptanceCriteria: ["Account API tests pass."],
-        clarificationQuestions: [],
-        assumptions: [],
-        implementationNotes: []
+        acceptanceCriteria: ["Account API scope is defined."],
+        implementationNotes: ["Tasks are created under this feature later."]
       },
       {
         title: "Account UI migration",
+        summary: "Point account screens at the new API.",
         priority: "medium",
         labels: ["frontend"],
         context: "Point account screens at the new API.",
-        researchFindings: ["Account UI entry points were identified."],
         requirements: ["Keep account status and error states visible."],
-        implementationPlan: ["Update data loading and interaction tests."],
-        testPlan: ["Run account UI tests."],
-        acceptanceCriteria: ["Account UI can complete the migrated workflow."],
-        clarificationQuestions: [],
-        assumptions: [],
+        acceptanceCriteria: ["Account UI scope is defined."],
         implementationNotes: []
       }
-    ]
+    ],
+    leanTasks: []
   });
 
 const clarificationDraftJson = (question = "Which storage backend should this target?"): string =>
@@ -270,6 +281,7 @@ const clarificationDraftJson = (question = "Which storage backend should this ta
     draftState: "needs_clarification",
     blockingClarificationQuestions: [question],
     title: "Blocked implementation draft",
+    summary: "Draft blocked until the storage decision is answered.",
     ticketType: "task",
     priority: "medium",
     labels: ["clarification"],
@@ -282,7 +294,9 @@ const clarificationDraftJson = (question = "Which storage backend should this ta
     clarificationQuestions: [question],
     assumptions: [],
     implementationNotes: ["Drafting is blocked until the user answers the clarification question."],
-    subtickets: []
+    subtickets: [],
+    featureStubs: [],
+    leanTasks: []
   });
 
 test("ticket draft creation succeeds with a mocked Codex response", async () => {
@@ -321,6 +335,9 @@ test("ticket draft creation succeeds with a mocked Codex response", async () => 
   assert.match(prompt, /Make timeouts recoverable/);
   assert.match(prompt, /read-only structured work unit/);
   assert.match(prompt, /Research the codebase and external context directly through your harness/);
+  assert.match(prompt, /Opening paragraph \(2-4 sentences\)/);
+  assert.match(prompt, /2-3 bullet points/);
+  assert.match(prompt, /under 720 characters/);
   assert.equal(signals[0].aborted, false);
   assert.equal(capturedOptions.approvalPolicy, "never");
   assert.equal(capturedOptions.sandboxMode, "read-only");
@@ -329,7 +346,8 @@ test("ticket draft creation succeeds with a mocked Codex response", async () => 
   assert.equal((await readBoard(projectPath)).tickets.length, 0);
   const draftWithSummary = { ...draft, summary: "**Generated** [summary](https://example.test)." };
   assert.equal(ticketDraftDialogSubtext(draftWithSummary), "Generated summary.");
-  const fallbackSubtext = ticketDraftDialogSubtext(draft, 80);
+  const draftWithoutSummary = { ...draft, summary: "" };
+  const fallbackSubtext = ticketDraftDialogSubtext(draftWithoutSummary, 80);
   assert.match(fallbackSubtext, /^Context from Codex\./);
   assert.doesNotMatch(fallbackSubtext, /Recoverable timeout handling/);
   assert.doesNotMatch(fallbackSubtext, /[#*\[\]]/);
@@ -348,6 +366,7 @@ test("ticket draft prompt includes intake answers and applies lean scope budgets
         return {
           finalResponse: JSON.stringify({
             title: "Lean crash fix",
+            summary: "Stop the settings dialog from crashing on open.",
             priority: "medium",
             labels: ["bug"],
             context: "Fix a crash in the settings dialog.",
@@ -362,7 +381,9 @@ test("ticket draft prompt includes intake answers and applies lean scope budgets
             draftState: "ready",
             blockingClarificationQuestions: [],
             ticketType: "task",
-            subtickets: []
+            subtickets: [],
+            featureStubs: [],
+            leanTasks: []
           })
         };
       })
@@ -392,6 +413,25 @@ test("ticket draft prompt includes intake answers and applies lean scope budgets
   assert.equal(draft.requirements.length, 3);
   assert.equal(draft.implementationPlan.length, 3);
   assert.equal(draft.acceptanceCriteria.length, 3);
+});
+
+test("ticket draft prompt requires planned file scope for lean tasks", async () => {
+  const projectPath = await createProject();
+  let prompt = "";
+  const dependencies: TicketDraftDependencies = {
+    getStatus: async () => readyStatus,
+    createRequestId: () => "tdr_prompt_planned_files",
+    createCodexClient: () =>
+      createDraftCodexClient(async (nextPrompt) => {
+        prompt = nextPrompt;
+        return { finalResponse: validDraftJson("Scoped draft") };
+      })
+  };
+
+  await createTicketDraft({ projectPath, idea: "Add workspace settings" }, dependencies);
+
+  assert.match(prompt, /Every leanTask must include plannedFiles/);
+  assert.match(prompt, /exact repo-relative file paths expected to change/);
 });
 
 test("async ticket draft creates a Todo placeholder before Codex completes and applies the draft later", async () => {
@@ -942,7 +982,7 @@ test("ticket draft retry after backend failure uses an independent Codex request
   assert.equal((await readBoard(projectPath)).tickets.length, 0);
 });
 
-test("ticket draft creation supports epic output with reviewable subtickets", async () => {
+test("ticket draft creation supports epic output with reviewable feature stubs", async () => {
   const projectPath = await createProject();
   let prompt = "";
   const dependencies: TicketDraftDependencies = {
@@ -960,12 +1000,15 @@ test("ticket draft creation supports epic output with reviewable subtickets", as
 
   assert.match(prompt, /selected Epic mode/);
   assert.equal(draft.ticketType, "epic");
-  assert.equal(draft.subtickets.length, 2);
+  assert.equal(draft.featureStubs.length, 2);
   assert.equal(createInput.ticketType, "epic");
   assert.equal(createInput.subtickets?.length, 2);
   assert.match(createInput.markdown, /# Account migration epic/);
   assert.match(createInput.subtickets?.[0].markdown ?? "", /# Account API migration/);
   assert.match(createInput.subtickets?.[0].markdown ?? "", /Parent epic: Account migration epic/);
+  assert.equal(createInput.subtickets?.[0].ticketType, "feature");
+  assert.equal(createInput.summary, "Coordinate account migration across API, UI, and persistence.");
+  assert.equal(createInput.subtickets?.[0].summary, "Move account endpoints to the new API.");
   assert.doesNotMatch(createInput.subtickets?.[0].markdown ?? "", /## Research Metadata/);
   assert.equal((await readBoard(projectPath)).tickets.length, 0);
 });
@@ -979,6 +1022,7 @@ test("ticket draft rejects ready plans that defer core research to implementatio
       createDraftCodexClient(async () => ({
         finalResponse: JSON.stringify({
           title: "Deferred research ticket",
+          summary: "Deferred research ticket summary.",
           ticketType: "task",
           priority: "medium",
           labels: ["drafts"],
@@ -991,7 +1035,9 @@ test("ticket draft rejects ready plans that defer core research to implementatio
           clarificationQuestions: [],
           assumptions: [],
           implementationNotes: [],
-          subtickets: []
+          subtickets: [],
+          featureStubs: [],
+          leanTasks: []
         })
       }))
   };
@@ -1015,6 +1061,7 @@ test("ticket draft rejects malformed task output that contains subtickets", asyn
       createDraftCodexClient(async () => ({
         finalResponse: JSON.stringify({
           title: "Malformed task",
+          summary: "Malformed task summary.",
           ticketType: "task",
           priority: "medium",
           labels: [],
@@ -1038,7 +1085,9 @@ test("ticket draft rejects malformed task output that contains subtickets", asyn
               clarificationQuestions: [],
               implementationNotes: []
             }
-          ]
+          ],
+          featureStubs: [],
+          leanTasks: []
         })
       }))
   };
@@ -1051,4 +1100,185 @@ test("ticket draft rejects malformed task output that contains subtickets", asyn
       return true;
     }
   );
+});
+
+test("parseOpenClarificationQuestionsFromMarkdown extracts bullet questions from blocked draft markdown", () => {
+  const markdown = `# Title
+
+## Open Clarification Questions
+
+- Which database should this use?
+- What rollout window applies?
+
+## Research Metadata
+
+- None.`;
+
+  assert.deepEqual(parseOpenClarificationQuestionsFromMarkdown(markdown), [
+    "Which database should this use?",
+    "What rollout window applies?"
+  ]);
+});
+
+test("blocked draft markdown can be materialized into clarification questions when the store is empty", async () => {
+  const projectPath = await createProject();
+  const { runEventSink } = createFakeRunEventSink();
+  const dependencies: TicketDraftStartDependencies = {
+    getStatus: async () => readyStatus,
+    createRunId: () => "run_draft_clarification_reconcile",
+    createRequestId: () => "tdr_draft_clarification_reconcile",
+    runEventSink,
+    createCodexClient: () =>
+      createDraftCodexClient(async () => ({ finalResponse: clarificationDraftJson("Which database should this use?") }))
+  };
+
+  const started = await startTicketDraftRun({ projectPath, idea: "Draft a storage migration ticket" }, dependencies);
+  const ticketId = started.ticket.frontMatter.id;
+
+  await waitFor(async () => (await readTicket(projectPath, ticketId)).frontMatter.runStatus === "blocked", "draft clarification");
+  await rm(path.join(projectPath, ".relay", "clarifications", `${ticketId}.json`), { force: true });
+  assert.equal((await readClarificationQuestions(projectPath, ticketId)).length, 0);
+
+  const blocked = await readTicket(projectPath, ticketId);
+  const parsed = parseOpenClarificationQuestionsFromMarkdown(blocked.markdown);
+  const reconciled = await createClarificationQuestions(
+    projectPath,
+    ticketId,
+    parsed.map((question) => ({ question })),
+    {
+      actor: "system",
+      source: "system_reconciliation",
+      runId: blocked.frontMatter.lastRunId ?? null,
+      codexThreadId: blocked.frontMatter.codexThreadId ?? null
+    }
+  );
+
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0]?.question, "Which database should this use?");
+  assert.equal(reconciled[0]?.source, "system_reconciliation");
+  assert.equal(reconciled[0]?.createdBy, "system");
+});
+
+const emptyHierarchyResearchJson = () => ({
+  generatedAt: "",
+  checkedUrls: [],
+  inspectedFiles: [],
+  limitations: [],
+  limits: {
+    maxResearchMs: 0,
+    maxUrls: 0,
+    maxUrlFetchMs: 0,
+    maxUrlContentChars: 0,
+    maxFilesToScan: 0,
+    maxFilesToRead: 0,
+    maxFileReadChars: 0,
+    maxMatchesPerFile: 0
+  }
+});
+
+const validHierarchyPlanJson = (planKind: string, patch: Record<string, unknown> = {}): string =>
+  JSON.stringify({
+    planKind,
+    draftState: "ready",
+    blockingClarificationQuestions: [],
+    matchedEpicId: null,
+    matchedFeatureId: null,
+    features: [],
+    leanTasks: [],
+    research: emptyHierarchyResearchJson(),
+    ...patch
+  });
+
+test("draft intake downgrades invalid extend_epic match to feature_tree", async () => {
+  const projectPath = await createProject();
+  const dependencies: TicketDraftDependencies = {
+    getStatus: async () => readyStatus,
+    createRequestId: () => "din_downgrade",
+    createCodexClient: () =>
+      createDraftCodexClient(async () => ({
+        finalResponse: validDraftIntakeJson({
+          planKind: "extend_epic",
+          matchedEpicId: "tkt_missing_epic",
+          questions: []
+        })
+      }))
+  };
+
+  const intake = await createDraftIntake({ projectPath, idea: "Add billing export", autoHierarchy: true }, dependencies);
+  assert.equal(intake.planKind, "feature_tree");
+  assert.equal(intake.matchedEpicId, null);
+});
+
+test("auto hierarchy composer draft applies feature_tree from intake", async () => {
+  const projectPath = await createProject();
+  let codexCalls = 0;
+  const dependencies: TicketDraftStartDependencies = {
+    getStatus: async () => readyStatus,
+    createRunId: () => "run_auto_hierarchy",
+    createRequestId: () => "tdr_auto_hierarchy",
+    createCodexClient: () =>
+      createDraftCodexClient(async () => {
+        codexCalls += 1;
+        if (codexCalls === 1) {
+          return {
+            finalResponse: validDraftIntakeJson({
+              planKind: "feature_tree",
+              scope: "product_feature",
+              questions: [],
+              rationale: "Medium feature-sized work."
+            })
+          };
+        }
+        return {
+          finalResponse: validHierarchyPlanJson("feature_tree", {
+            root: {
+              title: "Workspace settings",
+              summary: "Settings area for workspace preferences.",
+              priority: "medium",
+              labels: [],
+              context: "Users need workspace-level settings.",
+              researchFindings: [],
+              requirements: ["Expose workspace settings UI."],
+              implementationPlan: ["Add settings panel."],
+              testPlan: ["npm test"],
+              acceptanceCriteria: ["Settings visible in app."],
+              clarificationQuestions: [],
+              assumptions: [],
+              implementationNotes: []
+            },
+            leanTasks: [
+              {
+                title: "Add settings panel",
+                summary: "Panel shell.",
+                priority: "medium",
+                labels: [],
+                context: "",
+                goal: "Panel",
+                requirements: ["Render panel"],
+                acceptanceCriteria: ["Panel opens"],
+                implementationPlan: ["Create component"],
+                assumptions: [],
+                plannedFiles: samplePlannedFiles("workspace-settings-panel")
+              }
+            ]
+          })
+        };
+      })
+  };
+
+  const started = await startTicketDraftRun(
+    { projectPath, idea: "Add workspace settings", autoHierarchy: true, runIntake: true },
+    dependencies
+  );
+  await waitFor(
+    async () => (await readTicket(projectPath, started.ticket.frontMatter.id)).frontMatter.runStatus === "draft_complete",
+    "auto hierarchy draft completion"
+  );
+  const feature = await readTicket(projectPath, started.ticket.frontMatter.id);
+  assert.equal(feature.frontMatter.ticketType, "feature");
+  assert.equal(feature.frontMatter.title, "Workspace settings");
+  const board = await readBoard(projectPath);
+  const tasks = board.tickets.filter((ticket) => ticket.parentFeatureId === feature.frontMatter.id);
+  assert.equal(tasks.length, 1);
+  assert.deepEqual(tasks[0]?.plannedFiles, samplePlannedFiles("workspace-settings-panel"));
 });

@@ -4,15 +4,17 @@ import type { TicketDraftStartResult } from "@shared/schemas";
 import { fromPromise } from "../../runtime";
 import { BoardWorkflows, TicketWorkflows } from "../../workflows";
 import {
+  approveScopeClarificationRedraft,
   cancelTicketUpdateRun,
   createDraftIntake,
+  maybeFinalizeImplementationScopeAfterClarification,
   maybeResumeTicketDraftAfterClarification,
-  reconcileTicketQueueState,
   startTicketDraftRun,
   startTicketRedraftRun,
   startTicketUpdateRun,
   ticketDraftErrorToPayload
 } from "../../services/codex";
+import { notifyTicketReadyForScheduling } from "../../services/codex/readyTicketScheduler";
 import { logError } from "../../runtime/Logging";
 import { httpRunEventSink } from "./runEventSink";
 import { route, type HttpResourceRoute } from "./types";
@@ -41,6 +43,10 @@ export const ticketRoutes = [
   route(ticketEndpoints.createSubticket, (input) => TicketWorkflows.createSubticket(input)),
   route(ticketEndpoints.linkSubticket, (input) => TicketWorkflows.linkSubticket(input)),
   route(ticketEndpoints.unlinkSubticket, (input) => TicketWorkflows.unlinkSubticket(input)),
+  route(ticketEndpoints.createTaskUnderFeature, (input) => TicketWorkflows.createTaskUnderFeature(input)),
+  route(ticketEndpoints.createFeatureSubticket, (input) => TicketWorkflows.createFeatureSubticket(input)),
+  route(ticketEndpoints.linkFeatureSubticket, (input) => TicketWorkflows.linkFeatureSubticket(input)),
+  route(ticketEndpoints.unlinkFeatureSubticket, (input) => TicketWorkflows.unlinkFeatureSubticket(input)),
   route(ticketEndpoints.startAgentUpdate, (input) =>
     fromPromise(() => startTicketUpdateRun(input, { runEventSink: httpRunEventSink() }))
   ),
@@ -50,14 +56,15 @@ export const ticketRoutes = [
   route(ticketEndpoints.save, (input) =>
     Effect.gen(function*() {
       const saved = yield* TicketWorkflows.saveTicket(input);
-      return yield* fromPromise(() => reconcileTicketQueueState(input.projectPath, saved.frontMatter.id));
+      yield* fromPromise(() => notifyTicketReadyForScheduling(input.projectPath, saved.frontMatter.id));
+      return saved;
     })
   ),
   route(ticketEndpoints.saveAttachment, (input) => TicketWorkflows.saveTicketAttachment(input)),
   route(ticketEndpoints.move, (input) =>
     Effect.gen(function*() {
       yield* TicketWorkflows.moveTicket(input);
-      yield* fromPromise(() => reconcileTicketQueueState(input.projectPath, input.ticketId));
+      yield* fromPromise(() => notifyTicketReadyForScheduling(input.projectPath, input.ticketId));
       return yield* BoardWorkflows.readBoard(input.projectPath);
     })
   ),
@@ -67,6 +74,19 @@ export const ticketRoutes = [
   route(ticketEndpoints.answerClarification, (input) =>
     Effect.gen(function*() {
       const answer = yield* TicketWorkflows.answerClarification(input);
+      void maybeFinalizeImplementationScopeAfterClarification(input.projectPath, input.ticketId)
+        .then((ticket) => {
+          if (ticket?.frontMatter.status === "ready") {
+            return notifyTicketReadyForScheduling(input.projectPath, input.ticketId);
+          }
+        })
+        .catch((error) =>
+          logError("codex:run", "finalize implementation scope after clarification failed", error, {
+            projectPath: input.projectPath,
+            ticketId: input.ticketId,
+            questionId: input.questionId
+          })
+        );
       void maybeResumeTicketDraftAfterClarification(input.projectPath, input.ticketId, {
         runEventSink: httpRunEventSink()
       }).catch((error) =>
@@ -78,6 +98,9 @@ export const ticketRoutes = [
       );
       return answer;
     })
+  ),
+  route(ticketEndpoints.approveScopeClarification, (input) =>
+    fromPromise(() => approveScopeClarificationRedraft(input, { runEventSink: httpRunEventSink() }))
   ),
   route(ticketEndpoints.delete, ({ projectPath, ticketId }) => TicketWorkflows.deleteTicket(projectPath, ticketId)),
   route(ticketEndpoints.duplicate, ({ projectPath, ticketId }) => TicketWorkflows.duplicateTicket(projectPath, ticketId)),

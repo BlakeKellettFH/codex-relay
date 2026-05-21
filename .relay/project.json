@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "projectId": "prj_01krq2pqv96gdv3p7r1nezpttr",
-  "name": "relay",
-  "createdAt": "2026-05-16T00:24:14.953Z",
-  "updatedAt": "2026-05-16T00:24:14.953Z",
+  "projectId": "prj_01ks4ywyd2wstfb1s150q77bf1",
+  "name": "codex-relay",
+  "createdAt": "2026-05-21T09:47:06.018Z",
+  "updatedAt": "2026-05-21T09:47:06.018Z",
   "columns": [
     {
       "id": "todo",
@@ -46,6 +46,12 @@
       "name": "Completed",
       "position": 7000,
       "terminal": true
+    },
+    {
+      "id": "archive",
+      "name": "Archive",
+      "position": 8000,
+      "terminal": true
     }
   ],
   "settings": {
@@ -54,7 +60,6 @@
     "defaultTicketEffort": "medium",
     "defaultApprovalPolicy": "on-request",
     "defaultSandboxMode": "workspace-write",
-    "defaultAgentProvider": "codex",
     "allowNonGitCodexRuns": false,
     "ticketDraftingEnabled": true,
     "codexExecutionEnabled": true,

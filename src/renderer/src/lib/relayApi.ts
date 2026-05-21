@@ -18,6 +18,7 @@ import type {
   CancelRunInput,
   ClarificationAnswerInput,
   ClarificationQuestion,
+  CodexCancelRunResult,
   CodexRunPreflightResult,
   CodexRunStartResult,
   CodexStatus,
@@ -26,6 +27,9 @@ import type {
   DraftIntakeResult,
   EpicSubticketCreateInput,
   EpicSubticketLinkInput,
+  FeatureSubticketCreateInput,
+  FeatureSubticketLinkInput,
+  FeatureTaskCreateRequest,
   GitMetadata,
   GitMetadataOptions,
   ProjectOpenInEditorInput,
@@ -86,6 +90,10 @@ export type RelayApiClient = {
     readonly createSubticket: (input: EpicSubticketCreateInput) => Promise<TicketRecord>;
     readonly linkSubticket: (input: EpicSubticketLinkInput) => Promise<BoardSnapshot>;
     readonly unlinkSubticket: (input: EpicSubticketLinkInput) => Promise<BoardSnapshot>;
+    readonly createTaskUnderFeature: (input: FeatureTaskCreateRequest) => Promise<TicketRecord>;
+    readonly createFeatureSubticket: (input: FeatureSubticketCreateInput) => Promise<TicketRecord>;
+    readonly linkFeatureSubticket: (input: FeatureSubticketLinkInput) => Promise<BoardSnapshot>;
+    readonly unlinkFeatureSubticket: (input: FeatureSubticketLinkInput) => Promise<BoardSnapshot>;
     readonly startAgentUpdate: (input: AgentTicketUpdateInput) => Promise<AgentTicketUpdateStartResult>;
     readonly cancelAgentUpdate: (input: { readonly runId: string }) => Promise<void>;
     readonly references: (input: { readonly projectPath: string }) => Promise<TicketReferenceCandidate[]>;
@@ -95,6 +103,7 @@ export type RelayApiClient = {
     readonly move: (input: TicketMoveInput) => Promise<BoardSnapshot>;
     readonly clarifications: (input: { readonly projectPath: string; readonly ticketId: string }) => Promise<ClarificationQuestion[]>;
     readonly answerClarification: (input: ClarificationAnswerInput) => Promise<ClarificationQuestion>;
+    readonly approveScopeClarification: (input: { readonly projectPath: string; readonly ticketId: string; readonly clarificationQuestionId: string }) => Promise<AgentTicketUpdateStartResult>;
     readonly delete: (input: { readonly projectPath: string; readonly ticketId: string }) => Promise<BoardSnapshot>;
     readonly duplicate: (input: { readonly projectPath: string; readonly ticketId: string }) => Promise<TicketRecord>;
     readonly revealFile: (input: { readonly projectPath: string; readonly ticketId: string }) => Promise<void>;
@@ -104,7 +113,7 @@ export type RelayApiClient = {
     readonly preflightRun: (input: StartRunInput) => Promise<CodexRunPreflightResult>;
     readonly startRun: (input: StartRunInput) => Promise<CodexRunStartResult>;
     readonly resumeRun: (input: StartRunInput) => Promise<CodexRunStartResult>;
-    readonly cancelRun: (input: CancelRunInput) => Promise<void>;
+    readonly cancelRun: (input: CancelRunInput) => Promise<CodexCancelRunResult>;
     readonly approveAction: (input: { readonly approvalId: string; readonly decision: "accept" | "acceptForSession" | "decline" | "cancel" }) => Promise<void>;
     readonly sendRepositoryChatMessage: (input: RepositoryChatInput) => Promise<RepositoryChatResponse>;
     readonly readRunEvents: (input: { readonly projectPath: string; readonly ticketId: string; readonly runId: string }) => Promise<RendererRunEvent[]>;
@@ -205,6 +214,10 @@ export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => 
     createSubticket: (input) => call(config, ticketEndpoints.createSubticket, input),
     linkSubticket: (input) => call(config, ticketEndpoints.linkSubticket, input),
     unlinkSubticket: (input) => call(config, ticketEndpoints.unlinkSubticket, input),
+    createTaskUnderFeature: (input) => call(config, ticketEndpoints.createTaskUnderFeature, input),
+    createFeatureSubticket: (input) => call(config, ticketEndpoints.createFeatureSubticket, input),
+    linkFeatureSubticket: (input) => call(config, ticketEndpoints.linkFeatureSubticket, input),
+    unlinkFeatureSubticket: (input) => call(config, ticketEndpoints.unlinkFeatureSubticket, input),
     startAgentUpdate: (input) => call(config, ticketEndpoints.startAgentUpdate, input),
     cancelAgentUpdate: (input) => call(config, ticketEndpoints.cancelAgentUpdate, input).then(() => undefined),
     references: (input) => call(config, ticketEndpoints.references, input),
@@ -214,6 +227,7 @@ export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => 
     move: (input) => call(config, ticketEndpoints.move, input),
     clarifications: (input) => call(config, ticketEndpoints.clarifications, input),
     answerClarification: (input) => call(config, ticketEndpoints.answerClarification, input),
+    approveScopeClarification: (input) => call(config, ticketEndpoints.approveScopeClarification, input),
     delete: (input) => call(config, ticketEndpoints.delete, input),
     duplicate: (input) => call(config, ticketEndpoints.duplicate, input),
     revealFile: (input) => call(config, ticketEndpoints.revealFile, input).then(() => undefined)
@@ -223,7 +237,7 @@ export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => 
     preflightRun: (input) => call(config, codexEndpoints.preflightRun, input),
     startRun: (input) => call(config, codexEndpoints.startRun, input),
     resumeRun: (input) => call(config, codexEndpoints.resumeRun, input),
-    cancelRun: (input) => call(config, codexEndpoints.cancelRun, input).then(() => undefined),
+    cancelRun: (input) => call(config, codexEndpoints.cancelRun, input),
     approveAction: (input) => call(config, codexEndpoints.approveAction, input).then(() => undefined),
     sendRepositoryChatMessage: (input) => call(config, codexEndpoints.sendRepositoryChatMessage, input),
     readRunEvents: (input) => call(config, codexEndpoints.readRunEvents, input),
@@ -269,6 +283,10 @@ export const relayApi: RelayApiClient = {
     createSubticket: (input) => activeClient().tickets.createSubticket(input),
     linkSubticket: (input) => activeClient().tickets.linkSubticket(input),
     unlinkSubticket: (input) => activeClient().tickets.unlinkSubticket(input),
+    createTaskUnderFeature: (input) => activeClient().tickets.createTaskUnderFeature(input),
+    createFeatureSubticket: (input) => activeClient().tickets.createFeatureSubticket(input),
+    linkFeatureSubticket: (input) => activeClient().tickets.linkFeatureSubticket(input),
+    unlinkFeatureSubticket: (input) => activeClient().tickets.unlinkFeatureSubticket(input),
     startAgentUpdate: (input) => activeClient().tickets.startAgentUpdate(input),
     cancelAgentUpdate: (input) => activeClient().tickets.cancelAgentUpdate(input),
     references: (input) => activeClient().tickets.references(input),

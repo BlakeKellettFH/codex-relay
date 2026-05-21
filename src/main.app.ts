@@ -5,7 +5,10 @@ import { HttpRestApi } from "./http";
 import { ElectronApp } from "./platform";
 import { getLogPath } from "./runtime/Logging";
 import { wakeRecoveredCodexWork } from "./services/codex";
+import { ensureReadyTicketAutomationForAllProjects } from "./services/codex/readyTicketScheduler";
+import { recoverStalePathLocksForAllProjects } from "./services/path-lock";
 import { WorkEngine } from "./services/work";
+import { RegistryStore } from "./services/registry";
 
 const relayApp = Effect.scoped(Effect.gen(function* () {
   const electronApp = yield* ElectronApp;
@@ -42,6 +45,11 @@ const relayApp = Effect.scoped(Effect.gen(function* () {
     yield* Effect.logInfo("Recovered backend work").pipe(Effect.annotateLogs({ scope: "app", count: recoveredCount }));
   }
   yield* Effect.promise(() => wakeRecoveredCodexWork(recovered));
+  const registry = yield* RegistryStore.use((store) => store.read());
+  yield* Effect.promise(() =>
+    recoverStalePathLocksForAllProjects(registry.projects.map((project) => project.path))
+  );
+  ensureReadyTicketAutomationForAllProjects();
 
   yield* electronApp.awaitShutdown();
 }));

@@ -28,6 +28,29 @@ const parseQuestionsJson = (value: string): ClarificationQuestionCreateInput[] =
     .slice(0, 10);
 };
 
+const OPEN_CLARIFICATION_SECTION_HEADING = /^##\s+Open Clarification Questions\s*$/im;
+
+export const parseOpenClarificationQuestionsFromMarkdown = (markdown: string): string[] => {
+  const heading = markdown.match(OPEN_CLARIFICATION_SECTION_HEADING);
+  if (!heading || heading.index === undefined) return [];
+
+  const sectionStart = heading.index + heading[0].length;
+  const remainder = markdown.slice(sectionStart);
+  const nextSection = remainder.search(/^##\s+/m);
+  const sectionBody = nextSection === -1 ? remainder : remainder.slice(0, nextSection);
+
+  const questions: string[] = [];
+  for (const line of sectionBody.split("\n")) {
+    const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (!bullet) continue;
+    const question = bullet[1].trim();
+    if (!question || /^none\.?$/i.test(question)) continue;
+    questions.push(question);
+  }
+
+  return questions;
+};
+
 export const extractClarificationRequest = (finalResponse: string): ClarificationQuestionCreateInput[] => {
   const questions: ClarificationQuestionCreateInput[] = [];
   const fencePattern = /```relay-clarification\s*([\s\S]*?)```/gi;

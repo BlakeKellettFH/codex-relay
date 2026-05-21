@@ -7,6 +7,8 @@ import {
   relayCodexEventSchema,
   rendererRunEventSchema,
   runLogLineSchema,
+  draftIntakeResultSchema,
+  hierarchyDraftPlanSchema,
   ticketDraftSchema,
   ticketFrontMatterSchema
 } from "../src/shared/schemas";
@@ -24,6 +26,7 @@ const expectSchemaError = (error: unknown, message?: RegExp): true => {
 
 const validDraftBase = (patch: Partial<TicketDraftSubticket> = {}): TicketDraftSubticket => ({
   title: "Draft title",
+  summary: "Lean summary for board preview.",
   priority: "medium",
   labels: ["schema"],
   context: "Context.",
@@ -77,6 +80,7 @@ test("ticket front matter decodes Date timestamps, legacy defaults, and passthro
   assert.equal(parsed.labels.length, 0);
   assert.equal(parsed.parentEpicId, null);
   assert.equal(parsed.subticketIds.length, 0);
+  assert.equal(parsed.plannedFiles.length, 0);
   assert.equal(parsed.blockedByIds.length, 0);
   assert.equal(parsed.relatedTicketIds.length, 0);
   assert.equal(parsed.authoringState, "rough");
@@ -96,6 +100,52 @@ test("ticket front matter decodes Date timestamps, legacy defaults, and passthro
   });
   assert.equal(queued.runStatus, "queued");
   assert.equal(queued.lastRunStartedAt, "2026-05-11T09:45:00.000Z");
+});
+
+test("hierarchy draft schema requires plannedFiles on lean tasks", () => {
+  assert.throws(
+    () =>
+      parseSchema(hierarchyDraftPlanSchema, {
+        planKind: "feature_tree",
+        draftState: "ready",
+        blockingClarificationQuestions: [],
+        matchedEpicId: null,
+        matchedFeatureId: null,
+        root: validDraftBase(),
+        features: [],
+        leanTasks: [
+          {
+            title: "Add settings panel",
+            summary: "Panel shell.",
+            priority: "medium",
+            labels: [],
+            context: "",
+            goal: "Panel",
+            requirements: ["Render panel"],
+            acceptanceCriteria: ["Panel opens"],
+            implementationPlan: ["Create component"],
+            assumptions: []
+          }
+        ],
+        research: {
+          generatedAt: "",
+          checkedUrls: [],
+          inspectedFiles: [],
+          limitations: [],
+          limits: {
+            maxResearchMs: 0,
+            maxUrls: 0,
+            maxUrlFetchMs: 0,
+            maxUrlContentChars: 0,
+            maxFilesToScan: 0,
+            maxFilesToRead: 0,
+            maxFileReadChars: 0,
+            maxMatchesPerFile: 0
+          }
+        }
+      }),
+    (error) => expectSchemaError(error, /plannedFiles/)
+  );
 });
 
 test("project settings decode legacy configs with conservative SDK thread option defaults", () => {
@@ -224,26 +274,75 @@ test("schemas preserve passthrough roots, strip default object extras, and rejec
   );
 });
 
-test("ticket draft schema rejects task drafts with subtickets", () => {
-  const subticket = validDraftBase({ title: "Child task" });
+test("ticket draft schema enforces epic, feature, and task child rules", () => {
+  const subticket = validDraftBase({ title: "Legacy child" });
 
   assert.throws(
     () =>
       parseSchema(ticketDraftSchema, {
         ...validDraftBase(),
         ticketType: "task",
-        subtickets: [subticket]
+        subtickets: [subticket],
+        featureStubs: [],
+        leanTasks: []
       }),
-    (error) => expectSchemaError(error, /Only epic ticket drafts can contain subtickets/)
+    (error) => expectSchemaError(error, /Task drafts cannot contain child tickets/)
+  );
+
+  assert.throws(
+    () =>
+      parseSchema(ticketDraftSchema, {
+        ...validDraftBase({ title: "Parent epic" }),
+        ticketType: "epic",
+        subtickets: [subticket],
+        featureStubs: [],
+        leanTasks: []
+      }),
+    (error) => expectSchemaError(error, /Epic drafts use featureStubs only/)
   );
 
   const epic = parseSchema(ticketDraftSchema, {
     ...validDraftBase({ title: "Parent epic" }),
     ticketType: "epic",
-    subtickets: [subticket]
+    subtickets: [],
+    featureStubs: [
+      {
+        title: "Auth feature",
+        priority: "high",
+        labels: ["auth"],
+        context: "Authentication work.",
+        requirements: ["Define login flow."],
+        acceptanceCriteria: ["Feature scope is clear."],
+        implementationNotes: []
+      }
+    ],
+    leanTasks: []
   });
 
-  assert.equal(epic.subtickets.length, 1);
+  assert.equal(epic.featureStubs.length, 1);
+
+  const feature = parseSchema(ticketDraftSchema, {
+    ...validDraftBase({ title: "Auth feature" }),
+    ticketType: "feature",
+    subtickets: [],
+    featureStubs: [],
+    leanTasks: [
+      {
+        title: "Add login form",
+        priority: "medium",
+        labels: [],
+        context: "UI task.",
+        goal: "Ship login.",
+        requirements: ["Email and password fields."],
+        acceptanceCriteria: ["Form renders."],
+        implementationPlan: ["Add component."],
+        assumptions: [],
+        plannedFiles: ["src/auth/login-form.tsx"]
+      }
+    ]
+  });
+
+  assert.equal(feature.leanTasks.length, 1);
 });
 
 test("event schemas decode timestamps, preserve record payloads, and reject invalid inputs", () => {
@@ -357,6 +456,39 @@ test("event schemas decode timestamps, preserve record payloads, and reject inva
         }
       }),
     (error) => expectSchemaError(error)
+  );
+});
+
+test("draft intake result requires planKind and match fields", () => {
+  const parsed = parseSchema(draftIntakeResultSchema, {
+    scope: "product_feature",
+    planKind: "extend_feature",
+    confidence: 0.9,
+    estimatedTouchPoints: 3,
+    rationale: "Incremental auth work.",
+    matchedEpicId: null,
+    matchedFeatureId: "tkt_feature_auth",
+    knownFacts: ["Uses existing login form."],
+    relatedTicketIds: ["tkt_feature_auth"],
+    questions: []
+  });
+  assert.equal(parsed.planKind, "extend_feature");
+  assert.equal(parsed.matchedFeatureId, "tkt_feature_auth");
+});
+
+test("hierarchy draft plan rejects deprecated standalone_task plan kind", () => {
+  assert.throws(
+    () =>
+      parseSchema(hierarchyDraftPlanSchema, {
+        planKind: "standalone_task",
+        draftState: "ready",
+        blockingClarificationQuestions: [],
+        matchedEpicId: null,
+        matchedFeatureId: null,
+        features: [],
+        leanTasks: []
+      }),
+    (error) => expectSchemaError(error, /standalone_task/)
   );
 });
 

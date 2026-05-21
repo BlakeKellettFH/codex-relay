@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Tooltip } from "../src/renderer/src/components/ui/Tooltip";
+import { Button } from "../src/renderer/src/components/ui/Button";
 import {
   activeRunElapsedLabel,
   BoardView,
@@ -15,10 +17,16 @@ import {
   DraftingTicketDetailLoading,
   emptyColumnMessage,
   FloatingTicketComposer,
+  getTicketDetailExecutionActionState,
+  getTicketReviewActionState,
+  getFloatingComposerDraftInput,
+  getScopeRecoveryClarificationActionQuestionIds,
   getCodexStatusDisplay,
   RepositoryChatPanelContent,
   TicketCardContent,
+  TicketFullBodyPanel,
   TicketMarkdownTabs,
+  TicketSummaryPreview,
   TicketDetailPrimaryClarifications,
   TicketAuthoringStatePill,
   TicketChecklistPill,
@@ -60,7 +68,9 @@ const ticketSummary = (patch: Partial<TicketSummary> = {}): TicketSummary => ({
   effort: "medium",
   labels: [],
   parentEpicId: null,
+  parentFeatureId: null,
   subticketIds: [],
+  plannedFiles: [],
   blockedByIds: [],
   relatedTicketIds: [],
   createdAt: "2026-05-12T10:00:00.000Z",
@@ -71,6 +81,7 @@ const ticketSummary = (patch: Partial<TicketSummary> = {}): TicketSummary => ({
   lastRunId: "run_elapsed",
   lastRunStartedAt: "2026-05-12T10:00:00.000Z",
   excerpt: "Runtime card",
+  summary: "",
   filePath: "/tmp/tkt_elapsed.md",
   checklist: { total: 0, completed: 0, open: 0 },
   ...patch
@@ -277,12 +288,56 @@ test("collapsed codex indicator uses green connected and red disconnected floati
   assert.match(disconnectedMarkup, /aria-label="Codex: Not connected"/);
 });
 
+test("scope clarification approve CTA only appears for fully answered blocked task tickets", () => {
+  const blockedTask = ticketRecord({ status: "needs_clarification", runStatus: "blocked", authoringState: "needs_input" });
+  const eligible = getScopeRecoveryClarificationActionQuestionIds(blockedTask, [
+    clarificationQuestion({
+      id: "clar_scope",
+      question: `Codex attempted to modify file paths outside this ticket's planned scope, so Relay reverted the run.
+
+Please confirm whether implementation should expand the planned file scope to include:
+- /tmp/project/src/shared/plannedScope.ts
+
+Current planned scope:
+- src/http/resources/tickets.ts`,
+      answer: "confirmed",
+      answeredAt: "2026-05-12T10:05:00.000Z"
+    })
+  ]);
+  assert.deepEqual(eligible, ["clar_scope"]);
+
+  const hiddenWhilePending = getScopeRecoveryClarificationActionQuestionIds(blockedTask, [
+    clarificationQuestion({
+      id: "clar_scope",
+      question: `Codex attempted to modify file paths outside this ticket's planned scope, so Relay reverted the run.
+
+Please confirm whether implementation should expand the planned file scope to include:
+- /tmp/project/src/shared/plannedScope.ts
+
+Current planned scope:
+- src/http/resources/tickets.ts`,
+      answer: "confirmed",
+      answeredAt: "2026-05-12T10:05:00.000Z"
+    }),
+    clarificationQuestion({ id: "clar_other" })
+  ]);
+  assert.deepEqual(hiddenWhilePending, []);
+});
+
 test("drafting ticket status pill renders an active spinner indicator", () => {
   const markup = renderToStaticMarkup(<TicketRunStatusPill status="drafting" />);
 
   assert.match(markup, /run-pill drafting/);
   assert.match(markup, /spin run-pill-icon/);
   assert.match(markup, /Drafting/);
+});
+
+test("paused ticket status pill renders without an active spinner", () => {
+  const markup = renderToStaticMarkup(<TicketRunStatusPill status="paused" />);
+
+  assert.match(markup, /run-pill paused/);
+  assert.match(markup, /Paused/);
+  assert.doesNotMatch(markup, /spin run-pill-icon/);
 });
 
 test("ticket authoring and checklist metadata render as compact pills", () => {
@@ -349,6 +404,249 @@ test("elapsed runtime label is hidden outside active in-progress implementation 
   }
 });
 
+test("compact board ticket card shows title and labels only", () => {
+  const ticket = ticketSummary({
+    status: "todo",
+    runStatus: "idle",
+    excerpt: "Long summary that should not appear on the board",
+    labels: ["backend", "api"],
+    authoringState: "ready"
+  });
+  const markup = renderToStaticMarkup(
+    <TicketCardContent ticket={ticket} allTickets={[ticket]} columns={DEFAULT_COLUMNS} now={Date.now()} compact />
+  );
+
+  assert.match(markup, /card-title/);
+  assert.match(markup, />Elapsed runtime</);
+  assert.match(markup, />backend</);
+  assert.match(markup, />api</);
+  assert.doesNotMatch(markup, /card-excerpt/);
+  assert.doesNotMatch(markup, /card-meta/);
+  assert.doesNotMatch(markup, /ticket-board-failed-icon/);
+  assert.doesNotMatch(markup, /Long summary/);
+});
+
+test("compact board ticket card shows failed icon when run status is failed", () => {
+  const ticket = ticketSummary({
+    title: "Broken deploy",
+    status: "in_progress",
+    runStatus: "failed",
+    excerpt: "Should stay hidden on board"
+  });
+  const markup = renderToStaticMarkup(
+    <TicketCardContent ticket={ticket} allTickets={[ticket]} columns={DEFAULT_COLUMNS} now={Date.now()} compact />
+  );
+
+  assert.match(markup, /ticket-board-failed-icon/);
+  assert.match(markup, /aria-label="Agent status: Failed"/);
+  assert.match(markup, />Broken deploy</);
+  assert.doesNotMatch(markup, /card-meta/);
+});
+
+test("ticket detail execution action matrix hides and shows mutually exclusive controls by run state", () => {
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "task",
+      status: "in_progress",
+      runStatus: "running",
+      codexThreadId: "thread_active",
+      canDiscardPaused: true,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: true,
+      showPause: true,
+      showContinue: false,
+      showRetry: false,
+      showRevert: false,
+      showStartOrResume: false,
+      showStartNewThread: false
+    }
+  );
+
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "task",
+      status: "in_progress",
+      runStatus: "failed",
+      codexThreadId: "thread_failed",
+      canDiscardPaused: false,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: true,
+      showPause: false,
+      showContinue: false,
+      showRetry: true,
+      showRevert: false,
+      showStartOrResume: false,
+      showStartNewThread: false
+    }
+  );
+
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "task",
+      status: "in_progress",
+      runStatus: "paused",
+      codexThreadId: "thread_paused",
+      canDiscardPaused: true,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: true,
+      showPause: false,
+      showContinue: true,
+      showRetry: false,
+      showRevert: true,
+      showStartOrResume: false,
+      showStartNewThread: false
+    }
+  );
+
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "task",
+      status: "todo",
+      runStatus: "idle",
+      codexThreadId: "thread_idle",
+      canDiscardPaused: false,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: true,
+      showPause: false,
+      showContinue: false,
+      showRetry: false,
+      showRevert: false,
+      showStartOrResume: true,
+      showStartNewThread: true
+    }
+  );
+
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "task",
+      status: "ready",
+      runStatus: "idle",
+      codexThreadId: null,
+      canDiscardPaused: false,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: false,
+      showPause: false,
+      showContinue: false,
+      showRetry: false,
+      showRevert: false,
+      showStartOrResume: false,
+      showStartNewThread: false
+    }
+  );
+
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "task",
+      status: "ready",
+      runStatus: "queued",
+      codexThreadId: null,
+      canDiscardPaused: false,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: true,
+      showPause: true,
+      showContinue: false,
+      showRetry: false,
+      showRevert: false,
+      showStartOrResume: false,
+      showStartNewThread: false
+    }
+  );
+
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "task",
+      status: "completed",
+      runStatus: "completed",
+      codexThreadId: "thread_done",
+      canDiscardPaused: false,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: false,
+      showPause: false,
+      showContinue: false,
+      showRetry: false,
+      showRevert: false,
+      showStartOrResume: false,
+      showStartNewThread: false
+    }
+  );
+
+  assert.deepEqual(
+    getTicketDetailExecutionActionState({
+      ticketType: "feature",
+      status: "todo",
+      runStatus: "idle",
+      codexThreadId: "thread_feature",
+      canDiscardPaused: false,
+      columns: DEFAULT_COLUMNS
+    }),
+    {
+      showExecutionControls: false,
+      showPause: false,
+      showContinue: false,
+      showRetry: false,
+      showRevert: false,
+      showStartOrResume: false,
+      showStartNewThread: false
+    }
+  );
+});
+
+test("tooltip wrapper exposes hover label via data-tooltip", () => {
+  const markup = renderToStaticMarkup(
+    <Tooltip label="Accept">
+      <Button type="button" className="icon-button" aria-label="Accept">
+        OK
+      </Button>
+    </Tooltip>
+  );
+
+  assert.match(markup, /class="relay-tooltip"/);
+  assert.match(markup, /data-tooltip="Accept"/);
+});
+
+test("ticket review action state shows accept and reject only for tasks in review", () => {
+  assert.deepEqual(
+    getTicketReviewActionState({
+      ticketType: "task",
+      status: "review",
+      columns: DEFAULT_COLUMNS
+    }),
+    { showAcceptReject: true }
+  );
+
+  assert.deepEqual(
+    getTicketReviewActionState({
+      ticketType: "task",
+      status: "in_progress",
+      columns: DEFAULT_COLUMNS
+    }),
+    { showAcceptReject: false }
+  );
+
+  assert.deepEqual(
+    getTicketReviewActionState({
+      ticketType: "feature",
+      status: "review",
+      columns: DEFAULT_COLUMNS
+    }),
+    { showAcceptReject: false }
+  );
+});
+
 test("ticket card label overflow exposes hidden label names without rendering extra label chips", () => {
   const ticket = ticketSummary({
     labels: ["frontend", "accessibility", "regression", "polish"],
@@ -389,52 +687,59 @@ test("redraft eligibility is limited to failed placeholders and generated drafts
   assert.equal(canRedraftTicket(ticketRecord({ runStatus: "completed", authoringState: "ready" })), false);
 });
 
-test("ticket markdown tabs render preview by default without source textarea", () => {
+test("ticket summary preview renders lean summary without copy control", () => {
+  const markup = renderToStaticMarkup(<TicketSummaryPreview summary="Lean summary for the ticket preview." />);
+
+  assert.match(markup, /ticket-summary-panel/);
+  assert.match(markup, />Summary</);
+  assert.match(markup, /ticket-summary-preview/);
+  assert.match(markup, /Lean summary for the ticket preview/);
+  assert.doesNotMatch(markup, /markdown-copy-button/);
+  assert.doesNotMatch(markup, /View full ticket/);
+});
+
+test("ticket markdown tabs render full body preview by default without textarea", () => {
   const markup = renderToStaticMarkup(
-    <TicketMarkdownTabs markdown={"# Ticket body\n\nRun **focused** validation."} onModeChange={() => undefined} />
+    <TicketMarkdownTabs markdown={"# Ticket body\n\n## Context\n\nRun **focused** validation."} onModeChange={() => undefined} />
   );
 
-  assert.match(markup, /role="tablist"/);
+  assert.match(markup, />Preview</);
+  assert.match(markup, />Edit</);
   assert.match(markup, /id="ticket-markdown-preview-tab"[^>]*aria-selected="true"/);
-  assert.match(markup, /ticket-markdown-preview-panel collapsed/);
-  assert.match(markup, /aria-label="Expand markdown preview"/);
-  assert.match(markup, /aria-expanded="false"/);
+  assert.match(markup, /ticket-markdown-preview-panel/);
   assert.match(markup, /ticket-markdown-preview/);
   assert.match(markup, /Ticket body/);
-  assert.match(markup, /focused/);
+  assert.match(markup, /<strong>focused<\/strong>/);
+  assert.doesNotMatch(markup, /markdown-copy-button/);
   assert.doesNotMatch(markup, /detail-markdown/);
   assert.doesNotMatch(markup, /<textarea/);
 });
 
-test("ticket markdown tabs render expanded preview mode", () => {
+test("ticket full body panel renders preview and edit tabs with back control", () => {
   const markup = renderToStaticMarkup(
-    <TicketMarkdownTabs markdown={"# Ticket body\n\nRun **focused** validation."} previewExpanded onModeChange={() => undefined} />
+    <TicketFullBodyPanel markdown={"# Ticket body\n\n## Context\n\nDetailed plan."} onBack={() => undefined} onModeChange={() => undefined} />
   );
 
-  assert.match(markup, /ticket-markdown-tabs preview-expanded/);
-  assert.match(markup, /ticket-markdown-preview-panel expanded/);
-  assert.match(markup, /aria-label="Collapse markdown preview"/);
-  assert.match(markup, /aria-expanded="true"/);
+  assert.match(markup, /ticket-detail-full-body/);
+  assert.match(markup, /Back to ticket/);
+  assert.match(markup, />Preview</);
+  assert.match(markup, />Edit</);
   assert.match(markup, /Ticket body/);
+  assert.match(markup, /Detailed plan/);
   assert.doesNotMatch(markup, /detail-markdown/);
-  assert.doesNotMatch(markup, /<textarea/);
 });
 
-test("expanded ticket markdown preview is contained above the update composer", () => {
+test("ticket detail primary column keeps refine controls from shrinking", () => {
   const styles = readFileSync("src/renderer/src/styles.css", "utf8");
 
-  assert.match(styles, /\.ticket-detail-primary\.markdown-preview-expanded\s*{[^}]*overflow:\s*hidden;/s);
-  assert.match(
-    styles,
-    /\.ticket-detail-primary\.markdown-preview-expanded \.ticket-markdown-tabs\.preview-expanded,\s*\.ticket-detail-primary\.markdown-preview-expanded \.ticket-markdown-preview-panel\.expanded\s*{[^}]*flex:\s*1 1 auto;[^}]*min-height:\s*0;/s
-  );
-  assert.match(
-    styles,
-    /\.ticket-detail-primary\.markdown-preview-expanded \.ticket-update-panel\s*{[^}]*flex:\s*0 0 auto;/s
-  );
+  assert.match(styles, /\.ticket-detail-primary > \.ticket-update-panel\s*{[^}]*flex:\s*0 0 auto;/s);
+  assert.match(styles, /\.ticket-detail-layout\.full-body-open\s*{[^}]*grid-template-columns:\s*1fr;/s);
+  assert.match(styles, /\.ticket-detail-full-body\s*{[^}]*overflow:\s*hidden;/s);
+  assert.match(styles, /\.ticket-detail-full-body \.ticket-markdown-preview-panel \.ticket-markdown-preview\s*{[^}]*overflow-y:\s*auto;/s);
+  assert.match(styles, /\.detail-panel\s*{[^}]*max-height:\s*calc\(100dvh - 20dvh\);/s);
 });
 
-test("ticket markdown tabs render source editor without simultaneous preview", () => {
+test("ticket markdown tabs render body editor in edit mode", () => {
   const markup = renderToStaticMarkup(
     <TicketMarkdownTabs mode="edit" markdown={"# Ticket body\n\nRun **focused** validation."} onModeChange={() => undefined} />
   );
@@ -494,16 +799,46 @@ test("floating ticket composer renders compact drafting controls without create 
   assert.match(markup, /floating-ticket-composer/);
   assert.match(markup, /aria-label="Draft ticket idea"/);
   assert.match(markup, /aria-label="Ticket idea"/);
+  assert.doesNotMatch(markup, /Relay chooses epic, feature, or task/);
+  assert.doesNotMatch(markup, />Planning</);
+  assert.doesNotMatch(markup, /Planning mode/);
   assert.match(markup, />Type</);
-  assert.match(markup, />Mode</);
+  assert.match(markup, /value="auto" selected="">Auto/);
+  assert.match(markup, /value="epic">Epic/);
+  assert.match(markup, /value="feature">Feature/);
+  assert.doesNotMatch(markup, /value="ticket"/);
   assert.match(markup, />Priority</);
   assert.match(markup, />Effort</);
-  assert.match(markup, /value="task" selected="">Task/);
-  assert.match(markup, /Product Feature/);
-  assert.match(markup, /Rewrite/);
   assert.match(markup, /aria-label="Draft ticket with agent"/);
   assert.doesNotMatch(markup, /modal-backdrop/);
   assert.doesNotMatch(markup, /Create Ticket/);
+});
+
+test("floating composer draft input maps each type selector to the expected request shape", () => {
+  const shared = {
+    projectPath: "/tmp/project",
+    idea: "Draft a settings change",
+    priority: "high" as const,
+    effort: "medium" as const
+  };
+
+  assert.deepEqual(getFloatingComposerDraftInput({ ...shared, draftType: "auto" }), {
+    ...shared,
+    autoHierarchy: true,
+    runIntake: true
+  });
+  assert.deepEqual(getFloatingComposerDraftInput({ ...shared, draftType: "epic" }), {
+    ...shared,
+    runIntake: true,
+    preferredTicketType: "epic",
+    draftScope: "epic"
+  });
+  assert.deepEqual(getFloatingComposerDraftInput({ ...shared, draftType: "feature" }), {
+    ...shared,
+    runIntake: true,
+    preferredTicketType: "feature",
+    draftScope: "product_feature"
+  });
 });
 
 test("floating ticket composer submit button is disabled for blank ideas", () => {
@@ -532,7 +867,6 @@ test("board view renders the ticket composer inside the workspace region", () =>
       onQuery={() => undefined}
       onToggleRepositoryChat={() => undefined}
       onOpenTicket={() => undefined}
-      onMove={() => undefined}
       gitMetadata={undefined}
       repositoryChatOpen={false}
       onOpenProjectInEditor={async () => ({ ok: false, message: "not implemented" })}
@@ -550,7 +884,12 @@ test("board view renders the ticket composer inside the workspace region", () =>
 test("draft intake question panel renders editable recommended answers", () => {
   const intake: DraftIntakeResult = {
     scope: "product_feature",
+    planKind: "feature_tree",
     confidence: 0.74,
+    estimatedTouchPoints: 5,
+    rationale: "Medium settings work.",
+    matchedEpicId: null,
+    matchedFeatureId: null,
     knownFacts: ["Existing tickets mention the settings dialog."],
     relatedTicketIds: ["tkt_settings"],
     questions: [

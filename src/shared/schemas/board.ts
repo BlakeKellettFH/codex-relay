@@ -11,6 +11,7 @@ export const RELAY_NEEDS_CLARIFICATION_STATUS = "needs_clarification";
 export const RELAY_REVIEW_STATUS = "review";
 export const RELAY_NOT_DOING_STATUS = "not_doing";
 export const RELAY_COMPLETED_STATUS = "completed";
+export const RELAY_ARCHIVE_STATUS = "archive";
 
 export const DEFAULT_COLUMNS: RelayColumn[] = [
   { id: RELAY_TODO_STATUS, name: "Todo", position: 1000, terminal: false },
@@ -19,8 +20,12 @@ export const DEFAULT_COLUMNS: RelayColumn[] = [
   { id: RELAY_NEEDS_CLARIFICATION_STATUS, name: "Needs Clarification", position: 4000, terminal: false },
   { id: RELAY_REVIEW_STATUS, name: "Review", position: 5000, terminal: false },
   { id: RELAY_NOT_DOING_STATUS, name: "Not Doing", position: 6000, terminal: true },
-  { id: RELAY_COMPLETED_STATUS, name: "Completed", position: 7000, terminal: true }
+  { id: RELAY_COMPLETED_STATUS, name: "Completed", position: 7000, terminal: true },
+  { id: RELAY_ARCHIVE_STATUS, name: "Archive", position: 8000, terminal: true }
 ];
+
+export const boardVisibleColumns = (columns: readonly RelayColumn[]): RelayColumn[] =>
+  columns.filter((column) => column.id !== RELAY_ARCHIVE_STATUS);
 
 export const invalidTicketSchema = Schema.Struct({
   filePath: Schema.String,

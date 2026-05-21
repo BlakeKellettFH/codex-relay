@@ -1,5 +1,4 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { DragEndEvent } from "@dnd-kit/core";
 import type {
   AgentTicketUpdateInput,
   BoardSnapshot,
@@ -10,6 +9,8 @@ import type {
   EpicSubticketCreateInput,
   EpicSubticketLinkInput,
   EpicSubticketUnlinkInput,
+  FeatureSubticketLinkInput,
+  FeatureTaskCreateRequest,
   GitMetadata,
   GitMetadataOptions,
   ProjectOpenInEditorInput,
@@ -247,7 +248,10 @@ export const useCancelRunMutation = () => {
   return useMutation({
     mutationFn: (input: CancelRunInput) => relayApi.codex.cancelRun(input),
     onSuccess: async (_result, input) => {
-      await invalidateTicketData(queryClient, input.projectPath, input.ticketId);
+      await Promise.all([
+        invalidateTicketData(queryClient, input.projectPath, input.ticketId),
+        queryClient.invalidateQueries({ queryKey: relayQueryKeys.gitMetadata(input.projectPath) })
+      ]);
     }
   });
 };
@@ -257,6 +261,17 @@ export const useAnswerClarificationMutation = () => {
   return useMutation({
     mutationFn: (input: ClarificationAnswerInput) => relayApi.tickets.answerClarification(input),
     onSuccess: async (_question, input) => {
+      await invalidateTicketData(queryClient, input.projectPath, input.ticketId);
+    }
+  });
+};
+
+export const useApproveScopeClarificationMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { projectPath: string; ticketId: string; clarificationQuestionId: string }) =>
+      relayApi.tickets.approveScopeClarification(input),
+    onSuccess: async (_result, input) => {
       await invalidateTicketData(queryClient, input.projectPath, input.ticketId);
     }
   });
@@ -308,6 +323,36 @@ export const useUnlinkSubticketMutation = () => {
     mutationFn: (input: EpicSubticketUnlinkInput) => relayApi.tickets.unlinkSubticket(input),
     onSuccess: async (_board, input) => {
       await invalidateTicketData(queryClient, input.projectPath, input.epicId);
+    }
+  });
+};
+
+export const useCreateTaskUnderFeatureMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: FeatureTaskCreateRequest) => relayApi.tickets.createTaskUnderFeature(input),
+    onSuccess: async (_ticket, input) => {
+      await invalidateTicketData(queryClient, input.projectPath, input.featureId);
+    }
+  });
+};
+
+export const useLinkFeatureSubticketMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: FeatureSubticketLinkInput) => relayApi.tickets.linkFeatureSubticket(input),
+    onSuccess: async (_board, input) => {
+      await invalidateTicketData(queryClient, input.projectPath, input.featureId);
+    }
+  });
+};
+
+export const useUnlinkFeatureSubticketMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: FeatureSubticketLinkInput) => relayApi.tickets.unlinkFeatureSubticket(input),
+    onSuccess: async (_board, input) => {
+      await invalidateTicketData(queryClient, input.projectPath, input.featureId);
     }
   });
 };

@@ -119,6 +119,7 @@ test("expanded project sidebar marks swimlanes with active task runs", () => {
 
   assert.match(markup, /aria-label="In Progress: 2 tasks, 1 active task"/);
   assert.match(markup, /project-swimlane-row active/);
+  assert.doesNotMatch(markup, /aria-label="Todo: 1 tasks, 1 active task"/);
 });
 
 test("expanded project sidebar keeps long labels, counts, and active indicators renderable", () => {
@@ -131,7 +132,7 @@ test("expanded project sidebar keeps long labels, counts, and active indicators 
         activeRunCount: 2,
         swimlanes: [
           {
-            id: "long_review_lane",
+            id: "in_progress",
             name: longSwimlaneName,
             position: 1000,
             ticketCount: 123,

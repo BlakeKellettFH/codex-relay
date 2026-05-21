@@ -80,6 +80,32 @@ test("clarification panel renders answered questions as non-editable history", (
   assert.doesNotMatch(markup, /Submit Answer/);
 });
 
+test("clarification panel renders approve-and-redraft actions only for eligible answered clarifications", () => {
+  const markup = renderToStaticMarkup(
+    <ClarificationPanel
+      questions={[
+        question({
+          id: "clar_scope",
+          question: "Codex attempted to modify file paths outside this ticket's planned scope.",
+          answer: "confirmed",
+          answeredAt: "2026-05-11T10:05:00.000Z"
+        })
+      ]}
+      answerDrafts={{}}
+      submittingId={null}
+      actionQuestionIds={new Set(["clar_scope"])}
+      actionSubmittingId={null}
+      onDraftChange={() => undefined}
+      onSubmit={() => undefined}
+      onAction={() => undefined}
+    />
+  );
+
+  assert.match(markup, /Approve Scope and Redraft/);
+  assert.match(markup, /aria-label="Approve scope and redraft ticket"/);
+  assert.doesNotMatch(markup, /Submit Answer/);
+});
+
 test("clarification panel supports sidebar history classes and long content", () => {
   const longQuestion = [
     "Please confirm the rollout strategy for this exceptionally long clarification question.",

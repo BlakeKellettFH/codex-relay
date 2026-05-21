@@ -16,6 +16,8 @@ export const workRunEventsPath = (path: Path.Path, projectPath: string, workId: 
 export const workAuditLogPath = (path: Path.Path, projectPath: string): string =>
   path.join(workPath(path, projectPath), "audit.jsonl");
 export const auditLogPath = (path: Path.Path, projectPath: string): string => path.join(projectRelayPath(path, projectPath), "audit.jsonl");
+export const pathLocksPath = (path: Path.Path, projectPath: string): string =>
+  path.join(projectRelayPath(path, projectPath), "path-locks.json");
 export const clarificationsPath = (path: Path.Path, projectPath: string): string =>
   path.join(projectRelayPath(path, projectPath), "clarifications");
 export const trashPath = (path: Path.Path, projectPath: string): string => path.join(projectRelayPath(path, projectPath), "trash");

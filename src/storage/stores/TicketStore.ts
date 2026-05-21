@@ -6,7 +6,10 @@ import type {
   BoardSnapshot,
   CreateDraftInput,
   EpicSubticketCreateInput,
+  FeatureSubticketCreateInput,
+  FeatureTaskCreateRequest,
   TicketCreateInput,
+  HierarchyDraftPlan,
   TicketDraft,
   TicketDraftResearch,
   TicketMoveInput,
@@ -28,8 +31,18 @@ export type TicketStoreService = {
   readonly createSubticket: (input: EpicSubticketCreateInput) => StoreEffect<TicketRecord, Path.Path>;
   readonly linkSubticket: (projectPath: string, epicId: string, ticketId: string) => StoreEffect<BoardSnapshot, Path.Path>;
   readonly unlinkSubticket: (projectPath: string, epicId: string, ticketId: string) => StoreEffect<BoardSnapshot, Path.Path>;
+  readonly createTaskUnderFeature: (input: FeatureTaskCreateRequest) => StoreEffect<TicketRecord, Path.Path>;
+  readonly createFeatureSubticket: (input: FeatureSubticketCreateInput) => StoreEffect<TicketRecord, Path.Path>;
+  readonly linkFeatureSubticket: (projectPath: string, featureId: string, ticketId: string) => StoreEffect<BoardSnapshot, Path.Path>;
+  readonly unlinkFeatureSubticket: (projectPath: string, featureId: string, ticketId: string) => StoreEffect<BoardSnapshot, Path.Path>;
   readonly createPendingDraft: (projectPath: string, input: CreateDraftInput, runId: string) => StoreEffect<TicketRecord, Path.Path>;
   readonly applyDraft: (projectPath: string, ticketId: string, draft: TicketDraft, runId: string) => StoreEffect<TicketRecord, Path.Path>;
+  readonly applyHierarchyDraftPlan: (
+    projectPath: string,
+    placeholderTicketId: string,
+    plan: HierarchyDraftPlan,
+    runId: string
+  ) => StoreEffect<string, Path.Path>;
   readonly failPendingDraft: (
     projectPath: string,
     ticketId: string,
@@ -94,6 +107,22 @@ export const makeFileSystemTicketStore = (): TicketStoreService => ({
     writeAt((path) => ticketPath(path, projectPath, epicId), "Unlink Relay subticket", () =>
       FileSystemStorage.unlinkSubticket(projectPath, epicId, ticketId)
     ),
+  createTaskUnderFeature: (input) =>
+    writeAt((path) => ticketsPath(path, input.projectPath), "Create task under feature", () =>
+      FileSystemStorage.createTaskUnderFeature(input)
+    ),
+  createFeatureSubticket: (input) =>
+    writeAt((path) => ticketsPath(path, input.projectPath), "Create feature subticket", () =>
+      FileSystemStorage.createFeatureSubticket(input)
+    ),
+  linkFeatureSubticket: (projectPath, featureId, ticketId) =>
+    writeAt((path) => ticketPath(path, projectPath, featureId), "Link feature subticket", () =>
+      FileSystemStorage.linkFeatureSubticket(projectPath, featureId, ticketId)
+    ),
+  unlinkFeatureSubticket: (projectPath, featureId, ticketId) =>
+    writeAt((path) => ticketPath(path, projectPath, featureId), "Unlink feature subticket", () =>
+      FileSystemStorage.unlinkFeatureSubticket(projectPath, featureId, ticketId)
+    ),
   createPendingDraft: (projectPath, input, runId) =>
     writeAt((path) => ticketsPath(path, projectPath), "Create pending Relay ticket draft", () =>
       FileSystemStorage.createPendingTicketDraft(projectPath, input, runId)
@@ -101,6 +130,10 @@ export const makeFileSystemTicketStore = (): TicketStoreService => ({
   applyDraft: (projectPath, ticketId, draft, runId) =>
     writeAt((path) => ticketPath(path, projectPath, ticketId), "Apply Relay ticket draft", () =>
       FileSystemStorage.applyTicketDraftToTicket(projectPath, ticketId, draft, runId)
+    ),
+  applyHierarchyDraftPlan: (projectPath, placeholderTicketId, plan, runId) =>
+    writeAt((path) => ticketPath(path, projectPath, placeholderTicketId), "Apply Relay hierarchy draft plan", () =>
+      FileSystemStorage.applyHierarchyDraftPlan(projectPath, placeholderTicketId, plan, runId)
     ),
   failPendingDraft: (projectPath, ticketId, idea, runId, message) =>
     writeAt((path) => ticketPath(path, projectPath, ticketId), "Fail pending Relay ticket draft", () =>
@@ -117,6 +150,10 @@ export const makeFileSystemTicketStore = (): TicketStoreService => ({
   setQueued: (projectPath, ticketId, runId) =>
     writeAt((path) => ticketPath(path, projectPath, ticketId), "Mark Relay ticket queued", () =>
       FileSystemStorage.setTicketQueued(projectPath, ticketId, runId)
+    ),
+  setQueuedInPlace: (projectPath, ticketId, runId) =>
+    writeAt((path) => ticketPath(path, projectPath, ticketId), "Mark Relay ticket queued in place", () =>
+      FileSystemStorage.setTicketQueuedInPlace(projectPath, ticketId, runId)
     ),
   clearQueued: (projectPath, ticketId, targetStatus, expectedRunId) =>
     writeAt((path) => ticketPath(path, projectPath, ticketId), "Clear Relay ticket queue state", () =>

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks4yxwp92pnhja551yj9080k",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks4yxwpdrp66tcf70ydvzw6p",
+  "runId": "run_01ks4yxwp92pnhja551yj9080k",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks4yxwpdrp66tcf70ydvzw6p:run_01ks4yxwp92pnhja551yj9080k",
+  "status": "blocked",
+  "attempts": 1,
+  "createdAt": "2026-05-21T09:47:37.049Z",
+  "updatedAt": "2026-05-21T09:58:08.528Z",
+  "lastAppliedEventSequence": 6,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks4yxwpxn50v0rk4jrhv421h",
+    "leaseToken": "lease_01ks4yxwpxnhhapq2467cw75ax",
+    "executor": "agent",
+    "providerId": "codex",
+    "claimedAt": "2026-05-21T09:47:37.053Z",
+    "heartbeatAt": "2026-05-21T09:47:37.055Z",
+    "startedAt": "2026-05-21T09:47:37.055Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "We should add a button on the Codex:connected component at the left panel to open a modal.\n\nI want to move slightly away from being codex agnostic, \nI want to see in that panel if there is a codex cli, and if so check if the user is connected / logged in.\nI want to also see if there is a cursor cli and if user is connected, \nI want to also see if the user has a claude cli and if user is connected,\n\nThen i want to have a button next to each saying \"Use CLI\" which will change which cli relay uses for its actions.",
+    "priority": "medium",
+    "effort": "high",
+    "preferredTicketType": "feature",
+    "draftScope": "product_feature",
+    "runIntake": true,
+    "runId": "run_01ks4yxwp92pnhja551yj9080k",
+    "ticketId": "tkt_01ks4yxwpdrp66tcf70ydvzw6p"
+  },
+  "metadata": {
+    "providerId": "codex",
+    "executor": "agent",
+    "clarificationQuestionCount": 2,
+    "recovered": true
+  },
+  "message": "Recovered incomplete work on boot."
+}

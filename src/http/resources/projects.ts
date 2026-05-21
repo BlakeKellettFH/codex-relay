@@ -1,4 +1,6 @@
+import { Effect } from "effect";
 import { projectEndpoints } from "@shared/http";
+import { ensureReadyTicketAutomation } from "../../services/codex/readyTicketScheduler";
 import { ProjectWorkflows } from "../../workflows";
 import { route, type HttpResourceRoute } from "./types";
 
@@ -12,7 +14,12 @@ export const projectRoutes = [
   route(projectEndpoints.addFolder, () => ProjectWorkflows.addProjectFolder()),
   route(projectEndpoints.addPath, (input) => ProjectWorkflows.addProjectPath(input)),
   route(projectEndpoints.removeFromSidebar, ({ projectPath }) => ProjectWorkflows.removeProjectFromSidebar(projectPath)),
-  route(projectEndpoints.read, ({ projectPath }) => ProjectWorkflows.readProject(projectPath)),
+  route(projectEndpoints.read, ({ projectPath }) =>
+    Effect.sync(() => {
+      ensureReadyTicketAutomation(projectPath);
+      return undefined;
+    }).pipe(Effect.flatMap(() => ProjectWorkflows.readProject(projectPath)))
+  ),
   route(projectEndpoints.gitMetadata, ({ projectPath, force }) =>
     ProjectWorkflows.readProjectGitMetadata(projectPath, gitMetadataOptionsFromQuery(force))
   ),

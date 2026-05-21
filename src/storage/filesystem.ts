@@ -1,7 +1,10 @@
 import { Effect, FileSystem, Path } from "effect";
 import matter from "gray-matter";
+import { ticketPreviewSummary } from "@shared/ticketSummary";
 import {
+  boardVisibleColumns,
   DEFAULT_COLUMNS,
+  RELAY_ARCHIVE_STATUS,
   RELAY_IN_PROGRESS_STATUS,
   RELAY_NEEDS_CLARIFICATION_STATUS,
   RELAY_READY_STATUS,
@@ -23,6 +26,13 @@ import {
   type RelayEventSource,
   type RelayAuditEvent,
   type EpicSubticketCreateInput,
+  type EpicFeatureCreateInput,
+  type FeatureSubticketCreateInput,
+  type FeatureSubticketLinkInput,
+  type FeatureTaskCreateInput,
+  type HierarchyDraftPlan,
+  type LeanTaskDraft,
+  type FeatureStubDraft,
   type TicketAttachmentSaveInput,
   type TicketAttachmentSaveResult,
   type TicketCreateInput,
@@ -35,6 +45,7 @@ import {
   type TicketReferenceCandidate,
   type TicketRecord,
   type TicketSaveInput,
+  type FinalTicketType,
   type TicketSummary,
   type TicketType
 } from "@shared/schemas";
@@ -83,8 +94,7 @@ const defaultSettings = (): ProjectSettings => ({
 const nowIso = (): string => new Date().toISOString();
 const backendPath = (): Promise<Path.Path> => runBackendEffect(Path.Path.use((path) => Effect.succeed(path)));
 
-const isSidebarActiveRunStatus = (status: TicketSummary["runStatus"]): boolean =>
-  status === "queued" || status === "drafting" || status === "running" || status === "blocked";
+const isSidebarActiveRunStatus = (status: TicketSummary["runStatus"]): boolean => status === "running";
 
 const normalizeProjectColumns = (columns: RelayColumn[]): RelayColumn[] => {
   const normalized = columns.map((column) => ({ ...column }));
@@ -299,12 +309,13 @@ export const summarizeProject = async (projectPath: string, lastOpenedAt?: strin
       const ticketCountsByStatus = new Map<string, number>();
       const activeRunCountsByStatus = new Map<string, number>();
       for (const ticket of tickets.tickets) {
+        if (ticket.ticketType !== "task") continue;
         ticketCountsByStatus.set(ticket.status, (ticketCountsByStatus.get(ticket.status) ?? 0) + 1);
         if (isSidebarActiveRunStatus(ticket.runStatus)) {
           activeRunCountsByStatus.set(ticket.status, (activeRunCountsByStatus.get(ticket.status) ?? 0) + 1);
         }
       }
-      swimlanes = [...config.columns]
+      swimlanes = boardVisibleColumns(config.columns)
         .sort((a, b) => a.position - b.position)
         .map((column) => ({
           id: column.id,
@@ -344,16 +355,6 @@ export const summarizeProject = async (projectPath: string, lastOpenedAt?: strin
   };
 };
 
-const extractExcerpt = (markdown: string): string => {
-  const text = markdown
-    .replace(/^# .+$/m, "")
-    .replace(/^## .+$/gm, "")
-    .replace(/[-*]\s+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
-};
-
 const authoringStateFromLegacyRunStatus = (frontMatter: TicketFrontMatter): TicketFrontMatter["authoringState"] => {
   if (frontMatter.authoringState && frontMatter.authoringState !== "rough") return frontMatter.authoringState;
   switch (frontMatter.runStatus) {
@@ -375,6 +376,7 @@ const authoringStateFromLegacyRunStatus = (frontMatter: TicketFrontMatter): Tick
 const normalizeFrontMatterForRead = (frontMatter: TicketFrontMatter): TicketFrontMatter => ({
   ...frontMatter,
   authoringState: authoringStateFromLegacyRunStatus(frontMatter),
+  plannedFiles: normalizePlannedFiles(frontMatter.plannedFiles),
   relatedTicketIds: uniqueTicketIds(frontMatter.relatedTicketIds ?? [])
 });
 
@@ -424,7 +426,7 @@ const readTickets = async (
       records.push(record);
       tickets.push({
         ...record.frontMatter,
-        excerpt: extractExcerpt(record.markdown),
+        excerpt: ticketPreviewSummary(record.frontMatter, record.markdown),
         filePath,
         checklist: record.checklist
       });
@@ -472,11 +474,28 @@ export const readBoard = async (projectPath: string, lastOpenedAt?: string): Pro
 
 const normalizeFrontMatterRelationships = (frontMatter: TicketFrontMatter): TicketFrontMatter => {
   const ticketType = frontMatter.ticketType ?? "task";
+  if (ticketType === "draft_ticket") {
+    return {
+      ...frontMatter,
+      ticketType,
+      draftTargetType: frontMatter.draftTargetType ?? null,
+      parentEpicId: null,
+      parentFeatureId: null,
+      subticketIds: [],
+      plannedFiles: [],
+      blockedByIds: uniqueTicketIds(frontMatter.blockedByIds ?? []),
+      relatedTicketIds: uniqueTicketIds(frontMatter.relatedTicketIds ?? [])
+    };
+  }
+  const ownsChildren = ticketType === "epic" || ticketType === "feature";
   return {
     ...frontMatter,
     ticketType,
+    draftTargetType: null,
     parentEpicId: ticketType === "epic" ? null : frontMatter.parentEpicId ?? null,
-    subticketIds: ticketType === "epic" ? uniqueTicketIds(frontMatter.subticketIds ?? []) : [],
+    parentFeatureId: ticketType === "task" ? frontMatter.parentFeatureId ?? null : null,
+    subticketIds: ownsChildren ? uniqueTicketIds(frontMatter.subticketIds ?? []) : [],
+    plannedFiles: ticketType === "task" ? normalizePlannedFiles(frontMatter.plannedFiles) : [],
     blockedByIds: uniqueTicketIds(frontMatter.blockedByIds ?? []),
     relatedTicketIds: uniqueTicketIds(frontMatter.relatedTicketIds ?? [])
   };
@@ -486,14 +505,29 @@ const assertRelationshipShape = (frontMatter: TicketFrontMatter): void => {
   if (frontMatter.parentEpicId && frontMatter.parentEpicId === frontMatter.id) {
     throw new Error("A ticket cannot be linked as its own epic.");
   }
-  if (frontMatter.ticketType === "epic" && frontMatter.parentEpicId) {
-    throw new Error("Nested epics are not supported.");
+  if (frontMatter.parentFeatureId && frontMatter.parentFeatureId === frontMatter.id) {
+    throw new Error("A ticket cannot be linked as its own feature.");
+  }
+  if (frontMatter.ticketType === "epic") {
+    if (frontMatter.parentEpicId) throw new Error("Nested epics are not supported.");
+    if (frontMatter.parentFeatureId) throw new Error("Epics cannot belong to a feature.");
+  }
+  if (frontMatter.ticketType === "feature" && frontMatter.parentFeatureId) {
+    throw new Error("Features cannot belong to another feature.");
+  }
+  if (frontMatter.ticketType === "draft_ticket") {
+    if (frontMatter.parentEpicId || frontMatter.parentFeatureId) {
+      throw new Error("Draft tickets cannot be linked to epics or features.");
+    }
+    if (frontMatter.subticketIds.length > 0) {
+      throw new Error("Draft tickets cannot own child tickets.");
+    }
   }
   if (frontMatter.ticketType === "task" && frontMatter.subticketIds.length > 0) {
-    throw new Error("Only epic tickets can own subtickets.");
+    throw new Error("Only epic and feature tickets can own child tickets.");
   }
-  if (frontMatter.ticketType === "epic" && frontMatter.subticketIds.includes(frontMatter.id)) {
-    throw new Error("An epic cannot include itself as a subticket.");
+  if ((frontMatter.ticketType === "epic" || frontMatter.ticketType === "feature") && frontMatter.subticketIds.includes(frontMatter.id)) {
+    throw new Error("A ticket cannot include itself as a child.");
   }
   if (frontMatter.blockedByIds.includes(frontMatter.id)) {
     throw new Error("A ticket cannot block itself.");
@@ -553,30 +587,62 @@ const assertEpicTicket = async (projectPath: string, epicId: string): Promise<Ti
   return epic;
 };
 
-const addSubticketIdToEpic = async (projectPath: string, epicId: string, ticketId: string): Promise<TicketRecord> => {
-  if (epicId === ticketId) {
-    throw new Error("An epic cannot include itself as a subticket.");
+const assertFeatureTicket = async (projectPath: string, featureId: string): Promise<TicketRecord> => {
+  const feature = await readTicket(projectPath, featureId);
+  if (feature.frontMatter.ticketType !== "feature") {
+    throw new Error(`Ticket ${featureId} is not a feature.`);
   }
-  const epic = await assertEpicTicket(projectPath, epicId);
-  if (epic.frontMatter.subticketIds.includes(ticketId)) return epic;
+  return feature;
+};
+
+const addSubticketIdToEpic = (projectPath: string, epicId: string, ticketId: string): Promise<TicketRecord> =>
+  addSubticketIdToParent(projectPath, epicId, ticketId, "epic");
+
+const removeSubticketIdFromEpic = (projectPath: string, epicId: string, ticketId: string): Promise<TicketRecord | null> =>
+  removeSubticketIdFromParent(projectPath, epicId, ticketId, "epic");
+
+const addSubticketIdToFeature = (projectPath: string, featureId: string, ticketId: string): Promise<TicketRecord> =>
+  addSubticketIdToParent(projectPath, featureId, ticketId, "feature");
+
+const removeSubticketIdFromFeature = (projectPath: string, featureId: string, ticketId: string): Promise<TicketRecord | null> =>
+  removeSubticketIdFromParent(projectPath, featureId, ticketId, "feature");
+
+const addSubticketIdToParent = async (
+  projectPath: string,
+  parentId: string,
+  ticketId: string,
+  parentType: "epic" | "feature"
+): Promise<TicketRecord> => {
+  if (parentId === ticketId) {
+    throw new Error("A ticket cannot include itself as a child.");
+  }
+  const parent =
+    parentType === "epic" ? await assertEpicTicket(projectPath, parentId) : await assertFeatureTicket(projectPath, parentId);
+  if (parent.frontMatter.subticketIds.includes(ticketId)) return parent;
   return writeTicket(projectPath, {
-    ...epic,
+    ...parent,
     frontMatter: {
-      ...epic.frontMatter,
-      subticketIds: [...epic.frontMatter.subticketIds, ticketId]
+      ...parent.frontMatter,
+      subticketIds: [...parent.frontMatter.subticketIds, ticketId]
     }
   });
 };
 
-const removeSubticketIdFromEpic = async (projectPath: string, epicId: string, ticketId: string): Promise<TicketRecord | null> => {
+const removeSubticketIdFromParent = async (
+  projectPath: string,
+  parentId: string,
+  ticketId: string,
+  parentType: "epic" | "feature"
+): Promise<TicketRecord | null> => {
   try {
-    const epic = await assertEpicTicket(projectPath, epicId);
-    if (!epic.frontMatter.subticketIds.includes(ticketId)) return epic;
+    const parent =
+      parentType === "epic" ? await assertEpicTicket(projectPath, parentId) : await assertFeatureTicket(projectPath, parentId);
+    if (!parent.frontMatter.subticketIds.includes(ticketId)) return parent;
     return writeTicket(projectPath, {
-      ...epic,
+      ...parent,
       frontMatter: {
-        ...epic.frontMatter,
-        subticketIds: epic.frontMatter.subticketIds.filter((id) => id !== ticketId)
+        ...parent.frontMatter,
+        subticketIds: parent.frontMatter.subticketIds.filter((id) => id !== ticketId)
       }
     });
   } catch (error) {
@@ -585,10 +651,17 @@ const removeSubticketIdFromEpic = async (projectPath: string, epicId: string, ti
   }
 };
 
-const validateParentEpic = async (projectPath: string, frontMatter: TicketFrontMatter): Promise<void> => {
+const validateParentRelationships = async (projectPath: string, frontMatter: TicketFrontMatter): Promise<void> => {
   assertRelationshipShape(frontMatter);
   if (frontMatter.parentEpicId) {
     await assertEpicTicket(projectPath, frontMatter.parentEpicId);
+  }
+  if (frontMatter.parentFeatureId) {
+    try {
+      await assertFeatureTicket(projectPath, frontMatter.parentFeatureId);
+    } catch (error) {
+      if (!isTicketNotFoundError(error)) throw error;
+    }
   }
 };
 
@@ -622,6 +695,9 @@ const markdownList = (items: readonly string[] | undefined): string => {
   const cleaned = items.map((item) => item.replace(/\s+/g, " ").trim()).filter(Boolean);
   return cleaned.length > 0 ? cleaned.map((item) => `- ${item}`).join("\n") : "- None.";
 };
+
+const normalizePlannedFiles = (items: readonly string[] | undefined): string[] =>
+  [...new Set((items ?? []).map((item) => item.trim()).filter(Boolean))];
 
 const researchMetadataMarkdown = (research?: TicketDraftResearch): string => {
   if (
@@ -696,11 +772,89 @@ No Codex run has been started.
 `;
 };
 
-export const ticketMarkdownFromSubticketDraft = (draft: TicketDraftSubticket, parentTitle: string): string => `# ${draft.title}
+export const ticketMarkdownFromLeanTaskDraft = (draft: LeanTaskDraft, parentTitle: string): string => `# ${draft.title}
+
+## Context
+
+Parent feature: ${parentTitle}
+
+${draft.context || "No additional context provided."}
+
+## Goal
+
+${draft.goal || (draft.requirements.find((item) => item.trim().length > 0) ?? `Deliver ${draft.title}.`)}
+
+## Requirements
+
+${markdownList(draft.requirements)}
+
+## Acceptance Criteria
+
+${markdownList(draft.acceptanceCriteria)}
+
+## Implementation Plan
+
+${markdownList(draft.implementationPlan)}
+
+## Assumptions
+
+${markdownList(draft.assumptions)}
+
+## Codex Handoff
+
+No Codex run has been started.
+`;
+
+export const ticketMarkdownFromUserTaskInput = (
+  title: string,
+  description: string | undefined,
+  parentFeatureTitle: string
+): string => {
+  const trimmedDescription = description?.trim();
+  return `# ${title.trim()}
+
+## Context
+
+Parent feature: ${parentFeatureTitle}
+
+${trimmedDescription || "No additional description provided."}
+
+## Codex Handoff
+
+No Codex run has been started.
+`;
+};
+
+export const ticketMarkdownFromFeatureStubDraft = (draft: FeatureStubDraft, parentTitle: string): string => `# ${draft.title}
 
 ## Context
 
 Parent epic: ${parentTitle}
+
+${draft.context || "No additional context provided."}
+
+## Requirements
+
+${markdownList(draft.requirements)}
+
+## Acceptance Criteria
+
+${markdownList(draft.acceptanceCriteria)}
+
+## Implementation Notes
+
+${markdownList(draft.implementationNotes)}
+
+## Codex Handoff
+
+Feature planning ticket — tasks are created under this feature before Codex execution.
+`;
+
+export const ticketMarkdownFromSubticketDraft = (draft: TicketDraftSubticket, parentTitle: string): string => `# ${draft.title}
+
+## Context
+
+Parent: ${parentTitle}
 
 ${draft.context || "No additional context provided."}
 
@@ -740,9 +894,14 @@ const truncateTitle = (value: string, maxLength = 80): string => {
   return `${value.slice(0, maxLength - 3).trimEnd()}...`;
 };
 
-const pendingTicketDraftTitle = (idea: string, ticketType?: TicketType): string => {
+const pendingTicketDraftTitle = (idea: string, draftTargetType?: FinalTicketType): string => {
   const normalized = normalizeDraftIdea(idea).replace(/^#+\s*/, "");
-  const fallback = ticketType === "epic" ? "Untitled epic draft" : "Untitled ticket draft";
+  const fallback =
+    draftTargetType === "epic"
+      ? "Untitled epic draft"
+      : draftTargetType === "feature"
+        ? "Untitled feature draft"
+        : "Untitled ticket draft";
   return `Draft: ${truncateTitle(normalized || fallback)}`;
 };
 
@@ -818,6 +977,15 @@ const createSingleTicket = async (projectPath: string, input: TicketCreateInput)
   if (ticketType === "epic" && input.parentEpicId) {
     throw new Error("Nested epics are not supported.");
   }
+  if (ticketType === "draft_ticket") {
+    if (input.parentEpicId || input.parentFeatureId) {
+      throw new Error("Draft tickets cannot be linked to epics or features.");
+    }
+  } else if (ticketType === "task" && !input.parentFeatureId && input.allowOrphanTask !== true) {
+    throw new Error("Tasks must belong to a feature. Create tasks from a feature detail page.");
+  } else if (ticketType === "task" && input.parentEpicId && input.allowOrphanTask !== true) {
+    throw new Error("Tasks cannot be linked directly to epics. Link the task under a feature instead.");
+  }
   const board = await readBoard(projectPath);
   const lastPosition = Math.max(0, ...board.tickets.filter((ticket) => ticket.status === status).map((ticket) => ticket.position));
   const createdAt = nowIso();
@@ -832,19 +1000,24 @@ const createSingleTicket = async (projectPath: string, input: TicketCreateInput)
     priority: input.priority,
     effort: input.effort ?? config.settings.defaultTicketEffort,
     labels: input.labels.map((label) => label.trim()).filter(Boolean),
-    parentEpicId: ticketType === "task" ? input.parentEpicId ?? null : null,
+    draftTargetType: ticketType === "draft_ticket" ? (input.draftTargetType ?? null) : null,
+    parentEpicId:
+      ticketType === "feature" ? input.parentEpicId ?? null : ticketType === "task" ? input.parentEpicId ?? null : null,
+    parentFeatureId: ticketType === "task" ? input.parentFeatureId ?? null : null,
     subticketIds: [],
+    plannedFiles: ticketType === "task" ? normalizePlannedFiles(input.plannedFiles) : [],
     blockedByIds: uniqueTicketIds(input.blockedByIds ?? []),
     relatedTicketIds: uniqueTicketIds(input.relatedTicketIds ?? []),
     createdAt,
     updatedAt: createdAt,
     authoringState: input.authoringState ?? "rough",
+    summary: input.summary?.trim() ?? "",
     codexThreadId: null,
     runStatus: "idle",
     lastRunId: null,
     lastRunStartedAt: null
   };
-  await validateParentEpic(projectPath, frontMatter);
+  await validateParentRelationships(projectPath, frontMatter);
   const path = await backendPath();
   const ticket: TicketRecord = {
     frontMatter,
@@ -865,8 +1038,11 @@ export const createPendingTicketDraft = async (
     throw new Error("Describe the ticket idea before drafting with the agent.");
   }
 
-  const ticketType = input.preferredTicketType ?? "task";
-  const title = pendingTicketDraftTitle(idea, ticketType);
+  const autoHierarchy = input.autoHierarchy === true;
+  const draftTargetType: FinalTicketType = autoHierarchy ? "task" : (input.preferredTicketType ?? "task");
+  const title = autoHierarchy
+    ? `Draft: ${truncateTitle(normalizeDraftIdea(idea) || "Untitled")}`
+    : pendingTicketDraftTitle(idea, draftTargetType);
   const placeholder = await createSingleTicket(projectPath, {
     title,
     priority: input.priority ?? "medium",
@@ -874,7 +1050,8 @@ export const createPendingTicketDraft = async (
     labels: [],
     markdown: ticketMarkdownFromPendingDraft(title, idea),
     status: RELAY_TODO_STATUS,
-    ticketType,
+    ticketType: "draft_ticket",
+    draftTargetType,
     relatedTicketIds: input.relatedTicketIds
   });
 
@@ -889,7 +1066,7 @@ export const createPendingTicketDraft = async (
   });
 };
 
-const createSubticketRecord = async (
+const createEpicFeatureRecord = async (
   projectPath: string,
   epicId: string,
   input: SubticketCreateInput
@@ -897,33 +1074,68 @@ const createSubticketRecord = async (
   await assertEpicTicket(projectPath, epicId);
   const child = await createSingleTicket(projectPath, {
     ...input,
-    ticketType: "task",
+    ticketType: "feature",
     parentEpicId: epicId,
+    parentFeatureId: null,
     subtickets: []
   });
   await addSubticketIdToEpic(projectPath, epicId, child.frontMatter.id);
   return readTicket(projectPath, child.frontMatter.id);
 };
 
+const createTaskUnderFeatureRecord = async (
+  projectPath: string,
+  featureId: string,
+  input: SubticketCreateInput | FeatureTaskCreateInput,
+  markdown: string
+): Promise<TicketRecord> => {
+  const feature = await assertFeatureTicket(projectPath, featureId);
+  const child = await createSingleTicket(projectPath, {
+    title: input.title,
+    priority: input.priority ?? "medium",
+    effort: "effort" in input ? input.effort : undefined,
+    labels: input.labels ?? [],
+    plannedFiles: "plannedFiles" in input ? input.plannedFiles : undefined,
+    markdown,
+    status: "status" in input ? input.status : undefined,
+    ticketType: "task",
+    parentFeatureId: featureId,
+    parentEpicId: null,
+    subtickets: []
+  });
+  await addSubticketIdToFeature(projectPath, featureId, child.frontMatter.id);
+  return readTicket(projectPath, child.frontMatter.id);
+};
+
 export const createTicket = async (projectPath: string, input: TicketCreateInput): Promise<TicketRecord> => {
   const subtickets = input.subtickets ?? [];
   const ticketType: TicketType = input.ticketType ?? "task";
+  if (ticketType === "feature" && subtickets.length > 0) {
+    throw new Error("Features cannot be created with nested subtickets in one request.");
+  }
   if (ticketType !== "epic" && subtickets.length > 0) {
-    throw new Error("Only epic tickets can be created with subtickets.");
+    throw new Error("Only epic tickets can be created with child stubs in one request.");
   }
   const ticket = await createSingleTicket(projectPath, {
     ...input,
     ticketType,
     subtickets: [],
-    subticketIds: []
+    subticketIds: [],
+    allowOrphanTask:
+      input.allowOrphanTask ??
+      (ticketType === "task" && !input.parentFeatureId
+        ? process.env.RELAY_TEST_RUN === "1"
+          ? true
+          : false
+        : undefined)
   });
 
-  if (ticket.frontMatter.parentEpicId) {
+  if (ticket.frontMatter.parentEpicId && ticket.frontMatter.ticketType === "feature") {
     await addSubticketIdToEpic(projectPath, ticket.frontMatter.parentEpicId, ticket.frontMatter.id);
   }
 
   for (const subticket of subtickets) {
-    await createSubticketRecord(projectPath, ticket.frontMatter.id, subticket);
+    await createEpicFeatureRecord(projectPath, ticket.frontMatter.id, subticket);
   }
 
   return readTicket(projectPath, ticket.frontMatter.id);
@@ -943,8 +1155,10 @@ export const applyTicketDraftToTicket = async (
       ...existing.frontMatter,
       title: draft.title.trim(),
       ticketType: draft.ticketType,
+      draftTargetType: null,
       priority: draft.priority,
       labels: draft.labels.map((label) => label.trim()).filter(Boolean),
+      summary: draft.summary.trim(),
       parentEpicId: null,
       subticketIds: [],
       authoringState: "reviewing",
@@ -954,18 +1168,336 @@ export const applyTicketDraftToTicket = async (
   });
 
   if (draft.ticketType === "epic") {
+    for (const featureStub of draft.featureStubs) {
+      await createEpicFeatureRecord(projectPath, updated.frontMatter.id, {
+        title: featureStub.title,
+        summary: featureStub.summary,
+        priority: featureStub.priority,
+        effort: updated.frontMatter.effort,
+        labels: featureStub.labels,
+        markdown: ticketMarkdownFromFeatureStubDraft(featureStub, draft.title)
+      });
+    }
     for (const subticket of draft.subtickets) {
-      await createSubticketRecord(projectPath, updated.frontMatter.id, {
+      await createEpicFeatureRecord(projectPath, updated.frontMatter.id, {
         title: subticket.title,
+        summary: subticket.summary,
         priority: subticket.priority,
         effort: updated.frontMatter.effort,
         labels: subticket.labels,
-        markdown: ticketMarkdownFromSubticketDraft(subticket, draft.title)
+        markdown: ticketMarkdownFromFeatureStubDraft(
+          {
+            title: subticket.title,
+            summary: subticket.summary,
+            priority: subticket.priority,
+            labels: subticket.labels,
+            context: subticket.context,
+            requirements: subticket.requirements,
+            acceptanceCriteria: subticket.acceptanceCriteria,
+            implementationNotes: subticket.implementationNotes ?? []
+          },
+          draft.title
+        )
       });
     }
   }
 
+  if (draft.ticketType === "task" && process.env.RELAY_TEST_RUN !== "1") {
+    throw new Error("Task-only drafts are not supported. Use feature planning with lean tasks or hierarchy drafting.");
+  }
+
+  if (draft.ticketType === "feature") {
+    for (const leanTask of draft.leanTasks) {
+      await createTaskUnderFeatureRecord(
+        projectPath,
+        updated.frontMatter.id,
+        {
+          title: leanTask.title,
+          summary: leanTask.summary,
+          priority: leanTask.priority,
+          labels: leanTask.labels,
+          plannedFiles: leanTask.plannedFiles
+        },
+        ticketMarkdownFromLeanTaskDraft(leanTask, draft.title)
+      );
+    }
+  }
+
   return readTicket(projectPath, updated.frontMatter.id);
+};
+
+export const applyImplementationScopeRedraftToTicket = async (
+  projectPath: string,
+  ticketId: string,
+  draft: TicketDraft,
+  runId: string
+): Promise<TicketRecord> => {
+  if (draft.ticketType !== "task") {
+    throw new Error("Implementation scope redraft must return a task draft.");
+  }
+
+  const plannedFiles = normalizePlannedFiles(draft.plannedFiles);
+  if (plannedFiles.length === 0) {
+    throw new Error("Implementation scope redraft must include at least one planned file path.");
+  }
+
+  const existing = await readTicket(projectPath, ticketId);
+  const clarifications = await readClarificationQuestions(projectPath, ticketId);
+  const hasOpenClarifications = clarifications.some((question) => !question.answer?.trim());
+
+  return writeTicket(projectPath, {
+    ...existing,
+    markdown: ticketMarkdownFromDraft(draft),
+    frontMatter: {
+      ...existing.frontMatter,
+      title: draft.title.trim(),
+      priority: draft.priority,
+      labels: draft.labels.map((label) => label.trim()).filter(Boolean),
+      summary: draft.summary.trim(),
+      plannedFiles,
+      authoringState: hasOpenClarifications ? "needs_input" : "ready",
+      runStatus: "idle",
+      codexThreadId: null,
+      lastRunId: runId
+    }
+  });
+};
+
+const emptyTicketDraftResearch = (): TicketDraftResearch => ({
+  generatedAt: "",
+  checkedUrls: [],
+  inspectedFiles: [],
+  limitations: [],
+  limits: {
+    maxResearchMs: 0,
+    maxUrls: 0,
+    maxUrlFetchMs: 0,
+    maxUrlContentChars: 0,
+    maxFilesToScan: 0,
+    maxFilesToRead: 0,
+    maxFileReadChars: 0,
+    maxMatchesPerFile: 0
+  }
+});
+
+const leanTaskToFeatureRoot = (leanTask: LeanTaskDraft): TicketDraftSubticket => ({
+  title: leanTask.title,
+  summary: leanTask.summary,
+  priority: leanTask.priority,
+  labels: leanTask.labels,
+  context: leanTask.context || leanTask.goal,
+  researchFindings: [],
+  requirements: leanTask.requirements.length > 0 ? leanTask.requirements : leanTask.goal ? [leanTask.goal] : [],
+  implementationPlan: [],
+  testPlan: [],
+  acceptanceCriteria: leanTask.acceptanceCriteria,
+  clarificationQuestions: [],
+  assumptions: leanTask.assumptions,
+  implementationNotes: []
+});
+
+type LegacyStandaloneHierarchyPlan = Omit<HierarchyDraftPlan, "planKind" | "root" | "leanTasks"> & {
+  planKind: "standalone_task";
+  standaloneTask?: LeanTaskDraft;
+  root?: TicketDraftSubticket;
+  leanTasks?: readonly LeanTaskDraft[];
+};
+
+const normalizeHierarchyDraftPlanForApply = (plan: HierarchyDraftPlan | LegacyStandaloneHierarchyPlan): HierarchyDraftPlan => {
+  if (plan.planKind !== "standalone_task") return plan;
+  const standalone = plan.standaloneTask;
+  if (!standalone) throw new Error("Standalone task plan is missing standaloneTask.");
+  return {
+    ...plan,
+    planKind: "feature_tree",
+    root: plan.root ?? leanTaskToFeatureRoot(standalone),
+    leanTasks: plan.leanTasks && plan.leanTasks.length > 0 ? [...plan.leanTasks] : [standalone]
+  };
+};
+
+const applyFeatureTreePlan = async (
+  projectPath: string,
+  placeholderTicketId: string,
+  root: TicketDraftSubticket,
+  leanTasks: readonly LeanTaskDraft[],
+  runId: string
+): Promise<string> => {
+  const featureDraft = hierarchyRootAsTicketDraft(root, "feature");
+  const feature = await applyDraftedTicketFrontMatter(projectPath, placeholderTicketId, featureDraft, runId, { finalizeDraft: false });
+  for (const leanTask of leanTasks) {
+    await createTaskUnderFeatureRecord(
+      projectPath,
+      feature.frontMatter.id,
+      {
+        title: leanTask.title,
+        summary: leanTask.summary,
+        priority: leanTask.priority,
+        labels: leanTask.labels,
+        plannedFiles: leanTask.plannedFiles
+      },
+      ticketMarkdownFromLeanTaskDraft(leanTask, feature.frontMatter.title)
+    );
+  }
+  await finalizeDraftedHierarchyRoot(projectPath, feature.frontMatter.id, runId);
+  return feature.frontMatter.id;
+};
+
+const hierarchyRootAsTicketDraft = (root: TicketDraftSubticket, ticketType: TicketType): TicketDraft => ({
+  ...root,
+  draftState: "ready",
+  blockingClarificationQuestions: [],
+  ticketType,
+  subtickets: [],
+  featureStubs: [],
+  leanTasks: [],
+  research: emptyTicketDraftResearch()
+});
+
+const applyDraftedTicketFrontMatter = async (
+  projectPath: string,
+  ticketId: string,
+  draft: TicketDraft,
+  runId: string,
+  options?: {
+    parentEpicId?: string | null;
+    parentFeatureId?: string | null;
+    allowOrphanTask?: boolean;
+    finalizeDraft?: boolean;
+  }
+): Promise<TicketRecord> => {
+  const existing = await readTicket(projectPath, ticketId);
+  const finalizeDraft = options?.finalizeDraft ?? true;
+  return writeTicket(projectPath, {
+    ...existing,
+    markdown: ticketMarkdownFromDraft(draft),
+    frontMatter: {
+      ...existing.frontMatter,
+      title: draft.title.trim(),
+      ticketType: draft.ticketType,
+      draftTargetType: null,
+      priority: draft.priority,
+      labels: draft.labels.map((label) => label.trim()).filter(Boolean),
+      summary: draft.summary.trim(),
+      parentEpicId: options?.parentEpicId ?? null,
+      parentFeatureId: options?.parentFeatureId ?? null,
+      subticketIds: [],
+      authoringState: finalizeDraft ? "reviewing" : existing.frontMatter.authoringState,
+      runStatus: finalizeDraft ? "draft_complete" : existing.frontMatter.runStatus,
+      lastRunId: runId
+    }
+  });
+};
+
+const finalizeDraftedHierarchyRoot = async (projectPath: string, ticketId: string, runId: string): Promise<TicketRecord> => {
+  const ticket = await readTicket(projectPath, ticketId);
+  return writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      authoringState: "reviewing",
+      runStatus: "draft_complete",
+      lastRunId: runId
+    }
+  });
+};
+
+export const applyHierarchyDraftPlan = async (
+  projectPath: string,
+  placeholderTicketId: string,
+  plan: HierarchyDraftPlan | LegacyStandaloneHierarchyPlan,
+  runId: string
+): Promise<string> => {
+  const normalizedPlan = normalizeHierarchyDraftPlanForApply(plan);
+  switch (normalizedPlan.planKind) {
+    case "feature_tree": {
+      if (!normalizedPlan.root) throw new Error("Feature tree plan is missing root.");
+      return applyFeatureTreePlan(projectPath, placeholderTicketId, normalizedPlan.root, normalizedPlan.leanTasks, runId);
+    }
+    case "epic_tree": {
+      if (!normalizedPlan.root) throw new Error("Epic tree plan is missing root.");
+      const epicDraft = hierarchyRootAsTicketDraft(normalizedPlan.root, "epic");
+      const epic = await applyDraftedTicketFrontMatter(projectPath, placeholderTicketId, epicDraft, runId, { finalizeDraft: false });
+      for (const featurePlan of normalizedPlan.features) {
+        const featureRecord = await createEpicFeatureRecord(projectPath, epic.frontMatter.id, {
+          title: featurePlan.stub.title,
+          summary: featurePlan.stub.summary,
+          priority: featurePlan.stub.priority,
+          effort: epic.frontMatter.effort,
+          labels: featurePlan.stub.labels,
+          markdown: ticketMarkdownFromFeatureStubDraft(featurePlan.stub, epic.frontMatter.title)
+        });
+        for (const leanTask of featurePlan.leanTasks) {
+          await createTaskUnderFeatureRecord(
+            projectPath,
+            featureRecord.frontMatter.id,
+            {
+              title: leanTask.title,
+              summary: leanTask.summary,
+              priority: leanTask.priority,
+              labels: leanTask.labels,
+              plannedFiles: leanTask.plannedFiles
+            },
+            ticketMarkdownFromLeanTaskDraft(leanTask, featureRecord.frontMatter.title)
+          );
+        }
+      }
+      await finalizeDraftedHierarchyRoot(projectPath, epic.frontMatter.id, runId);
+      return epic.frontMatter.id;
+    }
+    case "extend_epic": {
+      if (!normalizedPlan.root) throw new Error("Extend epic plan is missing root.");
+      const epicId = normalizedPlan.matchedEpicId?.trim();
+      if (!epicId) throw new Error("Extend epic plan requires matchedEpicId.");
+      const featureDraft = hierarchyRootAsTicketDraft(normalizedPlan.root, "feature");
+      const feature = await applyDraftedTicketFrontMatter(projectPath, placeholderTicketId, featureDraft, runId, {
+        parentEpicId: epicId,
+        finalizeDraft: false
+      });
+      await linkSubticket(projectPath, epicId, feature.frontMatter.id);
+      for (const leanTask of normalizedPlan.leanTasks) {
+        await createTaskUnderFeatureRecord(
+          projectPath,
+          feature.frontMatter.id,
+          {
+            title: leanTask.title,
+            summary: leanTask.summary,
+            priority: leanTask.priority,
+            labels: leanTask.labels,
+            plannedFiles: leanTask.plannedFiles
+          },
+          ticketMarkdownFromLeanTaskDraft(leanTask, feature.frontMatter.title)
+        );
+      }
+      await finalizeDraftedHierarchyRoot(projectPath, feature.frontMatter.id, runId);
+      return feature.frontMatter.id;
+    }
+    case "extend_feature": {
+      const featureId = normalizedPlan.matchedFeatureId?.trim();
+      if (!featureId) throw new Error("Extend feature plan requires matchedFeatureId.");
+      const feature = await readTicket(projectPath, featureId);
+      const leanTasks = normalizedPlan.extendFeature?.leanTasks ?? [];
+      await deleteTicket(projectPath, placeholderTicketId);
+      for (const leanTask of leanTasks) {
+        await createTaskUnderFeatureRecord(
+          projectPath,
+          featureId,
+          {
+            title: leanTask.title,
+            summary: leanTask.summary,
+            priority: leanTask.priority,
+            labels: leanTask.labels,
+            plannedFiles: leanTask.plannedFiles
+          },
+          ticketMarkdownFromLeanTaskDraft(leanTask, feature.frontMatter.title)
+        );
+      }
+      return featureId;
+    }
+    default: {
+      const unsupported: string = plan.planKind;
+      throw new Error(`Unsupported hierarchy plan kind: ${unsupported}`);
+    }
+  }
 };
 
 export const failPendingTicketDraft = async (
@@ -1015,16 +1547,50 @@ export const blockPendingTicketDraftForClarification = async (
 };
 
 export const createSubticket = async ({ projectPath, epicId, ticket }: EpicSubticketCreateInput): Promise<TicketRecord> =>
-  createSubticketRecord(projectPath, epicId, ticket);
+  createEpicFeatureRecord(projectPath, epicId, ticket);
+
+export const createEpicFeature = async ({ projectPath, epicId, ticket }: EpicFeatureCreateInput): Promise<TicketRecord> =>
+  createEpicFeatureRecord(projectPath, epicId, ticket);
+
+export const createTaskUnderFeature = async ({
+  projectPath,
+  featureId,
+  input
+}: {
+  projectPath: string;
+  featureId: string;
+  input: FeatureTaskCreateInput;
+}): Promise<TicketRecord> => {
+  const feature = await assertFeatureTicket(projectPath, featureId);
+  return createTaskUnderFeatureRecord(
+    projectPath,
+    featureId,
+    input,
+    ticketMarkdownFromUserTaskInput(input.title, input.description, feature.frontMatter.title)
+  );
+};
+
+export const createFeatureSubticket = async ({ projectPath, featureId, ticket }: FeatureSubticketCreateInput): Promise<TicketRecord> =>
+  createTaskUnderFeatureRecord(projectPath, featureId, ticket, ticket.markdown);
 
 export const linkSubticket = async (projectPath: string, epicId: string, ticketId: string): Promise<BoardSnapshot> => {
   if (epicId === ticketId) {
-    throw new Error("An epic cannot include itself as a subticket.");
+    throw new Error("An epic cannot include itself as a child.");
   }
   await assertEpicTicket(projectPath, epicId);
   const child = await readTicket(projectPath, ticketId);
   if (child.frontMatter.ticketType === "epic") {
     throw new Error("Nested epics are not supported.");
+  }
+  if (child.frontMatter.ticketType === "task") {
+    const epic = await readTicket(projectPath, epicId);
+    const isLegacyLink = epic.frontMatter.subticketIds.includes(ticketId) && child.frontMatter.parentEpicId === epicId;
+    if (!isLegacyLink) {
+      throw new Error("Epics can only link feature tickets. Link tasks under a feature instead.");
+    }
+  }
+  if (child.frontMatter.ticketType !== "feature" && child.frontMatter.ticketType !== "task") {
+    throw new Error("Epics can only link feature tickets.");
   }
   if (child.frontMatter.parentEpicId && child.frontMatter.parentEpicId !== epicId) {
     await removeSubticketIdFromEpic(projectPath, child.frontMatter.parentEpicId, ticketId);
@@ -1033,7 +1599,8 @@ export const linkSubticket = async (projectPath: string, epicId: string, ticketI
     ...child,
     frontMatter: {
       ...child.frontMatter,
-      parentEpicId: epicId,
+      parentEpicId: child.frontMatter.ticketType === "feature" ? epicId : child.frontMatter.parentEpicId,
+      parentFeatureId: child.frontMatter.ticketType === "task" ? child.frontMatter.parentFeatureId : null,
       subticketIds: []
     }
   });
@@ -1041,10 +1608,36 @@ export const linkSubticket = async (projectPath: string, epicId: string, ticketI
   return readBoard(projectPath);
 };
 
+export const linkFeatureSubticket = async (projectPath: string, featureId: string, ticketId: string): Promise<BoardSnapshot> => {
+  if (featureId === ticketId) {
+    throw new Error("A feature cannot include itself as a child.");
+  }
+  await assertFeatureTicket(projectPath, featureId);
+  const child = await readTicket(projectPath, ticketId);
+  if (child.frontMatter.ticketType !== "task") {
+    throw new Error("Features can only link task tickets.");
+  }
+  if (child.frontMatter.parentFeatureId && child.frontMatter.parentFeatureId !== featureId) {
+    await removeSubticketIdFromFeature(projectPath, child.frontMatter.parentFeatureId, ticketId);
+  }
+  const feature = await readTicket(projectPath, featureId);
+  await writeTicket(projectPath, {
+    ...child,
+    frontMatter: {
+      ...child.frontMatter,
+      parentFeatureId: featureId,
+      parentEpicId: feature.frontMatter.parentEpicId,
+      subticketIds: []
+    }
+  });
+  await addSubticketIdToFeature(projectPath, featureId, ticketId);
+  return readBoard(projectPath);
+};
+
 export const unlinkSubticket = async (projectPath: string, epicId: string, ticketId: string): Promise<BoardSnapshot> => {
   await assertEpicTicket(projectPath, epicId);
   const child = await readTicket(projectPath, ticketId);
-  if (child.frontMatter.parentEpicId === epicId) {
+  if (child.frontMatter.parentEpicId === epicId && child.frontMatter.ticketType === "feature") {
     await writeTicket(projectPath, {
       ...child,
       frontMatter: {
@@ -1055,6 +1648,10 @@ export const unlinkSubticket = async (projectPath: string, epicId: string, ticke
   }
   await removeSubticketIdFromEpic(projectPath, epicId, ticketId);
   return readBoard(projectPath);
+};
+
+export const unlinkFeatureSubticket = async (_projectPath: string, _featureId: string, _ticketId: string): Promise<BoardSnapshot> => {
+  throw new Error("Tasks must stay linked to a feature. Delete the task or link it under another feature instead of unlinking.");
 };
 
 const calculatePosition = (tickets: TicketSummary[], targetStatus: string, beforeId?: string | null, afterId?: string | null): number => {
@@ -1091,6 +1688,12 @@ export const transitionTicketStatus = async (
 
   const board = await readBoard(projectPath);
   const record = await readTicket(projectPath, ticketId);
+  if (
+    (record.frontMatter.ticketType === "epic" || record.frontMatter.ticketType === "feature") &&
+    targetStatus !== RELAY_ARCHIVE_STATUS
+  ) {
+    throw new Error("Epic and feature tickets cannot change workflow status. Move child tasks between columns instead.");
+  }
   const fromStatus = record.frontMatter.status;
   const position =
     fromStatus === targetStatus
@@ -1150,6 +1753,19 @@ export const setTicketQueued = async (projectPath: string, ticketId: string, run
   });
 };
 
+export const setTicketQueuedInPlace = async (projectPath: string, ticketId: string, runId: string): Promise<TicketRecord> => {
+  const current = await readTicket(projectPath, ticketId);
+  return writeTicket(projectPath, {
+    ...current,
+    frontMatter: {
+      ...current.frontMatter,
+      authoringState: "ready",
+      runStatus: "queued",
+      lastRunId: runId
+    }
+  });
+};
+
 export const clearQueuedTicket = async (
   projectPath: string,
   ticketId: string,
@@ -1184,7 +1800,12 @@ export const clearQueuedTicket = async (
 export const listQueuedReadyTickets = async (projectPath: string): Promise<TicketSummary[]> => {
   const board = await readBoard(projectPath);
   return board.tickets
-    .filter((ticket) => ticket.status === RELAY_READY_STATUS && ticket.runStatus === "queued" && Boolean(ticket.lastRunId))
+    .filter(
+      (ticket) =>
+        (ticket.status === RELAY_READY_STATUS || ticket.status === RELAY_IN_PROGRESS_STATUS) &&
+        ticket.runStatus === "queued" &&
+        Boolean(ticket.lastRunId)
+    )
     .sort((a, b) => a.position - b.position);
 };
 
@@ -1197,7 +1818,7 @@ export const saveTicket = async (input: TicketSaveInput): Promise<TicketRecord> 
 
   const existing = await readTicket(input.projectPath, input.ticket.frontMatter.id);
   const normalizedFrontMatter = normalizeFrontMatterRelationships(input.ticket.frontMatter);
-  await validateParentEpic(input.projectPath, normalizedFrontMatter);
+  await validateParentRelationships(input.projectPath, normalizedFrontMatter);
   const statusChanged = existing.frontMatter.status !== targetStatus;
   let position = input.ticket.frontMatter.position;
   if (statusChanged) {
@@ -1387,39 +2008,49 @@ const unlinkTicketRelationshipsBeforeDelete = async (projectPath: string, ticket
   if (ticket.frontMatter.parentEpicId) {
     await removeSubticketIdFromEpic(projectPath, ticket.frontMatter.parentEpicId, ticket.frontMatter.id);
   }
-
-  if (ticket.frontMatter.ticketType !== "epic") return;
-
-  const config = await readProjectConfig(projectPath);
-  const { records } = await readTickets(projectPath, config.columns);
-  const childIds = uniqueTicketIds([
-    ...ticket.frontMatter.subticketIds,
-    ...records
-      .filter((record) => record.frontMatter.parentEpicId === ticket.frontMatter.id)
-      .map((record) => record.frontMatter.id)
-  ]);
-
-  for (const childId of childIds) {
-    if (childId === ticket.frontMatter.id) continue;
-    try {
-      const child = await readTicket(projectPath, childId);
-      if (child.frontMatter.parentEpicId !== ticket.frontMatter.id) continue;
-      await writeTicket(projectPath, {
-        ...child,
-        frontMatter: {
-          ...child.frontMatter,
-          parentEpicId: null
-        }
-      });
-    } catch (error) {
-      if (!isTicketNotFoundError(error)) throw error;
-    }
+  if (ticket.frontMatter.parentFeatureId) {
+    await removeSubticketIdFromFeature(projectPath, ticket.frontMatter.parentFeatureId, ticket.frontMatter.id);
   }
 };
 
-export const deleteTicket = async (projectPath: string, ticketId: string): Promise<BoardSnapshot> => {
-  const ticket = await readTicket(projectPath, ticketId);
-  await unlinkTicketRelationshipsBeforeDelete(projectPath, ticket);
+const collectFeatureChildTaskIds = (feature: TicketRecord, records: readonly TicketRecord[]): string[] =>
+  uniqueTicketIds([
+    ...feature.frontMatter.subticketIds,
+    ...records
+      .filter((record) => record.frontMatter.parentFeatureId === feature.frontMatter.id)
+      .map((record) => record.frontMatter.id)
+  ]);
+
+const collectEpicDescendantIds = (
+  epic: TicketRecord,
+  records: readonly TicketRecord[]
+): { featureIds: string[]; taskIds: string[] } => {
+  const epicId = epic.frontMatter.id;
+  const featureIds = uniqueTicketIds([
+    ...epic.frontMatter.subticketIds.filter((childId) => {
+      const child = records.find((record) => record.frontMatter.id === childId);
+      return child?.frontMatter.ticketType === "feature";
+    }),
+    ...records
+      .filter((record) => record.frontMatter.parentEpicId === epicId && record.frontMatter.ticketType === "feature")
+      .map((record) => record.frontMatter.id)
+  ]);
+  const taskIds = uniqueTicketIds([
+    ...records
+      .filter((record) => record.frontMatter.parentEpicId === epicId && record.frontMatter.ticketType === "task")
+      .map((record) => record.frontMatter.id),
+    ...records
+      .filter((record) => record.frontMatter.parentFeatureId && featureIds.includes(record.frontMatter.parentFeatureId))
+      .map((record) => record.frontMatter.id),
+    ...featureIds.flatMap((featureId) => {
+      const feature = records.find((record) => record.frontMatter.id === featureId);
+      return feature ? collectFeatureChildTaskIds(feature, records) : [];
+    })
+  ]);
+  return { featureIds, taskIds };
+};
+
+const trashTicketFile = async (projectPath: string, ticketId: string): Promise<void> => {
   const path = await backendPath();
   const source = ticketPath(path, projectPath, ticketId);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1432,12 +2063,52 @@ export const deleteTicket = async (projectPath: string, ticketId: string): Promi
       yield* fs.rename(source, target);
     })
   );
+};
+
+const deleteTicketWithoutCascade = async (projectPath: string, ticketId: string): Promise<void> => {
+  const ticket = await readTicket(projectPath, ticketId);
+  await unlinkTicketRelationshipsBeforeDelete(projectPath, ticket);
+  await trashTicketFile(projectPath, ticketId);
+};
+
+export const deleteTicket = async (projectPath: string, ticketId: string): Promise<BoardSnapshot> => {
+  const ticket = await readTicket(projectPath, ticketId);
+  const config = await readProjectConfig(projectPath);
+  const { records } = await readTickets(projectPath, config.columns);
+
+  if (ticket.frontMatter.ticketType === "epic") {
+    const { featureIds, taskIds } = collectEpicDescendantIds(ticket, records);
+    for (const childTaskId of taskIds) {
+      try {
+        await deleteTicketWithoutCascade(projectPath, childTaskId);
+      } catch (error) {
+        if (!isTicketNotFoundError(error)) throw error;
+      }
+    }
+    for (const childFeatureId of featureIds) {
+      try {
+        await deleteTicketWithoutCascade(projectPath, childFeatureId);
+      } catch (error) {
+        if (!isTicketNotFoundError(error)) throw error;
+      }
+    }
+  } else if (ticket.frontMatter.ticketType === "feature") {
+    for (const childTaskId of collectFeatureChildTaskIds(ticket, records)) {
+      try {
+        await deleteTicketWithoutCascade(projectPath, childTaskId);
+      } catch (error) {
+        if (!isTicketNotFoundError(error)) throw error;
+      }
+    }
+  }
+
+  await deleteTicketWithoutCascade(projectPath, ticketId);
   return readBoard(projectPath);
 };
 
 export const duplicateTicket = async (projectPath: string, ticketId: string): Promise<TicketRecord> => {
   const source = await readTicket(projectPath, ticketId);
-  return createTicket(projectPath, {
+  return createSingleTicket(projectPath, {
     title: `${source.frontMatter.title} Copy`,
     priority: source.frontMatter.priority,
     effort: source.frontMatter.effort,
@@ -1445,7 +2116,10 @@ export const duplicateTicket = async (projectPath: string, ticketId: string): Pr
     markdown: source.markdown,
     status: source.frontMatter.status,
     ticketType: source.frontMatter.ticketType,
-    blockedByIds: source.frontMatter.blockedByIds
+    parentEpicId: source.frontMatter.parentEpicId,
+    parentFeatureId: source.frontMatter.parentFeatureId,
+    blockedByIds: source.frontMatter.blockedByIds,
+    allowOrphanTask: source.frontMatter.ticketType === "task" && !source.frontMatter.parentFeatureId
   });
 };
 

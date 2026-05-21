@@ -2,7 +2,7 @@
 
 Status: Draft v1
 
-Last updated: 2026-05-10
+Last updated: 2026-05-20
 
 ## Normative Language
 
@@ -82,13 +82,14 @@ Relay v1 has these screens:
 2. `Project Board`
    - Shows the selected project's columns.
    - Supports card creation, drag and drop, column filtering, and card search.
+   - Todo **tasks** use click-and-hold drag to **Ready** only (queue eligible work). Todo **features** and **epics** may also drag to **Not Doing** (cancel+revert active runs on descendant tasks, then move each non-terminal descendant task). **Not Doing** items drag back to **Todo** with hierarchy rules: restore a deferred **epic** via the epic handle (all descendant tasks), a deferred **feature** via the feature handle when its epic is not fully deferred, and standalone or partially deferred tasks individually when their parent scope is not fully in Not Doing.
    - Shows ticket status, title, priority, labels, run status, and last updated time.
 
 3. `Ticket Detail`
    - Opens as a side panel or modal from a board card.
    - Shows editable ticket markdown sections.
    - Shows metadata fields.
-   - Provides `Start Codex`, `Resume Codex`, `Stop`, `Mark Completed`, and `Move` controls.
+   - Provides `Start Codex`, `Resume Codex`, `Stop`, paused-run `Continue`, paused-run `Discard changes` (tries to restore the pre-run working tree for that run when baseline data is available), `Mark Completed`, and `Move` controls.
    - Shows the run console and final Codex handoff.
 
 4. `Create Ticket`
@@ -218,7 +219,7 @@ export interface CodexClient {
     input: RelayCodexInput,
     options: RelayCodexRunOptions,
   ): AsyncIterable<RelayCodexEvent>;
-  cancelRun(runId: string): Promise<void>;
+  cancelRun(input: { runId: string; revertChanges?: boolean }): Promise<{ revertMessage: string | null }>;
   submitApproval(approvalId: string, decision: RelayApprovalDecision): Promise<void>;
 }
 ```
@@ -445,6 +446,41 @@ Rules:
 - `runStatus` MUST be one of `idle`, `drafting`, `running`, `blocked`, `failed`, `completed`, or `cancelled`.
 - Relay MUST preserve unknown front matter fields when rewriting a ticket.
 - Relay MUST preserve user-authored markdown content when updating metadata.
+
+#### 5.5.1 Ticket hierarchy (Epic → Feature → Task)
+
+Relay organizes planning and execution in three ticket types:
+
+| Type | Purpose | Codex execution | Typical children |
+| --- | --- | --- | --- |
+| `epic` | Large initiative | Blocked | `feature` tickets only |
+| `feature` | Specific capability | Blocked | `task` tickets |
+| `task` | Bite-sized change | Allowed (per task) | None |
+
+Relationship front matter:
+
+- `ticketType`: `epic`, `feature`, or `task`
+- `parentEpicId`: optional on `feature` tickets; legacy read-only on orphan `task` tickets linked directly to epics
+- `parentFeatureId`: required for newly created `task` tickets; legacy/orphan tasks without a parent may still exist on the board but cannot be created or unlinked into that state
+- `subticketIds`: child IDs on `epic` (features) and `feature` (tasks)
+
+Creation rules:
+
+- The floating ticket composer uses **auto hierarchy drafting**: intake classifies work (`planKind`) against existing epics/features on the board, then a hierarchy draft materializes the right shape.
+- `planKind` values: `feature_tree` (including micro changes as one feature plus one lean task), `epic_tree`, `extend_epic` (new feature under matched epic + tasks), `extend_feature` (tasks only under matched feature; placeholder discarded). `standalone_task` is deprecated and coerced to `feature_tree` on apply.
+- Intake returns `matchedEpicId` / `matchedFeatureId` only for high-confidence board matches; invalid ids are cleared and the plan is downgraded safely.
+- Feature drafts MAY include agent-generated `leanTasks[]` applied when the draft is accepted.
+- Epic drafts emit `featureStubs[]` (each with nested lean tasks) only.
+- Users add tasks under a feature from feature detail (**Add task**) via `createTaskUnderFeature` without invoking Codex.
+- Manual board/API creation rejects new orphan `task` tickets when no `parentFeatureId` is supplied (`allowOrphanTask` defaults false); pass `allowOrphanTask: true` only to duplicate or grandfather existing orphans. Feature-scoped creation uses `createTaskUnderFeature`.
+- Codex implementation preflight does **not** block orphan/standalone tasks; only `epic` and `feature` tickets are blocked from agent runs.
+- Legacy tickets without `parentFeatureId` or epic→task links remain readable; new epic→task links are rejected.
+- Saving a task whose `parentFeatureId` points at a deleted feature is allowed (stale parent links are ignored).
+- Deleting a **feature** removes all tasks under it; deleting an **epic** removes all linked features and their tasks (and any legacy tasks linked directly to the epic).
+- Tasks whose parent feature no longer exists still appear in their column as normal cards (not hidden inside a missing group).
+- **Board column visibility is task-driven**: a `task` appears in a column when its `status` matches that column. A `feature` or `epic` appears in a column only when at least one descendant `task` is in that column (container `status` is ignored for board placement).
+- On the board, epics render as lightweight headers above nested feature groups; features render as grouped containers around their in-column tasks. Sidebar swimlane counts count **tasks only** per column.
+- Epics and features are **containers**, not workflow cards: ticket detail MUST NOT offer a workflow Status control for them, and status transition APIs MUST reject moving `epic` / `feature` tickets between columns (move child tasks instead).
 
 ### 5.6 Run Logs
 
@@ -746,12 +782,28 @@ Run state values:
 | `idle` | No run has started. |
 | `drafting` | Ticket is being drafted by Codex. |
 | `running` | Codex is actively working on the ticket. |
+| `paused` | Implementation work was stopped without discarding workspace changes and can continue on the same Codex thread. |
 | `blocked` | Codex requested clarification or approval that has not been resolved. |
 | `failed` | The run ended with an error. |
 | `completed` | Codex completed its turn and produced a handoff. |
 | `cancelled` | The user cancelled the active run. |
 
 The board card MUST display run state.
+
+#### Planned files (metadata only)
+
+- Task tickets MUST store planned repo-relative file paths in ticket metadata (`plannedFiles` in front matter), not in the markdown body shown in the ticket viewer.
+- The ticket detail sidebar MUST show the current planned file list for tasks (read-only).
+- Drafting MAY still require the agent to output `plannedFiles`; Relay MUST persist them to metadata without duplicating them into a `## Planned File Scope` markdown section.
+
+#### Path locks (mulock)
+
+- Relay MUST maintain a per-project path lock registry (`.relay/path-locks.json`) as the single source of truth for which task holds which file path.
+- Before an implementation run starts, Relay MUST acquire locks for all of that ticket's planned paths (exact file match only).
+- Another queued task MUST NOT start while any of its planned paths are locked by a different task; the scheduler skips it until locks are released.
+- When a run completes, fails, is cancelled, or is deferred, Relay MUST release that run's locks.
+- If Codex touches a file outside the current planned scope and the path is not locked by another task, Relay MUST lock the path, append it to `plannedFiles`, and continue the run in place.
+- If that path is locked by another task, Relay MUST abort the run, revert run git changes when available, append the path to `plannedFiles`, move the ticket to `Ready`, re-queue it, and release the deferred run's locks so it can start after the holder finishes.
 
 ### 8.6 Streaming and Run Console
 
@@ -820,6 +872,13 @@ If the run fails:
 - Relay MUST set `runStatus` to `failed`.
 - Relay MUST show a retry/resume option.
 - Relay MUST keep the run log.
+
+If a failed or paused implementation retry has no `plannedFiles` and Relay cannot infer scope from the previous run log:
+
+- Relay MUST block the retry, create a clarification explaining the missing scope, set `runStatus` to `blocked`, and move the ticket to `Needs Clarification`.
+- The clarification MUST appear alongside any other open clarifications on the ticket. The user may answer clarifications in any order.
+- That clarification uses the same answer UI as other clarifications, with a prefilled response (for example, “Redraft and rescope files”). Submitting it starts an agent scope redraft; when the redraft finishes, Relay records the clarification answer and applies `plannedFiles`.
+- Relay MUST move the ticket to `Ready` with `runStatus` idle only after every clarification is answered and `plannedFiles` is defined.
 
 ## 9. HTTP API
 
@@ -971,15 +1030,17 @@ Ticket detail SHOULD support keyboard shortcuts for save and close.
 
 Create Ticket requirements:
 
-- Rough idea text input.
+- Rough idea text input from the board composer; Relay auto-selects epic, feature, or task scope (no type picker).
+- Optional hint that planning is automatic from scope and existing board tickets.
 - Drafting progress state.
 - Generated draft preview.
 - Manual edit before save.
 - Regenerate.
 - Save to board.
 - Cancel.
+- Feature detail **Add task** for user-authored lean tasks (title + optional description) without Codex.
 
-If Codex is unavailable, the UI MUST offer manual ticket creation instead of dead-ending.
+If Codex is unavailable, the UI MUST still allow manual feature/epic creation where supported instead of dead-ending.
 
 ### 10.6 Approval Prompts
 

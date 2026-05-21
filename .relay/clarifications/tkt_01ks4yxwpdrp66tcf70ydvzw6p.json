@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "ticketId": "tkt_01ks4yxwpdrp66tcf70ydvzw6p",
+  "questions": [
+    {
+      "id": "clar_01ks4z2p70drt7bh580m3yg5zh",
+      "ticketId": "tkt_01ks4yxwpdrp66tcf70ydvzw6p",
+      "question": "Should the selected CLI apply to all new agent-backed actions in Relay, or only to implementation/code-edit runs at first?\n\nWhy it matters: The current codepath hardcodes Codex across draft intake, ticket drafting/redrafting/updates, repository chat, and implementation. The MVP boundary changes both ticket scope and backend routing work.\nRecommended answer: Apply the selected CLI to all new agent-backed actions: draft intake, ticket drafting/redrafting/updates, repository chat, and implementation. Existing queued or running work stays on the provider it already claimed.",
+      "answerType": "text",
+      "answer": "Yes lets do only new actions. and what we can do to make more robust is prevent a change if there are current processors.\n\nso when all processors are finished, and there are no tickets basically in processing, and the cli isnt busy with like drafts or redrafts and is idal, then we can change the CLI.\n\nnote i want to be able to switch the cli in other states so two clis can still work on like one codbase and be agnostic in how they work with the .relay files",
+      "createdAt": "2026-05-21T09:50:14.240Z",
+      "updatedAt": "2026-05-21T10:07:11.116Z",
+      "answeredAt": "2026-05-21T10:07:11.116Z",
+      "createdBy": "codex",
+      "source": "draft_generation",
+      "runId": "run_01ks4yxwp92pnhja551yj9080k",
+      "codexThreadId": "draft_run_01ks4yxwp92pnhja551yj9080k"
+    },
+    {
+      "id": "clar_01ks4z2p70j3enjf9a464hpm5q",
+      "ticketId": "tkt_01ks4yxwpdrp66tcf70ydvzw6p",
+      "question": "If Cursor or Claude is installed but Relay cannot reliably verify login status non-interactively, what should the modal show and should `Use CLI` stay disabled?\n\nWhy it matters: Reliable \"connected\" detection may differ by CLI. The ticket needs an explicit fallback state so the UI and acceptance criteria do not overpromise provider readiness.\nRecommended answer: Show `Installed, status unknown`, keep `Use CLI` disabled for that provider, and surface a short hint that Relay needs a detectable signed-in state before it can switch to that CLI.",
+      "answerType": "text",
+      "answer": "Yes keep the Use CLI disabled if the cli isnt there and we cant verify the user is connected and logged in",
+      "createdAt": "2026-05-21T09:50:14.240Z",
+      "updatedAt": "2026-05-21T10:07:52.545Z",
+      "answeredAt": "2026-05-21T10:07:52.545Z",
+      "createdBy": "codex",
+      "source": "draft_generation",
+      "runId": "run_01ks4yxwp92pnhja551yj9080k",
+      "codexThreadId": "draft_run_01ks4yxwp92pnhja551yj9080k"
+    }
+  ]
+}

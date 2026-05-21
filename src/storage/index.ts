@@ -5,11 +5,15 @@ import type {
   ClarificationQuestionCreateInput,
   CreateDraftInput,
   EpicSubticketCreateInput,
+  FeatureSubticketCreateInput,
+  FeatureSubticketLinkInput,
+  FeatureTaskCreateRequest,
   ProjectConfig,
   ProjectSummary,
   TicketAttachmentSaveInput,
   TicketAttachmentSaveResult,
   TicketCreateInput,
+  HierarchyDraftPlan,
   TicketDraft,
   TicketDraftResearch,
   TicketDraftSubticket,
@@ -39,7 +43,7 @@ import { FileSystemTicketStoreLive, TicketStore, type TicketStoreService } from 
 export { TicketNotFoundError, isTicketNotFoundError } from "./errors";
 export { newId } from "./ids";
 export { runsPath } from "./paths";
-export { appendCodexHandoff } from "./filesystem";
+export { appendCodexHandoff, applyImplementationScopeRedraftToTicket } from "./filesystem";
 export { AtomicFile, AtomicFileLive } from "./AtomicFile";
 export { makeFileSystemRunLog } from "./stores/RunLog";
 export type { ClarificationQuestionCreateOptions, StatusTransitionOptions } from "./filesystem";
@@ -64,8 +68,18 @@ export type StorageService = {
   readonly createSubticket: (input: EpicSubticketCreateInput) => StorageEffect<TicketRecord>;
   readonly linkSubticket: (projectPath: string, epicId: string, ticketId: string) => StorageEffect<BoardSnapshot>;
   readonly unlinkSubticket: (projectPath: string, epicId: string, ticketId: string) => StorageEffect<BoardSnapshot>;
+  readonly createTaskUnderFeature: (input: FeatureTaskCreateRequest) => StorageEffect<TicketRecord>;
+  readonly createFeatureSubticket: (input: FeatureSubticketCreateInput) => StorageEffect<TicketRecord>;
+  readonly linkFeatureSubticket: (projectPath: string, featureId: string, ticketId: string) => StorageEffect<BoardSnapshot>;
+  readonly unlinkFeatureSubticket: (projectPath: string, featureId: string, ticketId: string) => StorageEffect<BoardSnapshot>;
   readonly createPendingTicketDraft: (projectPath: string, input: CreateDraftInput, runId: string) => StorageEffect<TicketRecord>;
   readonly applyTicketDraft: (projectPath: string, ticketId: string, draft: TicketDraft, runId: string) => StorageEffect<TicketRecord>;
+  readonly applyHierarchyDraftPlan: (
+    projectPath: string,
+    placeholderTicketId: string,
+    plan: HierarchyDraftPlan,
+    runId: string
+  ) => StorageEffect<string>;
   readonly failPendingTicketDraft: (
     projectPath: string,
     ticketId: string,
@@ -88,6 +102,7 @@ export type StorageService = {
     options: StatusTransitionOptions
   ) => StorageEffect<TicketRecord>;
   readonly setTicketQueued: (projectPath: string, ticketId: string, runId: string) => StorageEffect<TicketRecord>;
+  readonly setTicketQueuedInPlace: (projectPath: string, ticketId: string, runId: string) => StorageEffect<TicketRecord>;
   readonly clearQueuedTicket: (
     projectPath: string,
     ticketId: string,
@@ -142,12 +157,18 @@ const makeStorageService = ({ projectStore, ticketStore, clarificationStore, art
   createSubticket: ticketStore.createSubticket,
   linkSubticket: ticketStore.linkSubticket,
   unlinkSubticket: ticketStore.unlinkSubticket,
+  createTaskUnderFeature: ticketStore.createTaskUnderFeature,
+  createFeatureSubticket: ticketStore.createFeatureSubticket,
+  linkFeatureSubticket: ticketStore.linkFeatureSubticket,
+  unlinkFeatureSubticket: ticketStore.unlinkFeatureSubticket,
   createPendingTicketDraft: ticketStore.createPendingDraft,
   applyTicketDraft: ticketStore.applyDraft,
+  applyHierarchyDraftPlan: ticketStore.applyHierarchyDraftPlan,
   failPendingTicketDraft: ticketStore.failPendingDraft,
   blockPendingTicketDraftForClarification: ticketStore.blockPendingDraftForClarification,
   transitionTicketStatus: ticketStore.transitionStatus,
   setTicketQueued: ticketStore.setQueued,
+  setTicketQueuedInPlace: ticketStore.setQueuedInPlace,
   clearQueuedTicket: ticketStore.clearQueued,
   listQueuedReadyTickets: ticketStore.listQueuedReady,
   listTicketReferenceCandidates: ticketStore.listReferences,
@@ -262,6 +283,14 @@ export const applyTicketDraftToTicket = (
   runId: string
 ): Promise<TicketRecord> => runStorageMethod((storage) => storage.applyTicketDraft(projectPath, ticketId, draft, runId));
 
+export const applyHierarchyDraftPlan = (
+  projectPath: string,
+  placeholderTicketId: string,
+  plan: HierarchyDraftPlan,
+  runId: string
+): Promise<string> =>
+  runStorageMethod((storage) => storage.applyHierarchyDraftPlan(projectPath, placeholderTicketId, plan, runId));
+
 export const failPendingTicketDraft = (
   projectPath: string,
   ticketId: string,
@@ -292,6 +321,18 @@ export const linkSubticket = (projectPath: string, epicId: string, ticketId: str
 export const unlinkSubticket = (projectPath: string, epicId: string, ticketId: string): Promise<BoardSnapshot> =>
   runStorageMethod((storage) => storage.unlinkSubticket(projectPath, epicId, ticketId));
 
+export const createTaskUnderFeature = (input: FeatureTaskCreateRequest): Promise<TicketRecord> =>
+  runStorageMethod((storage) => storage.createTaskUnderFeature(input));
+
+export const createFeatureSubticket = (input: FeatureSubticketCreateInput): Promise<TicketRecord> =>
+  runStorageMethod((storage) => storage.createFeatureSubticket(input));
+
+export const linkFeatureSubticket = (input: FeatureSubticketLinkInput): Promise<BoardSnapshot> =>
+  runStorageMethod((storage) => storage.linkFeatureSubticket(input.projectPath, input.featureId, input.ticketId));
+
+export const unlinkFeatureSubticket = (input: FeatureSubticketLinkInput): Promise<BoardSnapshot> =>
+  runStorageMethod((storage) => storage.unlinkFeatureSubticket(input.projectPath, input.featureId, input.ticketId));
+
 export const transitionTicketStatus = (
   projectPath: string,
   ticketId: string,
@@ -301,6 +342,9 @@ export const transitionTicketStatus = (
 
 export const setTicketQueued = (projectPath: string, ticketId: string, runId: string): Promise<TicketRecord> =>
   runStorageMethod((storage) => storage.setTicketQueued(projectPath, ticketId, runId));
+
+export const setTicketQueuedInPlace = (projectPath: string, ticketId: string, runId: string): Promise<TicketRecord> =>
+  runStorageMethod((storage) => storage.setTicketQueuedInPlace(projectPath, ticketId, runId));
 
 export const clearQueuedTicket = (
   projectPath: string,
@@ -350,3 +394,7 @@ export const ticketMarkdownFromDraft = FileSystemStorage.ticketMarkdownFromDraft
 
 export const ticketMarkdownFromSubticketDraft = (draft: TicketDraftSubticket, parentTitle: string): string =>
   FileSystemStorage.ticketMarkdownFromSubticketDraft(draft, parentTitle);
+
+export const ticketMarkdownFromLeanTaskDraft = FileSystemStorage.ticketMarkdownFromLeanTaskDraft;
+export const ticketMarkdownFromUserTaskInput = FileSystemStorage.ticketMarkdownFromUserTaskInput;
+export const ticketMarkdownFromFeatureStubDraft = FileSystemStorage.ticketMarkdownFromFeatureStubDraft;

@@ -4,7 +4,10 @@ import { numberSchema, type SchemaType } from "./common";
 export const ticketPrioritySchema = Schema.Literals(["low", "medium", "high", "urgent"]);
 export type TicketPriority = SchemaType<typeof ticketPrioritySchema>;
 
-export const ticketTypeSchema = Schema.Literals(["task", "epic"]);
+export const finalTicketTypeSchema = Schema.Literals(["task", "feature", "epic"]);
+export type FinalTicketType = SchemaType<typeof finalTicketTypeSchema>;
+
+export const ticketTypeSchema = Schema.Literals(["task", "feature", "epic", "draft_ticket"]);
 export type TicketType = SchemaType<typeof ticketTypeSchema>;
 
 export const ticketEffortSchema = Schema.Literals(["low", "medium", "high", "xhigh"]);
@@ -18,6 +21,14 @@ export const draftScopeSchema = Schema.Literals([
   "epic"
 ]);
 export type DraftScope = SchemaType<typeof draftScopeSchema>;
+
+export const draftPlanKindSchema = Schema.Literals([
+  "feature_tree",
+  "epic_tree",
+  "extend_epic",
+  "extend_feature"
+]);
+export type DraftPlanKind = SchemaType<typeof draftPlanKindSchema>;
 
 export const ticketAuthoringStateSchema = Schema.Literals([
   "rough",
@@ -36,6 +47,7 @@ export const runStatusSchema = Schema.Literals([
   "draft_failed",
   "draft_complete",
   "running",
+  "paused",
   "blocked",
   "failed",
   "completed",

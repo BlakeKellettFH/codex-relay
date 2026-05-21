@@ -11,6 +11,7 @@ import {
   type TicketUpdateThread
 } from "../src/services/codex";
 import {
+  createClarificationQuestions,
   createTicket,
   initializeProject,
   readClarificationQuestions,
@@ -79,12 +80,27 @@ const waitFor = async (predicate: () => boolean, label: string): Promise<void> =
   assert.fail(`Timed out waiting for ${label}`);
 };
 
+const assertStrictSchemaRequiresAllProperties = (schema: unknown, label = "$"): void => {
+  if (!schema || typeof schema !== "object") return;
+  const objectSchema = schema as { properties?: Record<string, unknown>; required?: unknown; items?: unknown };
+  if (objectSchema.properties) {
+    assert.ok(Array.isArray(objectSchema.required), `${label}.required must be an array`);
+    const required = new Set(objectSchema.required);
+    for (const key of Object.keys(objectSchema.properties)) {
+      assert.ok(required.has(key), `${label}.required is missing ${key}`);
+      assertStrictSchemaRequiresAllProperties(objectSchema.properties[key], `${label}.${key}`);
+    }
+  }
+  if (objectSchema.items) assertStrictSchemaRequiresAllProperties(objectSchema.items, `${label}[]`);
+};
+
 const updateJson = (patch: Partial<AgentTicketUpdate> = {}): string =>
   JSON.stringify({
     title: "Agent revised ticket",
     priority: "high",
     labels: ["agent", "updated"],
     authoringState: "reviewing",
+    plannedFiles: null,
     patch: {
       summary: "Expanded the existing ticket with release targeting context.",
       appendMarkdown: "## Context\n\nExpanded context from the user request.\n\n## Follow-up Checklist\n\n- [ ] Confirm release target\n"
@@ -92,6 +108,39 @@ const updateJson = (patch: Partial<AgentTicketUpdate> = {}): string =>
     clarificationQuestions: ["Which release should this target?"],
     ...patch
   });
+
+test("ticket update run uses a strict structured-output schema for patch fields", async () => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Schema guard",
+    priority: "medium",
+    labels: [],
+    markdown: "# Schema guard\n"
+  });
+
+  let outputSchema: unknown;
+  const dependencies: TicketUpdateDependencies = {
+    createRunId: () => "run_ticket_update_schema",
+    createCodexClient: () =>
+      createTicketUpdateCodexClient("thread_ticket_update_schema", async (_prompt, options) => {
+        outputSchema = options.outputSchema;
+        return {
+          events: (async function*() {
+            yield { type: "thread.started", thread_id: "thread_ticket_update_schema" };
+            yield { type: "item.completed", item: { id: "msg_ticket_update_schema", type: "agent_message", text: updateJson() } };
+            yield { type: "turn.completed", usage: codexUsage };
+          })()
+        };
+      })
+  };
+
+  await startTicketUpdateRun({ projectPath, ticketId: ticket.frontMatter.id, request: "Refine the ticket." }, dependencies);
+
+  assertStrictSchemaRequiresAllProperties(outputSchema);
+  assert.ok(((outputSchema as { required?: string[] }).required ?? []).includes("plannedFiles"));
+  const patchSchema = (outputSchema as { properties?: { patch?: { required?: unknown } } }).properties?.patch;
+  assert.deepEqual(patchSchema?.required, ["summary", "fullMarkdown", "appendMarkdown"]);
+});
 
 test("ticket update agent applies validated structured output and preserves unrelated metadata", async () => {
   const projectPath = await createProject();
@@ -205,6 +254,172 @@ test("ticket update agent leaves the ticket unchanged when output validation fai
   assert.equal(unchanged.markdown, original.markdown);
   assert.deepEqual(await readClarificationQuestions(projectPath, ticket.frontMatter.id), []);
   assert.match(events.find((event) => event.type === "run.failed")?.message ?? "", /invalid/i);
+});
+
+test("scope recovery ticket updates include approved paths and persist merged plannedFiles on the same task", async () => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Scope recovery",
+    priority: "medium",
+    labels: ["scoped"],
+    markdown: "# Scope recovery\n\nOriginal body.\n",
+    plannedFiles: ["src/http/resources/tickets.ts"],
+    status: "needs_clarification",
+    runStatus: "blocked",
+    authoringState: "needs_input"
+  });
+  await createClarificationQuestions(
+    projectPath,
+    ticket.frontMatter.id,
+    [
+      {
+        question: `Codex attempted to modify file paths outside this ticket's planned scope, so Relay reverted the run.
+
+Please confirm whether implementation should expand the planned file scope to include:
+- ${path.join(projectPath, "src/shared/plannedScope.ts")}
+
+Current planned scope:
+- src/http/resources/tickets.ts`
+      }
+    ],
+    {
+      actor: "codex",
+      source: "agent_execution",
+      runId: "run_scope_blocked",
+      codexThreadId: "thread_scope_blocked"
+    }
+  );
+  const { runEventSink, events } = createFakeRunEventSink();
+  let capturedPrompt = "";
+
+  const dependencies: TicketUpdateDependencies = {
+    runEventSink,
+    createRunId: () => "run_ticket_update_scope_recovery",
+    reconcileTicketQueueState: async () => readTicket(projectPath, ticket.frontMatter.id),
+    createCodexClient: () =>
+      createTicketUpdateCodexClient("thread_ticket_update_scope_recovery", async (prompt) => {
+        capturedPrompt = prompt;
+        return {
+          events: (async function*() {
+            yield { type: "thread.started", thread_id: "thread_ticket_update_scope_recovery" };
+            yield {
+              type: "item.completed",
+              item: {
+                id: "msg_ticket_update_scope_recovery",
+                type: "agent_message",
+                text: updateJson({
+                  authoringState: "ready",
+                  plannedFiles: ["src/http/resources/tickets.ts", "src/shared/plannedScope.ts"],
+                  clarificationQuestions: [],
+                  patch: {
+                    summary: "Merged approved scope.",
+                    appendMarkdown: "## Implementation Plan\n\n- [ ] Expand planned scope safely.\n",
+                    fullMarkdown: null
+                  }
+                })
+              }
+            };
+            yield { type: "turn.completed", usage: codexUsage };
+          })()
+        };
+      })
+  };
+
+  await startTicketUpdateRun(
+    {
+      projectPath,
+      ticketId: ticket.frontMatter.id,
+      request: "Recover blocked task scope.",
+      purpose: "scope_recovery",
+      clarificationQuestionId: (await readClarificationQuestions(projectPath, ticket.frontMatter.id))[0]?.id ?? ""
+    },
+    dependencies
+  );
+  await waitFor(() => events.some((event) => event.type === "run.completed"), "scope recovery completion");
+
+  const updated = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.match(capturedPrompt, /plannedFiles: REQUIRED/);
+  assert.match(capturedPrompt, /recovering blocked implementation scope/i);
+  assert.equal(updated.frontMatter.status, "ready");
+  assert.equal(updated.frontMatter.runStatus, "idle");
+  assert.deepEqual(updated.frontMatter.plannedFiles, ["src/http/resources/tickets.ts", "src/shared/plannedScope.ts"]);
+});
+
+test("scope recovery ticket updates reject empty plannedFiles persistence", async () => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Scope recovery invalid",
+    priority: "medium",
+    labels: [],
+    markdown: "# Scope recovery invalid\n",
+    plannedFiles: [],
+    status: "needs_clarification",
+    runStatus: "blocked",
+    authoringState: "needs_input"
+  });
+  await createClarificationQuestions(
+    projectPath,
+    ticket.frontMatter.id,
+    [
+      {
+        question: `Codex attempted to modify file paths outside this ticket's planned scope, so Relay reverted the run.
+
+Please confirm whether implementation should expand the planned file scope to include:
+- ${path.join(projectPath, "src/shared/plannedScope.ts")}
+
+Current planned scope:
+- None recorded.`
+      }
+    ],
+    {
+      actor: "codex",
+      source: "agent_execution",
+      runId: "run_scope_invalid",
+      codexThreadId: "thread_scope_invalid"
+    }
+  );
+  const { runEventSink, events } = createFakeRunEventSink();
+  const dependencies: TicketUpdateDependencies = {
+    runEventSink,
+    createRunId: () => "run_ticket_update_scope_invalid",
+    createCodexClient: () =>
+      createTicketUpdateCodexClient("thread_ticket_update_scope_invalid", async () => ({
+        events: (async function*() {
+          yield { type: "thread.started", thread_id: "thread_ticket_update_scope_invalid" };
+          yield {
+            type: "item.completed",
+            item: {
+              id: "msg_ticket_update_scope_invalid",
+              type: "agent_message",
+              text: updateJson({
+                authoringState: "ready",
+                plannedFiles: [],
+                clarificationQuestions: [],
+                patch: {
+                  summary: "Tried to clear scope.",
+                  appendMarkdown: "## Notes\n\nInvalid scope.\n",
+                  fullMarkdown: null
+                }
+              })
+            }
+          };
+          yield { type: "turn.completed", usage: codexUsage };
+        })()
+      }))
+  };
+
+  await startTicketUpdateRun(
+    {
+      projectPath,
+      ticketId: ticket.frontMatter.id,
+      request: "Recover blocked task scope.",
+      purpose: "scope_recovery",
+      clarificationQuestionId: (await readClarificationQuestions(projectPath, ticket.frontMatter.id))[0]?.id ?? ""
+    },
+    dependencies
+  );
+  await waitFor(() => events.some((event) => event.type === "run.failed"), "scope recovery failure");
+  assert.match(events.find((event) => event.type === "run.failed")?.message ?? "", /non-empty planned file scope/i);
 });
 
 test("ticket update agent prevents duplicate active runs for the same ticket", async () => {

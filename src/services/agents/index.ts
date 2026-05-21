@@ -6,6 +6,7 @@ export type AgentWorkMode = "read_only" | "write";
 export type AgentWorkKind =
   | "ticket.draft"
   | "ticket.draft_intake"
+  | "ticket.hierarchy_draft"
   | "ticket.update"
   | "ticket.implementation"
   | "repository.chat";

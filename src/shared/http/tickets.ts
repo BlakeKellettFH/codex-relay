@@ -1,6 +1,7 @@
 import {
   agentTicketUpdateInputSchema,
   agentTicketUpdateStartResultSchema,
+  approveScopeClarificationInputSchema,
   boardSnapshotSchema,
   clarificationAnswerInputSchema,
   clarificationQuestionSchema,
@@ -9,6 +10,9 @@ import {
   draftIntakeResultSchema,
   epicSubticketCreateInputSchema,
   epicSubticketLinkInputSchema,
+  featureTaskCreateRequestSchema,
+  featureSubticketCreateInputSchema,
+  featureSubticketLinkInputSchema,
   ticketAttachmentSaveInputSchema,
   ticketAttachmentSaveResultSchema,
   ticketDraftStartResultSchema,
@@ -69,6 +73,30 @@ export const ticketEndpoints = {
     request: { location: "body", schema: epicSubticketLinkInputSchema },
     response: boardSnapshotSchema
   }),
+  createTaskUnderFeature: defineEndpoint({
+    method: "POST",
+    path: "/api/tickets/feature/task",
+    request: { location: "body", schema: featureTaskCreateRequestSchema },
+    response: ticketRecordSchema
+  }),
+  createFeatureSubticket: defineEndpoint({
+    method: "POST",
+    path: "/api/tickets/feature/subticket",
+    request: { location: "body", schema: featureSubticketCreateInputSchema },
+    response: ticketRecordSchema
+  }),
+  linkFeatureSubticket: defineEndpoint({
+    method: "POST",
+    path: "/api/tickets/feature/subticket/link",
+    request: { location: "body", schema: featureSubticketLinkInputSchema },
+    response: boardSnapshotSchema
+  }),
+  unlinkFeatureSubticket: defineEndpoint({
+    method: "POST",
+    path: "/api/tickets/feature/subticket/unlink",
+    request: { location: "body", schema: featureSubticketLinkInputSchema },
+    response: boardSnapshotSchema
+  }),
   startAgentUpdate: defineEndpoint({
     method: "POST",
     path: "/api/tickets/agent-update",
@@ -121,6 +149,12 @@ export const ticketEndpoints = {
     path: "/api/tickets/clarifications/answer",
     request: { location: "body", schema: clarificationAnswerInputSchema },
     response: clarificationQuestionSchema
+  }),
+  approveScopeClarification: defineEndpoint({
+    method: "POST",
+    path: "/api/tickets/clarifications/approve-scope",
+    request: { location: "body", schema: approveScopeClarificationInputSchema },
+    response: agentTicketUpdateStartResultSchema
   }),
   delete: defineEndpoint({
     method: "DELETE",

@@ -14,7 +14,9 @@ import {
   type DraftIntakeInput,
   type DraftIntakeQuestion,
   type DraftIntakeResult,
+  type DraftPlanKind,
   type DraftScope,
+  type HierarchyDraftPlan,
   RELAY_COMPLETED_STATUS,
   RELAY_IN_PROGRESS_STATUS,
   RELAY_NEEDS_CLARIFICATION_STATUS,
@@ -38,10 +40,28 @@ import {
   type TicketRedraftInput,
   type TicketRecord
 } from "@shared/schemas";
+import { isImplementationContinuation } from "@shared/implementationRun";
+import {
+  extractScopeViolationRequestedPaths,
+  isMissingPlannedScopeClarificationQuestion,
+  isScopeViolationClarificationQuestion,
+  MISSING_PLANNED_SCOPE_ANSWER_DRAFT,
+  MISSING_PLANNED_SCOPE_MARKER,
+  normalizePlannedScope as normalizeSharedPlannedScope
+} from "@shared/plannedScope";
+import { normalizeRepoPath, normalizeRepoPathList } from "@shared/pathScope";
+import {
+  pathLockConflictsFor,
+  releasePathLocksForRun,
+  tryAcquirePathLocks,
+  type PathLockConflict
+} from "../path-lock";
 import { resolvedBlockerLabel, resolveTicketBlockers } from "@shared/blockers";
+import { resolveDraftPreferredTicketType } from "@shared/draftTicket";
 import {
   agentTicketUpdateSchema,
   draftIntakeResultSchema,
+  hierarchyDraftPlanSchema,
   ticketDraftSchema
 } from "@shared/schemas";
 import { extractClarificationRequest } from "../clarificationParser";
@@ -82,11 +102,15 @@ import {
   type StructuredAgentProvider,
   type StructuredAgentRequest
 } from "../agents";
+import { captureRunGitBaseline, revertRunGitChanges } from "../git/GitRunBaseline";
 import { resolveAvailableCodexCli, type CodexCliResolution } from "./cli";
 import { getCodexStatus } from "./status";
 import {
   appendCodexHandoff,
+  applyHierarchyDraftPlan,
+  applyImplementationScopeRedraftToTicket,
   applyTicketDraftToTicket,
+  answerClarificationQuestion,
   blockPendingTicketDraftForClarification,
   clearQueuedTicket,
   createClarificationQuestions,
@@ -101,11 +125,15 @@ import {
   readProjectConfig,
   readTicket,
   setTicketQueued,
+  setTicketQueuedInPlace,
   ticketMarkdownFromDraft,
+  ticketMarkdownFromFeatureStubDraft,
+  ticketMarkdownFromLeanTaskDraft,
   ticketMarkdownFromSubticketDraft,
   transitionTicketStatus,
   writeTicket
 } from "../../storage";
+import { slashPath } from "../../storage/paths";
 
 export { getCodexStatus } from "./status";
 
@@ -166,7 +194,8 @@ const DRAFT_SCOPE_PROFILES: Record<DraftScope, DraftScopeProfile> = {
   product_feature: {
     label: "Product feature",
     maxQuestions: 5,
-    guidance: "Produce a lean PRD-like feature ticket with user-visible behavior, product decisions, acceptance criteria, and implementation notes.",
+    guidance:
+      "Produce a feature planning ticket (ticketType \"feature\") with lean child tasks in leanTasks. Each lean task should be a bite-sized executable change with focused requirements and acceptance criteria — not a full PRD.",
     sectionBudget: 6
   },
   rewrite: {
@@ -178,13 +207,18 @@ const DRAFT_SCOPE_PROFILES: Record<DraftScope, DraftScopeProfile> = {
   epic: {
     label: "Epic",
     maxQuestions: 8,
-    guidance: "Produce a parent planning ticket plus independently implementable vertical-slice child tasks. Keep detail in the child tickets.",
+    guidance:
+      "Produce a parent epic (ticketType \"epic\") with feature stubs in featureStubs only — not tasks. Each feature stub describes a capability; tasks are created under features later.",
     sectionBudget: 6
   }
 };
 
-const defaultDraftScopeForInput = (input: Pick<CreateDraftInput, "draftScope" | "preferredTicketType">): DraftScope =>
-  input.draftScope ?? (input.preferredTicketType === "epic" ? "epic" : "task");
+const defaultDraftScopeForInput = (input: Pick<CreateDraftInput, "draftScope" | "preferredTicketType">): DraftScope => {
+  if (input.draftScope) return input.draftScope;
+  if (input.preferredTicketType === "epic") return "epic";
+  if (input.preferredTicketType === "feature") return "product_feature";
+  return "task";
+};
 
 const registry = <A>(
   effect: Effect.Effect<A, unknown, Context.Service.Identifier<typeof WorkScheduler>>
@@ -318,10 +352,12 @@ const drainProjectScheduler = async (projectPath: string): Promise<void> => {
     let next: Awaited<ReturnType<typeof listQueuedReadyTickets>>[number] | undefined;
     for (const ticket of await listQueuedReadyTickets(projectPath)) {
       const runId = ticket.lastRunId;
-      if (runId && !(await implementationActiveOrStarting(runId))) {
-        next = ticket;
-        break;
-      }
+      if (!runId || (await implementationActiveOrStarting(runId))) continue;
+      const plannedPaths = normalizePlannedScope(ticket.plannedFiles, projectPath);
+      const lockConflicts = await pathLockConflictsFor(projectPath, ticket.id, plannedPaths);
+      if (lockConflicts.length > 0) continue;
+      next = ticket;
+      break;
     }
     if (!next?.lastRunId) return;
 
@@ -394,6 +430,7 @@ export type TicketUpdateDependencies = {
   createCodexClient?: () => TicketUpdateCodexClient;
   createRunId?: () => string;
   runEventSink?: RendererRunEventSink;
+  reconcileTicketQueueState?: typeof reconcileTicketQueueState;
 };
 
 const TicketUpdateDependencyService = Context.Service<TicketUpdateDependencies>("relay/TicketUpdateDependencies");
@@ -467,6 +504,7 @@ const ticketDraftBaseSchemaJson = {
   additionalProperties: false,
   required: [
     "title",
+    "summary",
     "priority",
     "labels",
     "context",
@@ -477,10 +515,12 @@ const ticketDraftBaseSchemaJson = {
     "acceptanceCriteria",
     "clarificationQuestions",
     "assumptions",
-    "implementationNotes"
+    "implementationNotes",
+    "plannedFiles"
   ],
   properties: {
     title: { type: "string" },
+    summary: { type: "string" },
     priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
     labels: { type: "array", items: { type: "string" } },
     context: { type: "string" },
@@ -491,19 +531,77 @@ const ticketDraftBaseSchemaJson = {
     acceptanceCriteria: { type: "array", items: { type: "string" } },
     clarificationQuestions: { type: "array", items: { type: "string" } },
     assumptions: { type: "array", items: { type: "string" } },
+    implementationNotes: { type: "array", items: { type: "string" } },
+    plannedFiles: { type: "array", items: { type: "string" } }
+  }
+} as const;
+
+const leanTaskDraftSchemaJson = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "title",
+    "summary",
+    "priority",
+    "labels",
+    "context",
+    "goal",
+    "requirements",
+    "acceptanceCriteria",
+    "implementationPlan",
+    "assumptions",
+    "plannedFiles"
+  ],
+  properties: {
+    title: { type: "string" },
+    summary: { type: "string" },
+    priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
+    labels: { type: "array", items: { type: "string" } },
+    context: { type: "string" },
+    goal: { type: "string" },
+    requirements: { type: "array", items: { type: "string" } },
+    acceptanceCriteria: { type: "array", items: { type: "string" } },
+    implementationPlan: { type: "array", items: { type: "string" } },
+    assumptions: { type: "array", items: { type: "string" } },
+    plannedFiles: { type: "array", minItems: 1, items: { type: "string" } }
+  }
+} as const;
+
+const featureStubDraftSchemaJson = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "summary", "priority", "labels", "context", "requirements", "acceptanceCriteria", "implementationNotes"],
+  properties: {
+    title: { type: "string" },
+    summary: { type: "string" },
+    priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
+    labels: { type: "array", items: { type: "string" } },
+    context: { type: "string" },
+    requirements: { type: "array", items: { type: "string" } },
+    acceptanceCriteria: { type: "array", items: { type: "string" } },
     implementationNotes: { type: "array", items: { type: "string" } }
   }
 } as const;
 
 const ticketDraftSchemaJson = {
   ...ticketDraftBaseSchemaJson,
-  required: [...ticketDraftBaseSchemaJson.required, "draftState", "blockingClarificationQuestions", "ticketType", "subtickets"],
+  required: [
+    ...ticketDraftBaseSchemaJson.required,
+    "draftState",
+    "blockingClarificationQuestions",
+    "ticketType",
+    "subtickets",
+    "featureStubs",
+    "leanTasks"
+  ],
   properties: {
     ...ticketDraftBaseSchemaJson.properties,
     draftState: { type: "string", enum: ["ready", "needs_clarification"] },
     blockingClarificationQuestions: { type: "array", items: { type: "string" } },
-    ticketType: { type: "string", enum: ["task", "epic"] },
-    subtickets: { type: "array", items: ticketDraftBaseSchemaJson }
+    ticketType: { type: "string", enum: ["task", "feature", "epic"] },
+    subtickets: { type: "array", items: ticketDraftBaseSchemaJson },
+    featureStubs: { type: "array", items: featureStubDraftSchemaJson },
+    leanTasks: { type: "array", items: leanTaskDraftSchemaJson }
   }
 } as const;
 
@@ -523,32 +621,98 @@ const draftIntakeQuestionSchemaJson = {
   }
 } as const;
 
+const draftPlanKindSchemaJson = {
+  type: "string",
+  enum: ["feature_tree", "epic_tree", "extend_epic", "extend_feature"]
+} as const;
+
 const draftIntakeResultSchemaJson = {
   type: "object",
   additionalProperties: false,
-  required: ["scope", "confidence", "knownFacts", "relatedTicketIds", "questions"],
+  required: [
+    "scope",
+    "planKind",
+    "confidence",
+    "estimatedTouchPoints",
+    "rationale",
+    "matchedEpicId",
+    "matchedFeatureId",
+    "knownFacts",
+    "relatedTicketIds",
+    "questions"
+  ],
   properties: {
     scope: draftScopeSchemaJson,
+    planKind: draftPlanKindSchemaJson,
     confidence: { type: "number" },
+    estimatedTouchPoints: { type: "number" },
+    rationale: { type: "string" },
+    matchedEpicId: { type: ["string", "null"] },
+    matchedFeatureId: { type: ["string", "null"] },
     knownFacts: { type: "array", items: { type: "string" } },
     relatedTicketIds: { type: "array", items: { type: "string" } },
     questions: { type: "array", items: draftIntakeQuestionSchemaJson }
   }
 } as const;
 
+const hierarchyDraftExtendFeatureSchemaJson = {
+  type: "object",
+  additionalProperties: false,
+  required: ["leanTasks"],
+  properties: {
+    leanTasks: { type: "array", items: leanTaskDraftSchemaJson }
+  }
+} as const;
+
+const hierarchyDraftFeaturePlanSchemaJson = {
+  type: "object",
+  additionalProperties: false,
+  required: ["stub", "leanTasks"],
+  properties: {
+    stub: featureStubDraftSchemaJson,
+    leanTasks: { type: "array", items: leanTaskDraftSchemaJson }
+  }
+} as const;
+
+const hierarchyDraftPlanSchemaJson = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "planKind",
+    "draftState",
+    "blockingClarificationQuestions",
+    "matchedEpicId",
+    "matchedFeatureId",
+    "features",
+    "leanTasks"
+  ],
+  properties: {
+    planKind: draftPlanKindSchemaJson,
+    draftState: { type: "string", enum: ["ready", "needs_clarification"] },
+    blockingClarificationQuestions: { type: "array", items: { type: "string" } },
+    matchedEpicId: { type: ["string", "null"] },
+    matchedFeatureId: { type: ["string", "null"] },
+    root: ticketDraftBaseSchemaJson,
+    features: { type: "array", items: hierarchyDraftFeaturePlanSchemaJson },
+    leanTasks: { type: "array", items: leanTaskDraftSchemaJson },
+    extendFeature: hierarchyDraftExtendFeatureSchemaJson
+  }
+} as const;
+
 const agentTicketUpdateSchemaJson = {
   type: "object",
   additionalProperties: false,
-  required: ["title", "priority", "labels", "authoringState", "patch", "clarificationQuestions"],
+  required: ["title", "priority", "labels", "authoringState", "plannedFiles", "patch", "clarificationQuestions"],
   properties: {
     title: { type: "string" },
     priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
     labels: { type: "array", items: { type: "string" } },
     authoringState: { type: "string", enum: ["rough", "reviewing", "needs_input", "ready"] },
+    plannedFiles: { type: ["array", "null"], items: { type: "string" } },
     patch: {
       type: "object",
       additionalProperties: false,
-      required: ["summary"],
+      required: ["summary", "fullMarkdown", "appendMarkdown"],
       properties: {
         summary: { type: "string" },
         fullMarkdown: { type: ["string", "null"] },
@@ -730,6 +894,14 @@ const errorMessage = (error: unknown, fallback: string): string => (error instan
 
 const normalizeWhitespace = (value: string): string => value.replace(/\s+/g, " ").trim();
 
+const DRAFT_SUMMARY_MAX_CHARS = 720;
+
+const DRAFT_SUMMARY_PROMPT_GUIDANCE = `Every ticket, feature stub, and lean task must include summary: a structured board preview (under ${DRAFT_SUMMARY_MAX_CHARS} characters) in markdown plain language. Use this shape:
+- Opening paragraph (2-4 sentences): what outcome this work delivers and why it matters.
+- 2-3 bullet points (- ...) highlighting the main scope, touchpoints, or acceptance signal.
+- Closing sentence: the key risk, dependency, or validation note.
+Keep bullets short. Do not repeat the full implementation body; the summary is shown in board cards and ticket preview while schema fields hold the detailed plan.`;
+
 const formatDraftWait = (durationMs: number): string => {
   const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -836,8 +1008,29 @@ const cleanStringList = (items: readonly string[] | undefined): string[] =>
 
 const DEFERRED_RESEARCH_STEP_PATTERN = /^\s*(?:inspect|find|trace|audit|look for|search|review)\b/i;
 
+const normalizeDraftSummary = (value: string | undefined): string => {
+  const lines = (value ?? "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim());
+  const normalized: string[] = [];
+  for (const line of lines) {
+    if (!line) {
+      if (normalized.length > 0 && normalized[normalized.length - 1] !== "") {
+        normalized.push("");
+      }
+      continue;
+    }
+    normalized.push(line);
+  }
+  while (normalized[0] === "") normalized.shift();
+  while (normalized[normalized.length - 1] === "") normalized.pop();
+  return normalized.join("\n");
+};
+
 const normalizeSubticketDraft = (draft: TicketDraftSubticket): TicketDraftSubticket => ({
   ...draft,
+  summary: normalizeDraftSummary(draft.summary),
   labels: cleanStringList(draft.labels),
   researchFindings: cleanStringList(draft.researchFindings),
   requirements: cleanStringList(draft.requirements),
@@ -897,6 +1090,7 @@ const normalizeTicketDraftOutcome = (
     blockingClarificationQuestions: blockingQuestions,
     assumptions: budgetedBase.assumptions,
     implementationNotes: budgetedBase.implementationNotes,
+    leanTasks: parsedDraft.leanTasks.map(normalizeLeanTaskDraft),
     subtickets: parsedDraft.subtickets.map((subticket) => {
       const normalizedSubticket = normalizeSubticketDraft(subticket);
       return applyDraftSectionBudget({
@@ -915,6 +1109,7 @@ const normalizeTicketDraftOutcome = (
     return { status: "needs_clarification", draft: { ...draft, draftState: "needs_clarification" }, questions };
   }
 
+  if (!draft.summary.trim()) throw new Error("Ready draft must include a structured summary.");
   if (draft.requirements.length === 0) throw new Error("Ready draft must include concrete requirements.");
   if (draft.implementationPlan.length === 0) throw new Error("Ready draft must include a concrete implementation plan.");
   if (draft.acceptanceCriteria.length === 0) throw new Error("Ready draft must include acceptance criteria.");
@@ -939,6 +1134,84 @@ const truncatePromptText = (value: string, maxLength: number): string => {
   const normalized = normalizeWhitespace(value);
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+};
+
+const scopeForPlanKind = (planKind: DraftPlanKind): DraftScope => {
+  switch (planKind) {
+    case "epic_tree":
+      return "epic";
+    default:
+      return "product_feature";
+  }
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+const unknownStringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+const legacyStandaloneTaskToFeatureRootJson = (task: Record<string, unknown>): Record<string, unknown> => {
+  const goal = typeof task.goal === "string" ? task.goal : "";
+  const context = typeof task.context === "string" ? task.context : "";
+  const requirements = unknownStringArray(task.requirements);
+  return {
+    title: typeof task.title === "string" ? task.title : "",
+    summary: typeof task.summary === "string" ? task.summary : "",
+    priority: task.priority,
+    labels: unknownStringArray(task.labels),
+    context: context || goal,
+    researchFindings: [],
+    requirements: requirements.length > 0 ? requirements : goal ? [goal] : [],
+    implementationPlan: [],
+    testPlan: [],
+    acceptanceCriteria: unknownStringArray(task.acceptanceCriteria),
+    clarificationQuestions: [],
+    assumptions: unknownStringArray(task.assumptions),
+    implementationNotes: []
+  };
+};
+
+const normalizeLegacyStandalonePlanPayload = (value: unknown): unknown => {
+  if (!isRecord(value) || value.planKind !== "standalone_task") return value;
+  const { standaloneTask: rawStandaloneTask, ...rest } = value;
+  const standaloneTask = isRecord(rawStandaloneTask) ? rawStandaloneTask : null;
+  return {
+    ...rest,
+    planKind: "feature_tree",
+    root: isRecord(rest.root) ? rest.root : standaloneTask ? legacyStandaloneTaskToFeatureRootJson(standaloneTask) : rest.root,
+    leanTasks: Array.isArray(rest.leanTasks) && rest.leanTasks.length > 0 ? rest.leanTasks : standaloneTask ? [standaloneTask] : []
+  };
+};
+
+const usesAutoHierarchyDraft = (input: CreateDraftInput): boolean => input.autoHierarchy === true;
+
+const formatBoardCatalogForIntake = (board: Awaited<ReturnType<typeof readBoard>>): string => {
+  const columnNameById = new Map(board.columns.map((column) => [column.id, column.name]));
+  const terminalColumnIds = new Set(board.columns.filter((column) => column.terminal).map((column) => column.id));
+  const taskCountByFeature = new Map<string, number>();
+  for (const ticket of board.tickets) {
+    if (ticket.ticketType === "task" && ticket.parentFeatureId) {
+      taskCountByFeature.set(ticket.parentFeatureId, (taskCountByFeature.get(ticket.parentFeatureId) ?? 0) + 1);
+    }
+  }
+
+  const catalogTickets = board.tickets.filter((ticket) => ticket.ticketType === "epic" || ticket.ticketType === "feature");
+  if (catalogTickets.length === 0) return "No epics or features are on the board yet.";
+
+  const ordered = [...catalogTickets].sort((left, right) => left.title.localeCompare(right.title));
+  return ordered
+    .map((ticket) => {
+      const labels = ticket.labels.length > 0 ? ticket.labels.join(", ") : "none";
+      const status = columnNameById.get(ticket.status) ?? ticket.status;
+      const terminal = terminalColumnIds.has(ticket.status) ? "yes" : "no";
+      const childCount =
+        ticket.ticketType === "epic" ? ticket.subticketIds.length : (taskCountByFeature.get(ticket.id) ?? 0);
+      const parentEpic = ticket.parentEpicId ? `parentEpicId: ${ticket.parentEpicId}` : "parentEpicId: none";
+      return `- ${ticket.id}: "${truncatePromptText(ticket.title, 120)}" | type: ${ticket.ticketType} | status: ${status} | terminal: ${terminal} | ${parentEpic} | childCount: ${childCount} | labels: ${labels} | excerpt: ${
+        truncatePromptText(ticket.excerpt, 200) || "No excerpt."
+      }`;
+    })
+    .join("\n");
 };
 
 const formatBoardTicketsForSuggestionPrompt = (board: Awaited<ReturnType<typeof readBoard>>): string => {
@@ -1007,13 +1280,22 @@ const formatDraftIntakeAnswersForPrompt = (answers: readonly DraftIntakeAnswer[]
 const hasUserSuppliedIntakeContext = (input: CreateDraftInput): boolean =>
   Boolean(input.intakeAnswers?.length || input.intakeKnownFacts?.length || input.relatedTicketIds?.length);
 
-const draftIntakeScopeOverrideForCreateInput = (input: CreateDraftInput): DraftScope | undefined =>
-  input.draftScope ?? (input.preferredTicketType === "epic" ? "epic" : undefined);
+const draftIntakeScopeOverrideForCreateInput = (input: CreateDraftInput): DraftScope | undefined => {
+  if (input.draftScope) return input.draftScope;
+  if (input.preferredTicketType === "epic") return "epic";
+  if (input.preferredTicketType === "feature") return "product_feature";
+  return undefined;
+};
 
 const preferredTicketTypeForDraftScope = (
   scope: DraftScope,
   fallback: CreateDraftInput["preferredTicketType"]
-): CreateDraftInput["preferredTicketType"] => (scope === "epic" ? "epic" : fallback === "epic" ? "task" : fallback);
+): CreateDraftInput["preferredTicketType"] => {
+  if (scope === "epic") return "epic";
+  if (scope === "product_feature") return "feature";
+  if (fallback === "epic" || fallback === "feature") return fallback;
+  return fallback;
+};
 
 const draftIntakeQuestionToClarification = (question: DraftIntakeQuestion): string =>
   `${question.question}
@@ -1021,15 +1303,47 @@ const draftIntakeQuestionToClarification = (question: DraftIntakeQuestion): stri
 Why it matters: ${question.whyItMatters}
 Recommended answer: ${question.recommendedAnswer}`;
 
+const isMatchableBoardTicket = (
+  ticket: Awaited<ReturnType<typeof readBoard>>["tickets"][number],
+  terminalColumnIds: ReadonlySet<string>
+): boolean => !terminalColumnIds.has(ticket.status);
+
 const normalizeDraftIntakeResult = (
   parsed: DraftIntakeResult,
   board: Awaited<ReturnType<typeof readBoard>>,
-  scopeOverride?: DraftScope
+  scopeOverride?: DraftScope,
+  autoHierarchy = false
 ): DraftIntakeResult => {
-  const scope = scopeOverride ?? parsed.scope;
+  const terminalColumnIds = new Set(board.columns.filter((column) => column.terminal).map((column) => column.id));
+  const ticketById = new Map(board.tickets.map((ticket) => [ticket.id, ticket]));
+  let planKind = parsed.planKind;
+  let matchedEpicId = parsed.matchedEpicId?.trim() || null;
+  let matchedFeatureId = parsed.matchedFeatureId?.trim() || null;
+
+  const matchedEpic =
+    matchedEpicId && ticketById.get(matchedEpicId)?.ticketType === "epic" && isMatchableBoardTicket(ticketById.get(matchedEpicId)!, terminalColumnIds)
+      ? ticketById.get(matchedEpicId)!
+      : null;
+  if (matchedEpicId && !matchedEpic) matchedEpicId = null;
+
+  const matchedFeature =
+    matchedFeatureId &&
+    ticketById.get(matchedFeatureId)?.ticketType === "feature" &&
+    isMatchableBoardTicket(ticketById.get(matchedFeatureId)!, terminalColumnIds)
+      ? ticketById.get(matchedFeatureId)!
+      : null;
+  if (matchedFeatureId && !matchedFeature) matchedFeatureId = null;
+
+  if (planKind === "extend_epic" && !matchedEpicId) planKind = "feature_tree";
+  if (planKind === "extend_feature" && !matchedFeatureId) planKind = "feature_tree";
+  if (planKind === "extend_feature" && matchedFeature?.parentEpicId) matchedEpicId = matchedFeature.parentEpicId;
+
+  const scope = scopeOverride ?? (autoHierarchy ? scopeForPlanKind(planKind) : parsed.scope);
   const profile = DRAFT_SCOPE_PROFILES[scope];
   const ticketIds = new Set(board.tickets.map((ticket) => ticket.id));
   const relatedTicketIds = cleanStringList(parsed.relatedTicketIds).filter((ticketId) => ticketIds.has(ticketId)).slice(0, 8);
+  if (matchedEpicId && !relatedTicketIds.includes(matchedEpicId)) relatedTicketIds.unshift(matchedEpicId);
+  if (matchedFeatureId && !relatedTicketIds.includes(matchedFeatureId)) relatedTicketIds.unshift(matchedFeatureId);
   const knownFacts = cleanStringList(parsed.knownFacts).slice(0, 8);
   const questions: DraftIntakeQuestion[] = [];
   const seenQuestions = new Set<string>();
@@ -1047,16 +1361,22 @@ const normalizeDraftIntakeResult = (
 
   return {
     scope,
+    planKind,
     confidence: Math.max(0, Math.min(1, parsed.confidence)),
+    estimatedTouchPoints: Math.max(0, parsed.estimatedTouchPoints ?? 0),
+    rationale: normalizeWhitespace(parsed.rationale ?? ""),
+    matchedEpicId,
+    matchedFeatureId,
     knownFacts,
-    relatedTicketIds,
+    relatedTicketIds: relatedTicketIds.slice(0, 8),
     questions
   };
 };
 
 const buildDraftIntakePrompt = (
   input: DraftIntakeInput,
-  board: Awaited<ReturnType<typeof readBoard>>
+  board: Awaited<ReturnType<typeof readBoard>>,
+  autoHierarchy = false
 ): string => {
   const scopeOverride = input.scopeOverride;
   const scopeRules = Object.entries(DRAFT_SCOPE_PROFILES)
@@ -1065,12 +1385,27 @@ const buildDraftIntakePrompt = (
   const overrideGuidance = scopeOverride
     ? `The user selected scopeOverride "${scopeOverride}". You must return scope "${scopeOverride}".`
     : "Classify the request into the most appropriate scope.";
+  const hierarchyRules = autoHierarchy
+    ? `
+Hierarchy planning (required when auto-planning):
+- Estimate estimatedTouchPoints (files/areas likely touched) and explain planKind choice in rationale.
+- planKind rules:
+  - feature_tree: all new executable work, including micro/surgical changes (e.g. color tweak, copy fix). Use exactly one leanTask for ~1-2 touch-point work; use multiple leanTasks for medium product work without a confident epic match.
+  - Do not return standalone_task (deprecated). Micro work is feature_tree with one leanTask under a small feature root.
+  - epic_tree: large multi-area initiative; create epic plus multiple feature stubs each with lean tasks.
+  - extend_epic: work fits an existing epic but not an existing feature; set matchedEpicId to a real board id and planKind extend_epic.
+  - extend_feature: incremental work clearly inside one existing feature; set matchedFeatureId and planKind extend_feature (tasks only).
+- matchedEpicId / matchedFeatureId must be real ids from the board catalog below, or null. Only set when confidence is high.
+- Prefer extend_feature when the idea clearly extends one capability; otherwise extend_epic or feature_tree.
+- Populate relatedTicketIds with matched tickets plus thematically related board tickets.`
+    : "";
 
-  return `You are doing a fast intake pass before Relay drafts an implementation ticket.
+  return `You are doing a fast intake pass before Relay drafts implementation tickets.
 
 Goal: decide how much ticket-drafting depth is needed and ask only blocking questions before the expensive full draft starts.
 
 ${overrideGuidance}
+${hierarchyRules}
 
 Scope profiles:
 ${scopeRules}
@@ -1087,7 +1422,10 @@ Question rules:
 Return only data matching the requested schema.
 
 Project path: ${input.projectPath}
-Current board tickets:
+Board catalog (epics and features for matching — tasks omitted):
+${formatBoardCatalogForIntake(board)}
+
+All board tickets:
 ${formatBoardTicketsForSuggestionPrompt(board)}
 
 User idea:
@@ -1121,7 +1459,8 @@ export const createDraftIntake = async (
       readBoard(projectPath)
     ]);
     const provider = structuredAgentProviderForDraft(dependencies);
-    const prompt = buildDraftIntakePrompt({ ...input, projectPath, idea }, board);
+    const autoHierarchy = input.autoHierarchy === true;
+    const prompt = buildDraftIntakePrompt({ ...input, projectPath, idea }, board, autoHierarchy);
     const result = await provider.runStructured({
       kind: "ticket.draft_intake",
       projectPath,
@@ -1133,12 +1472,13 @@ export const createDraftIntake = async (
       webSearchMode: DRAFT_AGENT_WEB_SEARCH_MODE,
       signal: abortController.signal
     });
-    const parsed = parseSchema(draftIntakeResultSchema, result.output);
-    const intake = normalizeDraftIntakeResult(parsed, board, input.scopeOverride);
+    const parsed = parseSchema(draftIntakeResultSchema, normalizeLegacyStandalonePlanPayload(result.output));
+    const intake = normalizeDraftIntakeResult(parsed, board, input.scopeOverride, autoHierarchy);
     await logInfo("codex:draft-intake", "draft intake completed", {
       ...logBase,
       durationMs: durationMs(),
       scope: intake.scope,
+      planKind: intake.planKind,
       questionCount: intake.questions.length,
       relatedTicketCount: intake.relatedTicketIds.length
     });
@@ -1288,6 +1628,212 @@ export const sendRepositoryChatMessage = async (
   }
 };
 
+type HierarchyDraftOutcome =
+  | { status: "ready"; plan: HierarchyDraftPlan; title: string }
+  | { status: "needs_clarification"; plan: HierarchyDraftPlan; questions: string[]; title: string };
+
+const normalizeLeanTaskDraft = (draft: HierarchyDraftPlan["leanTasks"][number]) => ({
+  ...draft,
+  summary: normalizeDraftSummary(draft.summary),
+  labels: cleanStringList(draft.labels),
+  context: normalizeWhitespace(draft.context ?? ""),
+  goal: normalizeWhitespace(draft.goal ?? ""),
+  requirements: cleanStringList(draft.requirements),
+  acceptanceCriteria: cleanStringList(draft.acceptanceCriteria),
+  implementationPlan: cleanStringList(draft.implementationPlan),
+  assumptions: cleanStringList(draft.assumptions),
+  plannedFiles: cleanStringList(draft.plannedFiles)
+});
+
+const hierarchyPlanTitle = (plan: HierarchyDraftPlan): string => {
+  if (plan.planKind === "extend_feature") {
+    const first = plan.extendFeature?.leanTasks[0];
+    return first?.title.trim() || "Feature tasks";
+  }
+  return plan.root?.title.trim() || "Untitled draft";
+};
+
+const normalizeHierarchyDraftOutcome = (parsed: HierarchyDraftPlan, scope: DraftScope): HierarchyDraftOutcome => {
+  const blockingQuestions = cleanStringList([
+    ...(parsed.blockingClarificationQuestions ?? []),
+    ...(parsed.draftState === "needs_clarification" ? [] : [])
+  ]);
+  const plan: HierarchyDraftPlan = {
+    ...parsed,
+    matchedEpicId: parsed.matchedEpicId?.trim() || null,
+    matchedFeatureId: parsed.matchedFeatureId?.trim() || null,
+    features: (parsed.features ?? []).map((feature) => ({
+      stub: { ...feature.stub, summary: normalizeDraftSummary(feature.stub.summary), labels: cleanStringList(feature.stub.labels) },
+      leanTasks: feature.leanTasks.map(normalizeLeanTaskDraft)
+    })),
+    leanTasks: (parsed.leanTasks ?? []).map(normalizeLeanTaskDraft),
+    extendFeature: parsed.extendFeature
+      ? { leanTasks: parsed.extendFeature.leanTasks.map(normalizeLeanTaskDraft) }
+      : undefined,
+    root: parsed.root ? applyDraftSectionBudget(normalizeSubticketDraft(parsed.root), scope) : undefined
+  };
+  const title = hierarchyPlanTitle(plan);
+  if (parsed.draftState === "needs_clarification" || blockingQuestions.length > 0) {
+    return { status: "needs_clarification", plan, questions: blockingQuestions, title };
+  }
+  return { status: "ready", plan, title };
+};
+
+const hierarchyDraftGuidanceForPlanKind = (planKind: DraftPlanKind, input: CreateDraftInput): string => {
+  const matchedEpic = input.matchedEpicId ? `matchedEpicId: ${input.matchedEpicId}` : "matchedEpicId: none";
+  const matchedFeature = input.matchedFeatureId ? `matchedFeatureId: ${input.matchedFeatureId}` : "matchedFeatureId: none";
+  switch (planKind) {
+    case "feature_tree":
+      return `planKind is feature_tree. Populate root as the parent feature spec and leanTasks as executable tasks under it (use exactly one leanTask for micro/surgical work). Every leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. features must be empty. Do not use standaloneTask. ${matchedEpic}. ${matchedFeature}.`;
+    case "epic_tree":
+      return `planKind is epic_tree. Populate root as the epic spec and features as capability stubs each with leanTasks. Every leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. leanTasks on the root must be empty. ${matchedEpic}. ${matchedFeature}.`;
+    case "extend_epic":
+      return `planKind is extend_epic. Do not draft the epic body — populate root as the NEW feature spec and leanTasks under it. Every leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. ${matchedEpic} is the parent epic id to link after apply. features must be empty.`;
+    case "extend_feature":
+      return `planKind is extend_feature. Populate extendFeature.leanTasks only. Every leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. root, features, leanTasks, and standaloneTask must be empty. ${matchedFeature} is the existing feature to extend.`;
+    default:
+      return `planKind is ${planKind}.`;
+  }
+};
+
+const createHierarchyDraftPromise = async (
+  input: CreateDraftInput,
+  dependencies: TicketDraftDependencies = {}
+): Promise<HierarchyDraftOutcome> => {
+  const { projectPath, idea, effort, ticketId, draftScope, planKind, intakeAnswers, intakeKnownFacts, relatedTicketIds, matchedEpicId, matchedFeatureId } =
+    input;
+  if (!planKind) throw new Error("Hierarchy drafting requires planKind from intake.");
+  const requestId = dependencies.createRequestId?.() ?? newId("hdr");
+  const startedAt = dependencies.nowMs?.() ?? Date.now();
+  const nowMs = dependencies.nowMs ?? Date.now;
+  const durationMs = (): number => Math.max(0, nowMs() - startedAt);
+  const abortController = dependencies.abortController ?? new AbortController();
+  const scope = draftScope ?? scopeForPlanKind(planKind);
+  const scopeProfile = DRAFT_SCOPE_PROFILES[scope];
+  let progressInterval: DraftProgressIntervalHandle | null = null;
+  const logBase = { requestId, projectPath, ideaLength: idea.length, scope, planKind };
+
+  await logInfo("codex:draft", "starting hierarchy ticket draft", logBase);
+  try {
+    await reportTicketDraftProgress(dependencies, "Checking Codex availability for hierarchy drafting.");
+    await ensureTicketDraftAgentAvailable(dependencies, requestId, durationMs, {
+      unavailable: "Codex CLI was not found in the SDK bundle or on PATH. Install or expose Codex before drafting tickets.",
+      unauthenticated: "Codex is not authenticated. Run `codex login` in your terminal, then try drafting again."
+    });
+
+    const [config, board] = await Promise.all([readProjectConfig(projectPath), readBoard(projectPath)]);
+    const existingDraftTicket = ticketId ? await readTicket(projectPath, ticketId) : null;
+    const effectiveEffort = existingDraftTicket?.frontMatter.effort ?? effort ?? config.settings.defaultTicketEffort;
+    const draftClarifications = ticketId ? await readClarificationQuestions(projectPath, ticketId) : [];
+    const provider = structuredAgentProviderForDraft(dependencies);
+    const intakeContext = `Draft scope: ${scope} (${scopeProfile.label})
+Plan kind: ${planKind}
+${hierarchyDraftGuidanceForPlanKind(planKind, input)}
+Known facts from intake:
+${formatStringListForPrompt(intakeKnownFacts)}
+
+Related tickets selected by intake:
+${formatRelatedTicketsForPrompt(board, relatedTicketIds)}
+
+Answered intake questions:
+${formatDraftIntakeAnswersForPrompt(intakeAnswers)}`;
+    const clarificationContext = ticketId
+      ? `Clarification records already attached to this draft ticket:
+${formatClarificationsForPrompt(draftClarifications)}
+
+Existing draft ticket markdown:
+${existingDraftTicket?.markdown ?? "No existing draft ticket markdown was loaded."}`
+      : "No prior clarification records are attached to this new draft.";
+    const prompt = `You are helping Relay auto-plan implementation work on a kanban board.
+
+The intake pass already chose planKind "${planKind}". Produce a hierarchy draft matching that plan — do not change planKind.
+
+This is read-only. Research the codebase and return structured JSON only.
+
+${hierarchyDraftGuidanceForPlanKind(planKind, input)}
+
+Return draftState "ready" only when the planned tickets are implementation-ready. Otherwise return draftState "needs_clarification" with blockingClarificationQuestions.
+
+Keep lean tasks bite-sized (one Codex run each).
+
+${DRAFT_SUMMARY_PROMPT_GUIDANCE}
+
+Project path: ${projectPath}
+Project name: ${config.name}
+
+Draft intake context:
+${intakeContext}
+
+Draft clarification context:
+${clarificationContext}
+
+User idea:
+${idea}`;
+
+    await reportTicketDraftProgress(dependencies, "The agent is writing the hierarchy draft plan. This can take several minutes.");
+    const progressIntervalMs = dependencies.draftProgressIntervalMs ?? 60_000;
+    if (dependencies.onProgress && progressIntervalMs > 0) {
+      progressInterval = setInterval(() => {
+        void reportTicketDraftProgress(
+          dependencies,
+          `Still waiting for the hierarchy draft after ${formatDraftWait(durationMs())}.`
+        );
+      }, progressIntervalMs);
+      unrefTimerHandle(progressInterval);
+    }
+    const result = await provider.runStructured({
+      kind: "ticket.hierarchy_draft",
+      projectPath,
+      prompt,
+      outputSchema: hierarchyDraftPlanSchemaJson,
+      mode: "read_only",
+      effort: effectiveEffort,
+      networkAccessEnabled: DRAFT_AGENT_NETWORK_ACCESS_ENABLED,
+      webSearchMode: DRAFT_AGENT_WEB_SEARCH_MODE,
+      signal: abortController.signal
+    });
+    if (progressInterval) {
+      clearInterval(progressInterval);
+      progressInterval = null;
+    }
+    const parsed = parseSchema(hierarchyDraftPlanSchema, normalizeLegacyStandalonePlanPayload(result.output));
+    if (parsed.planKind !== planKind) {
+      throw ticketDraftError(
+        "invalid_response",
+        requestId,
+        durationMs(),
+        "The agent returned a hierarchy plan with the wrong planKind.",
+        "invalid_plan_kind"
+      );
+    }
+    return normalizeHierarchyDraftOutcome(parsed, scope);
+  } catch (error) {
+    const draftError = normalizeTicketDraftError(error, {
+      requestId,
+      durationMs: durationMs(),
+      signalAborted: abortController.signal.aborted
+    });
+    await logError("codex:draft", "hierarchy ticket draft failed", draftError, { ...logBase, ...draftError.toPayload() });
+    throw draftError;
+  } finally {
+    if (progressInterval) clearInterval(progressInterval);
+  }
+};
+
+const createHierarchyDraftOutcome = (
+  input: CreateDraftInput,
+  dependencies: TicketDraftDependencies = {}
+): Promise<HierarchyDraftOutcome> =>
+  runBackendEffect(
+    Effect.provide(
+      Effect.gen(function*() {
+        const deps = yield* TicketDraftDependencyService;
+        return yield* fromPromise(() => createHierarchyDraftPromise(input, deps));
+      }),
+      ticketDraftDependencyLayer(dependencies)
+    )
+  );
+
 const createTicketDraftPromise = async (
   { projectPath, idea, effort, preferredTicketType, ticketId, draftScope, intakeAnswers, intakeKnownFacts, relatedTicketIds }: CreateDraftInput,
   dependencies: TicketDraftDependencies = {}
@@ -1318,8 +1864,10 @@ const createTicketDraftPromise = async (
     const provider = structuredAgentProviderForDraft(dependencies);
     const ticketTypeGuidance =
       preferredTicketType === "epic"
-        ? "The user selected Epic mode. Return ticketType \"epic\" and decompose the work into normal task subtickets."
-        : "The user selected Task mode unless the idea explicitly asks for an epic. Return ticketType \"task\" with an empty subtickets array for ordinary work.";
+        ? "The user selected Epic mode. Return ticketType \"epic\" and decompose the work into feature stubs in featureStubs (not tasks). subtickets and leanTasks must be empty arrays."
+        : preferredTicketType === "feature"
+          ? "The user selected Feature mode. Return ticketType \"feature\" and decompose executable work into leanTasks (bite-sized tasks). Every leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. subtickets and featureStubs must be empty arrays."
+          : "Return ticketType \"feature\" with exactly one leanTask for the executable work. That leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. subtickets and featureStubs must be empty arrays.";
     const clarificationContext = ticketId
       ? `Clarification records already attached to this draft ticket:
 ${formatClarificationsForPrompt(draftClarifications)}
@@ -1364,10 +1912,16 @@ Use clarificationQuestions only for non-blocking open questions that should rema
 
 Do not include large copied source blocks or long page excerpts.
 
-Relay supports two ticket types: task and epic. ${ticketTypeGuidance}
-For epic drafts, the parent epic should describe the overall outcome and subtickets should be independently implementable normal task tickets with their own requirements, implementationPlan, testPlan, acceptanceCriteria, labels, and priority. Do not create nested epics. For task drafts, subtickets must be an empty array.
+Relay supports epic, feature, and task ticket types. ${ticketTypeGuidance}
+For epic drafts, the parent epic describes the overall outcome and featureStubs are capability-level feature tickets (not executable tasks). Do not put tasks directly under epics.
+For feature drafts, leanTasks are bite-sized executable tasks with focused requirements and acceptanceCriteria — keep each lean task small enough for one Codex run.
+Every leanTask must include plannedFiles: an optimistic non-empty list of exact repo-relative file paths expected to change.
+For ordinary task drafts, subtickets, featureStubs, and leanTasks must be empty arrays. Do not create nested epics.
+For task drafts, plannedFiles must be a non-empty optimistic list of exact repo-relative file paths Codex may create or modify.
 
 Return only data matching the requested schema. Do not implement the task.
+
+${DRAFT_SUMMARY_PROMPT_GUIDANCE}
 
 Project path: ${projectPath}
 Project name: ${config.name}
@@ -1553,6 +2107,7 @@ export const startTicketDraftRun = async (
 
   void (async () => {
     try {
+      const autoHierarchy = usesAutoHierarchyDraft(input);
       let draftInput: CreateDraftInput = {
         projectPath,
         idea,
@@ -1560,6 +2115,10 @@ export const startTicketDraftRun = async (
         preferredTicketType: input.preferredTicketType,
         ticketId: ticket.frontMatter.id,
         draftScope: input.draftScope,
+        planKind: input.planKind,
+        matchedEpicId: input.matchedEpicId,
+        matchedFeatureId: input.matchedFeatureId,
+        autoHierarchy: input.autoHierarchy,
         intakeAnswers: input.intakeAnswers,
         intakeKnownFacts: input.intakeKnownFacts,
         relatedTicketIds: input.relatedTicketIds
@@ -1571,16 +2130,21 @@ export const startTicketDraftRun = async (
           {
             projectPath,
             idea,
-            scopeOverride: draftIntakeScopeOverrideForCreateInput(input),
-            effort: ticket.frontMatter.effort
+            scopeOverride: autoHierarchy ? undefined : draftIntakeScopeOverrideForCreateInput(input),
+            effort: ticket.frontMatter.effort,
+            autoHierarchy
           },
           draftDependencies
         );
         await reportTicketDraftProgress(
           draftDependencies,
-          `Draft intake classified this as ${DRAFT_SCOPE_PROFILES[intake.scope].label.toLowerCase()} with ${intake.questions.length} blocking question${
-            intake.questions.length === 1 ? "" : "s"
-          }.`
+          autoHierarchy
+            ? `Draft intake chose ${intake.planKind.replace(/_/g, " ")} (${DRAFT_SCOPE_PROFILES[intake.scope].label.toLowerCase()}) with ${intake.questions.length} blocking question${
+                intake.questions.length === 1 ? "" : "s"
+              }.`
+            : `Draft intake classified this as ${DRAFT_SCOPE_PROFILES[intake.scope].label.toLowerCase()} with ${intake.questions.length} blocking question${
+                intake.questions.length === 1 ? "" : "s"
+              }.`
         );
 
         if (intake.questions.length > 0) {
@@ -1618,12 +2182,75 @@ export const startTicketDraftRun = async (
 
         draftInput = {
           ...draftInput,
-          preferredTicketType: preferredTicketTypeForDraftScope(intake.scope, input.preferredTicketType),
           draftScope: intake.scope,
           intakeKnownFacts: intake.knownFacts,
           relatedTicketIds: intake.relatedTicketIds,
-          intakeAnswers: []
+          intakeAnswers: [],
+          ...(autoHierarchy
+            ? {
+                planKind: intake.planKind,
+                matchedEpicId: intake.matchedEpicId,
+                matchedFeatureId: intake.matchedFeatureId
+              }
+            : {
+                preferredTicketType: preferredTicketTypeForDraftScope(intake.scope, input.preferredTicketType)
+              })
         };
+      }
+
+      if (autoHierarchy || draftInput.planKind) {
+        const hierarchyOutcome = await createHierarchyDraftOutcome(draftInput, draftDependencies);
+        if (hierarchyOutcome.status === "needs_clarification") {
+          const questions = await createClarificationQuestions(
+            projectPath,
+            ticket.frontMatter.id,
+            hierarchyOutcome.questions.map((question) => ({ question })),
+            {
+              actor: "codex",
+              source: "draft_generation",
+              runId,
+              codexThreadId: threadId
+            }
+          );
+          await blockPendingTicketDraftForClarification(projectPath, ticket.frontMatter.id, idea, runId, hierarchyOutcome.questions);
+          await emitDraftEvent({
+            type: "clarification.requested",
+            questions,
+            timestamp: nowIso()
+          });
+          await logInfo("codex:draft", "async hierarchy draft blocked on clarification", {
+            projectPath,
+            ticketId: ticket.frontMatter.id,
+            runId,
+            clarificationQuestionCount: questions.length
+          });
+          await markWorkRunStatusSafely(projectPath, runId, "blocked", {
+            message: "Ticket draft is blocked on clarification.",
+            metadata: { clarificationQuestionCount: questions.length }
+          });
+          return;
+        }
+
+        const rootTicketId = await applyHierarchyDraftPlan(projectPath, ticket.frontMatter.id, hierarchyOutcome.plan, runId);
+        await emitDraftEvent({
+          type: "run.completed",
+          finalResponse: `Hierarchy draft completed; open ${rootTicketId}: ${hierarchyOutcome.title}`,
+          finalStatus: "draft_complete",
+          timestamp: nowIso()
+        });
+        await logInfo("codex:draft", "async hierarchy draft applied", {
+          projectPath,
+          ticketId: rootTicketId,
+          placeholderTicketId: ticket.frontMatter.id,
+          runId,
+          planKind: hierarchyOutcome.plan.planKind,
+          title: hierarchyOutcome.title
+        });
+        await markWorkRunStatusSafely(projectPath, runId, "completed", {
+          result: { ticketId: rootTicketId, title: hierarchyOutcome.title },
+          message: "Hierarchy draft completed."
+        });
+        return;
       }
 
       const outcome = await createTicketDraftOutcome(draftInput, draftDependencies);
@@ -1776,12 +2403,95 @@ Existing ticket markdown:
 ${ticket.markdown}`;
 };
 
+export const isImplementationScopeRedraftEligible = async (
+  projectPath: string,
+  ticket: TicketRecord
+): Promise<boolean> => {
+  if (ticket.frontMatter.ticketType !== "task" || ticket.frontMatter.runStatus !== "blocked") return false;
+  const clarifications = await readClarificationQuestions(projectPath, ticket.frontMatter.id);
+  return clarifications.some(
+    (question) => isMissingPlannedScopeClarificationQuestion(question) && !question.answer?.trim()
+  );
+};
+
+const normalizeScopeRecoveryRequestedPaths = (requestedPaths: readonly string[], projectPath: string): string[] =>
+  normalizeRepoPathList(
+    requestedPaths.map((value) => {
+      const normalized = normalizeRepoPath(value);
+      return normalized ?? value;
+    }),
+    projectPath
+  );
+
+const answeredScopeRecoveryClarifications = (
+  clarifications: readonly ClarificationQuestion[],
+  ticket: TicketRecord,
+  projectPath: string
+): ClarificationQuestion[] => {
+  if (ticket.frontMatter.ticketType !== "task" || ticket.frontMatter.runStatus !== "blocked") return [];
+
+  const currentScope = normalizedPlannedScopeForTicket(ticket, projectPath);
+  return clarifications.filter((question) => {
+    if (!isScopeViolationClarificationQuestion(question) || !question.answer?.trim()) return false;
+    const approvedPaths = normalizeScopeRecoveryRequestedPaths(extractScopeViolationRequestedPaths(question), projectPath);
+    if (approvedPaths.length === 0) return false;
+    return approvedPaths.some((filePath) => !currentScope.includes(filePath));
+  });
+};
+
+export const isScopeRecoveryRedraftEligible = async (
+  projectPath: string,
+  ticket: TicketRecord
+): Promise<boolean> => {
+  if (ticket.frontMatter.ticketType !== "task" || ticket.frontMatter.runStatus !== "blocked") return false;
+  const clarifications = await readClarificationQuestions(projectPath, ticket.frontMatter.id);
+  if (clarifications.some((question) => !question.answer?.trim())) return false;
+  return answeredScopeRecoveryClarifications(clarifications, ticket, projectPath).length > 0;
+};
+
+const buildScopeRecoveryTicketUpdateRequest = (
+  ticket: TicketRecord,
+  clarification: ClarificationQuestion,
+  projectPath: string
+): string => {
+  const currentScope = normalizedPlannedScopeForTicket(ticket, projectPath);
+  const approvedPaths = normalizeScopeRecoveryRequestedPaths(extractScopeViolationRequestedPaths(clarification), projectPath);
+  if (approvedPaths.length === 0) {
+    throw new Error("The approved scope clarification did not include any valid file paths to merge.");
+  }
+
+  return `Recover this blocked implementation task by redrafting the existing ticket in place.
+
+The current planned file scope must be expanded to include the approved extra paths below. Treat the approved extra paths as the canonical source of scope additions. Use the clarification answer only as approval context.
+
+Current planned scope:
+${formatPlannedScopeForPrompt(currentScope)}
+
+Approved extra paths:
+${formatPlannedScopeForPrompt(approvedPaths)}
+
+Clarification approval context:
+${clarification.answer?.trim() ?? "Approved."}
+
+Rewrite the task plan as needed so the markdown and plannedFiles stay aligned. Return the complete merged plannedFiles list as non-empty repo-relative paths. Preserve the same task and ticket record; do not create a new ticket or ask new clarification questions.`;
+};
+
 const isRedraftEligibleTicket = (ticket: TicketRecord): boolean => {
   if (ticket.frontMatter.runStatus === "draft_failed" && originalIdeaFromDraftMarkdown(ticket.markdown)) return true;
   return ticket.frontMatter.runStatus === "draft_complete" || ticket.frontMatter.authoringState === "reviewing";
 };
 
-const assertRedraftEligibleTicket = (ticket: TicketRecord): void => {
+const assertRedraftEligibleTicket = async (projectPath: string, ticket: TicketRecord, purpose: TicketRedraftInput["purpose"]): Promise<void> => {
+  if (purpose === "implementation_scope") {
+    if (await isImplementationScopeRedraftEligible(projectPath, ticket)) return;
+    throw ticketDraftError(
+      "backend_failure",
+      newId("tdr"),
+      0,
+      "Only blocked implementation tasks missing planned file scope can be redrafted for scope recovery.",
+      "redraft_not_eligible"
+    );
+  }
   if (isRedraftEligibleTicket(ticket)) return;
   throw ticketDraftError(
     "backend_failure",
@@ -1791,6 +2501,23 @@ const assertRedraftEligibleTicket = (ticket: TicketRecord): void => {
     "redraft_not_eligible"
   );
 };
+
+const buildImplementationScopeRedraftIdea = (ticket: TicketRecord): string => `Redraft this implementation task in place.
+
+The ticket is blocked because Relay has no planned file scope (plannedFiles) for Codex implementation runs.
+
+Return ticketType "task" with:
+- plannedFiles: a non-empty optimistic list of exact repo-relative file paths Codex may create or modify (include likely helpers even if uncertain)
+- refreshed requirements, implementation plan, test plan, and acceptance criteria aligned with the existing intent
+- subtickets, featureStubs, and leanTasks must be empty arrays
+
+Preserve the same overall goal as the existing ticket. Do not change ticket hierarchy.
+
+Existing ticket title:
+${ticket.frontMatter.title}
+
+Existing ticket markdown:
+${ticket.markdown}`;
 
 const setExistingTicketRedraftInProgress = async (projectPath: string, ticket: TicketRecord, runId: string): Promise<TicketRecord> =>
   writeTicket(projectPath, {
@@ -1833,14 +2560,35 @@ const blockExistingTicketRedraftForClarification = async (
     }
   });
 
+const resolveScopeClarificationAfterRedraft = async (
+  projectPath: string,
+  ticketId: string,
+  clarificationQuestionId: string | undefined
+): Promise<void> => {
+  const clarifications = await readClarificationQuestions(projectPath, ticketId);
+  const targets = clarifications.filter(
+    (question) =>
+      isMissingPlannedScopeClarificationQuestion(question) &&
+      !question.answer?.trim() &&
+      (!clarificationQuestionId || question.id === clarificationQuestionId)
+  );
+  for (const question of targets) {
+    await answerClarificationQuestion(projectPath, ticketId, question.id, MISSING_PLANNED_SCOPE_ANSWER_DRAFT);
+  }
+};
+
 export const startTicketRedraftRun = async (
   input: TicketRedraftInput,
   dependencies: TicketDraftStartDependencies = {}
 ): Promise<TicketDraftStart> => {
   const projectPath = await resolveBackendPath(input.projectPath);
   const existingTicket = await readTicket(projectPath, input.ticketId);
-  assertRedraftEligibleTicket(existingTicket);
-  const idea = redraftIdeaFromTicket(existingTicket, input.idea);
+  const purpose = input.purpose ?? "default";
+  await assertRedraftEligibleTicket(projectPath, existingTicket, purpose);
+  const idea =
+    purpose === "implementation_scope"
+      ? buildImplementationScopeRedraftIdea(existingTicket)
+      : redraftIdeaFromTicket(existingTicket, input.idea);
   const runId = dependencies.createRunId?.() ?? newId("run");
   const threadId = draftRunThreadId(runId);
   const abortController = new AbortController();
@@ -1851,7 +2599,7 @@ export const startTicketRedraftRun = async (
       projectPath,
       idea,
       effort: input.effort ?? existingTicket.frontMatter.effort,
-      preferredTicketType: input.preferredTicketType ?? existingTicket.frontMatter.ticketType,
+      preferredTicketType: input.preferredTicketType ?? resolveDraftPreferredTicketType(existingTicket.frontMatter),
       relatedTicketIds: input.relatedTicketIds ?? existingTicket.frontMatter.relatedTicketIds
     },
     { runId }
@@ -1906,14 +2654,17 @@ export const startTicketRedraftRun = async (
         ticketId: existingTicket.frontMatter.id,
         idea,
         effort: input.effort ?? existingTicket.frontMatter.effort,
-        preferredTicketType: input.preferredTicketType ?? existingTicket.frontMatter.ticketType,
-        draftScope: input.draftScope,
+        preferredTicketType:
+          purpose === "implementation_scope"
+            ? "task"
+            : (input.preferredTicketType ?? resolveDraftPreferredTicketType(existingTicket.frontMatter)),
+        draftScope: purpose === "implementation_scope" ? "task" : input.draftScope,
         intakeAnswers: input.intakeAnswers,
         intakeKnownFacts: input.intakeKnownFacts,
         relatedTicketIds: input.relatedTicketIds ?? existingTicket.frontMatter.relatedTicketIds
       };
 
-      if (input.runIntake && !hasUserSuppliedIntakeContext({ ...draftInput, runIntake: input.runIntake })) {
+      if (purpose !== "implementation_scope" && input.runIntake && !hasUserSuppliedIntakeContext({ ...draftInput, runIntake: input.runIntake })) {
         await reportTicketDraftProgress(draftDependencies, "Running draft intake to classify scope and find blocking questions.");
         const intake = await createDraftIntake(
           {
@@ -1959,7 +2710,10 @@ export const startTicketRedraftRun = async (
 
         draftInput = {
           ...draftInput,
-          preferredTicketType: preferredTicketTypeForDraftScope(intake.scope, input.preferredTicketType ?? existingTicket.frontMatter.ticketType),
+          preferredTicketType: preferredTicketTypeForDraftScope(
+            intake.scope,
+            input.preferredTicketType ?? resolveDraftPreferredTicketType(existingTicket.frontMatter)
+          ),
           draftScope: intake.scope,
           intakeKnownFacts: intake.knownFacts,
           relatedTicketIds: intake.relatedTicketIds,
@@ -1994,22 +2748,32 @@ export const startTicketRedraftRun = async (
       }
 
       const draft = outcome.draft;
-      await applyTicketDraftToTicket(projectPath, existingTicket.frontMatter.id, draft, runId);
+      if (purpose === "implementation_scope") {
+        await applyImplementationScopeRedraftToTicket(projectPath, existingTicket.frontMatter.id, draft, runId);
+        await resolveScopeClarificationAfterRedraft(projectPath, existingTicket.frontMatter.id, input.clarificationQuestionId);
+        await maybeFinalizeImplementationScopeAfterClarification(projectPath, existingTicket.frontMatter.id);
+      } else {
+        await applyTicketDraftToTicket(projectPath, existingTicket.frontMatter.id, draft, runId);
+      }
       await emitDraftEvent({
         type: "run.completed",
-        finalResponse: `Ticket redraft completed and applied to ${existingTicket.frontMatter.id}: ${draft.title}`,
-        finalStatus: "draft_complete",
+        finalResponse:
+          purpose === "implementation_scope"
+            ? `Task scope redraft completed for ${existingTicket.frontMatter.id}: ${draft.title}`
+            : `Ticket redraft completed and applied to ${existingTicket.frontMatter.id}: ${draft.title}`,
+        finalStatus: purpose === "implementation_scope" ? "completed" : "draft_complete",
         timestamp: nowIso()
       });
       await logInfo("codex:draft", "ticket redraft applied", {
         projectPath,
         ticketId: existingTicket.frontMatter.id,
         runId,
-        title: draft.title
+        title: draft.title,
+        purpose
       });
       await markWorkRunStatusSafely(projectPath, runId, "completed", {
-        result: { ticketId: existingTicket.frontMatter.id, title: draft.title },
-        message: "Ticket redraft completed."
+        result: { ticketId: existingTicket.frontMatter.id, title: draft.title, purpose },
+        message: purpose === "implementation_scope" ? "Task scope redraft completed." : "Ticket redraft completed."
       });
     } catch (error) {
       const payload = ticketDraftErrorToPayload(error);
@@ -2123,7 +2887,7 @@ export const maybeResumeTicketDraftAfterClarification = async (
           ticketId,
           idea,
           effort: draftingTicket.frontMatter.effort,
-          preferredTicketType: draftingTicket.frontMatter.ticketType
+          preferredTicketType: resolveDraftPreferredTicketType(draftingTicket.frontMatter)
         },
         draftDependencies
       );
@@ -2269,6 +3033,7 @@ const normalizeItemEvent = (
     return item.changes.map((change) => ({
       type: "file.change",
       path: change.path,
+      kind: change.kind,
       summary: `${change.kind} ${change.path}`,
       timestamp
     }));
@@ -2349,6 +3114,7 @@ const parseAgentTicketUpdate = (value: string): AgentTicketUpdate => {
   if (!title) throw new Error("Agent ticket update must include a title.");
 
   const labels = [...new Set(parsed.labels.map((label) => normalizeWhitespace(label)).filter(Boolean))];
+  const plannedFiles = parsed.plannedFiles ? normalizeSharedPlannedScope(parsed.plannedFiles) : undefined;
   const fullMarkdown = parsed.patch.fullMarkdown?.trim() ? assertAgentMarkdownBody(parsed.patch.fullMarkdown, "fullMarkdown") : null;
   const appendMarkdown = parsed.patch.appendMarkdown?.trim() ? assertAgentMarkdownBody(parsed.patch.appendMarkdown, "appendMarkdown") : null;
   if (!fullMarkdown && !appendMarkdown) throw new Error("Agent ticket update patch must include fullMarkdown or appendMarkdown.");
@@ -2358,6 +3124,7 @@ const parseAgentTicketUpdate = (value: string): AgentTicketUpdate => {
     priority: parsed.priority,
     labels,
     authoringState: parsed.authoringState,
+    plannedFiles,
     patch: {
       summary: normalizeWhitespace(parsed.patch.summary),
       fullMarkdown,
@@ -2374,11 +3141,21 @@ const applyAgentTicketPatch = (currentMarkdown: string, update: AgentTicketUpdat
   return `${currentMarkdown.trimEnd()}\n\n## Agent Refinement\n\n${appendMarkdown}\n`;
 };
 
+type TicketUpdatePurpose = NonNullable<AgentTicketUpdateInput["purpose"]>;
+
+const scopeRecoveryPurpose = "scope_recovery" as const;
+
+const formatTicketUpdatePlannedFilesGuidance = (purpose: TicketUpdatePurpose): string =>
+  purpose === scopeRecoveryPurpose
+    ? '- plannedFiles: REQUIRED for this task scope recovery. Return the complete updated non-empty repo-relative planned scope, including the current scope plus every approved extra path.'
+    : '- plannedFiles: optional. Omit it unless the request explicitly asks to change planned scope for a task ticket.';
+
 const buildTicketUpdatePrompt = (
   ticket: Awaited<ReturnType<typeof readTicket>>,
   clarifications: ClarificationQuestion[],
   request: string,
-  projectName: string
+  projectName: string,
+  purpose: TicketUpdatePurpose
 ): string => `You are helping update one Relay ticket.
 
 Update the ticket content only. Do not implement the ticket. Do not modify files. Do not move the ticket to another column. Do not change run history or Codex execution metadata.
@@ -2390,6 +3167,7 @@ Return only structured JSON matching the requested schema:
 - priority: one of low, medium, high, urgent.
 - labels: complete updated label list.
 - authoringState: "reviewing" when the ticket is ready for user inspection, "needs_input" when new clarification is blocking, "ready" only when the ticket appears implementation-ready, or "rough" when it is still an early note.
+${formatTicketUpdatePlannedFilesGuidance(purpose)}
 - patch.summary: concise user-facing summary of the refinement.
 - patch.appendMarkdown: markdown to append under an Agent Refinement section for additive changes, extra research, notes, or checklist items.
 - patch.fullMarkdown: complete replacement markdown only when the user asks for a rewrite or a safe merge cannot preserve coherence.
@@ -2397,6 +3175,7 @@ Return only structured JSON matching the requested schema:
 
 For todos, use GitHub-style markdown checkboxes like "- [ ] Validate migration path" or "- [x] Confirm existing behavior"; Relay renders these as checklists and summarizes them on ticket cards.
 Never include YAML front matter in fullMarkdown or appendMarkdown. Keep existing implementation handoff/history content when it is present.
+${purpose === scopeRecoveryPurpose ? "This request is recovering blocked implementation scope. Do not ask new clarification questions. Merge the approved extra paths into the task's complete plannedFiles response deterministically." : ""}
 
 Project: ${projectName}
 Ticket front matter, for context only:
@@ -2411,6 +3190,39 @@ ${ticket.markdown}
 User change request:
 ${request}`;
 
+const readScopeRecoveryClarification = async (
+  projectPath: string,
+  ticketId: string,
+  clarificationQuestionId: string | undefined
+): Promise<ClarificationQuestion> => {
+  if (!clarificationQuestionId) throw new Error("Scope recovery updates require a clarification question id.");
+  const clarifications = await readClarificationQuestions(projectPath, ticketId);
+  const clarification = clarifications.find((question) => question.id === clarificationQuestionId);
+  if (!clarification || !isScopeViolationClarificationQuestion(clarification)) {
+    throw new Error("The scope recovery clarification could not be found.");
+  }
+  return clarification;
+};
+
+const mergedScopeRecoveryPlannedFiles = (
+  latest: TicketRecord,
+  update: AgentTicketUpdate,
+  clarification: ClarificationQuestion,
+  projectPath: string
+): string[] => {
+  if (latest.frontMatter.ticketType !== "task") throw new Error("Scope recovery updates only apply to task tickets.");
+  if (!update.plannedFiles || update.plannedFiles.length === 0) {
+    throw new Error("Scope recovery updates must return a non-empty planned file scope.");
+  }
+  const approvedPaths = normalizeScopeRecoveryRequestedPaths(extractScopeViolationRequestedPaths(clarification), projectPath);
+  const merged = normalizePlannedScope(
+    [...normalizedPlannedScopeForTicket(latest, projectPath), ...approvedPaths, ...update.plannedFiles],
+    projectPath
+  );
+  if (merged.length === 0) throw new Error("Scope recovery updates must persist a non-empty planned file scope.");
+  return merged;
+};
+
 const startTicketUpdateRunPromise = async (
   input: AgentTicketUpdateInput,
   dependencies: TicketUpdateDependencies = {}
@@ -2418,6 +3230,7 @@ const startTicketUpdateRunPromise = async (
   const projectPath = await resolveBackendPath(input.projectPath);
   const ticketId = input.ticketId;
   const request = input.request.trim();
+  const purpose = input.purpose ?? "default";
   if (!request) throw new Error("Enter a ticket update request before starting the agent.");
 
   const updateKey = ticketUpdateRunKey(projectPath, ticketId);
@@ -2442,7 +3255,7 @@ const startTicketUpdateRunPromise = async (
     const codex = dependencies.createCodexClient?.() ?? (await createCodex());
     const thread = codex.startThread(await ticketUpdateThreadOptionsForProject(projectPath));
     currentThreadId = thread.id ?? currentThreadId;
-    const prompt = buildTicketUpdatePrompt(ticket, clarifications, request, config.name);
+    const prompt = buildTicketUpdatePrompt(ticket, clarifications, request, config.name, purpose);
     streamed = await thread.runStreamed(prompt, { outputSchema: agentTicketUpdateSchemaJson, signal: abortController.signal });
     const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", { message: "Ticket update agent started." });
     await updateTicketUpdateRunAttempt(runId, {
@@ -2538,9 +3351,15 @@ const startTicketUpdateRunPromise = async (
 
             try {
               const latest = await readTicket(projectPath, ticketId);
+              const isScopeRecovery = purpose === scopeRecoveryPurpose;
+              if (isScopeRecovery && update.clarificationQuestions.length > 0) {
+                throw new Error("Scope recovery updates cannot create new clarification questions.");
+              }
               const nextMarkdown = applyAgentTicketPatch(latest.markdown, update);
-              const nextAuthoringState = update.clarificationQuestions.length > 0 ? "needs_input" : update.authoringState;
-              await writeTicket(projectPath, {
+              const nextAuthoringState = isScopeRecovery ? "ready" : update.clarificationQuestions.length > 0 ? "needs_input" : update.authoringState;
+              const scopeRecoveryClarification =
+                isScopeRecovery ? await readScopeRecoveryClarification(projectPath, ticketId, input.clarificationQuestionId) : null;
+              const persisted = await writeTicket(projectPath, {
                 ...latest,
                 markdown: nextMarkdown,
                 frontMatter: {
@@ -2548,9 +3367,57 @@ const startTicketUpdateRunPromise = async (
                   title: update.title,
                   priority: update.priority,
                   labels: update.labels,
-                  authoringState: nextAuthoringState
+                  authoringState: nextAuthoringState,
+                  runStatus: isScopeRecovery ? "idle" : latest.frontMatter.runStatus,
+                  plannedFiles:
+                    isScopeRecovery && scopeRecoveryClarification
+                      ? mergedScopeRecoveryPlannedFiles(latest, update, scopeRecoveryClarification, projectPath)
+                      : update.plannedFiles ?? latest.frontMatter.plannedFiles
                 }
               });
+
+              if (isScopeRecovery) {
+                const config = await readProjectConfig(projectPath);
+                const readyStatus = config.columns.some((column) => column.id === RELAY_READY_STATUS)
+                  ? RELAY_READY_STATUS
+                  : persisted.frontMatter.status;
+                const readyTicket =
+                  persisted.frontMatter.status === readyStatus
+                    ? persisted
+                    : await transitionTicketStatus(projectPath, ticketId, readyStatus, {
+                        actor: "user",
+                        source: "clarification_ui"
+                      });
+                try {
+                  await (dependencies.reconcileTicketQueueState ?? reconcileTicketQueueState)(projectPath, ticketId);
+                } catch (error) {
+                  await logWarn("codex:ticket-update", "scope recovery updated ticket but queue reconciliation failed", {
+                    projectPath,
+                    ticketId,
+                    runId,
+                    error: errorMessage(error, "Reconcile failed.")
+                  });
+                }
+                await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+                  type: "run.completed",
+                  finalResponse: `Task scope redraft completed. ${update.patch.summary}`,
+                  usage: event.usage,
+                  finalStatus: "completed",
+                  timestamp: nowIso()
+                });
+                await logInfo("codex:ticket-update", "scope recovery ticket update completed", {
+                  projectPath,
+                  ticketId,
+                  runId,
+                  threadId: currentThreadId,
+                  status: readyTicket.frontMatter.status
+                });
+                await markWorkRunStatusSafely(projectPath, runId, "completed", {
+                  result: { ticketId, clarificationQuestionCount: 0, purpose },
+                  message: "Task scope recovery completed."
+                });
+                return;
+              }
 
               if (update.clarificationQuestions.length > 0) {
                 await createClarificationQuestions(
@@ -2651,7 +3518,11 @@ const subagentExecutionGuidance = `Subagent guidance:
 - Give each subagent a concrete bounded responsibility; for code-editing workers, assign disjoint file or module ownership and avoid duplicate delegation.
 - Integrate subagent results before finalizing, and wait only when their result is needed.`;
 
-const buildExecutionPrompt = (ticketMarkdown: string, clarifications: ClarificationQuestion[]): string => `You are working inside the local project folder for this Relay ticket.
+const buildExecutionPrompt = (
+  ticketMarkdown: string,
+  clarifications: ClarificationQuestion[],
+  plannedScope: readonly string[]
+): string => `You are working inside the local project folder for this Relay ticket.
 
 Follow the ticket exactly. Ask for clarification if the ticket is missing a required product or implementation decision.
 
@@ -2659,6 +3530,11 @@ ${subagentExecutionGuidance}
 
 Clarification records already attached to this ticket:
 ${formatClarificationsForPrompt(clarifications)}
+
+Planned file scope for this run:
+${formatPlannedScopeForPrompt(plannedScope)}
+
+Do not modify files outside the planned file scope. If additional files are required, stop work and request clarification before changing them.
 
 If you cannot continue without user input, stop work and include a fenced relay-clarification JSON block in your final response.
 The block must use this shape:
@@ -2699,6 +3575,307 @@ const isPathInsideDirectory = (path: Path.Path, directory: string, target: strin
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 };
 
+const normalizeScopedRepoPath = normalizeRepoPath;
+
+const normalizePlannedScope = (plannedFiles: readonly string[] | undefined, projectRoot?: string): string[] =>
+  normalizeRepoPathList(plannedFiles ?? [], projectRoot);
+
+const normalizedPlannedScopeForTicket = (ticket: Pick<TicketRecord, "frontMatter">, projectRoot?: string): string[] =>
+  ticket.frontMatter.ticketType === "task" ? normalizePlannedScope(ticket.frontMatter.plannedFiles, projectRoot) : [];
+
+const appendPlannedFileToTicket = async (
+  projectPath: string,
+  ticketId: string,
+  filePath: string
+): Promise<{ ticket: TicketRecord; path: string } | null> => {
+  const normalizedPath = normalizeScopedRepoPath(filePath, projectPath);
+  if (!normalizedPath) return null;
+  const ticket = await readTicket(projectPath, ticketId);
+  const mergedScope = normalizePlannedScope([...ticket.frontMatter.plannedFiles, normalizedPath], projectPath);
+  const updated = await writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      plannedFiles: mergedScope
+    }
+  });
+  return { ticket: updated, path: normalizedPath };
+};
+
+const inferPlannedScopeFromLastImplementationRun = async (projectPath: string, ticket: TicketRecord): Promise<string[]> => {
+  const runId = ticket.frontMatter.lastRunId;
+  if (!runId) return [];
+
+  try {
+    const events = await readRunEvents(projectPath, ticket.frontMatter.id, runId);
+    return normalizePlannedScope(
+      events
+        .filter((event) => event.type === "file.change")
+        .map((event) => (event.type === "file.change" ? event.path : ""))
+    );
+  } catch {
+    return [];
+  }
+};
+
+const ensurePlannedFilesForContinuableResume = async (projectPath: string, ticket: TicketRecord): Promise<TicketRecord> => {
+  if (ticket.frontMatter.ticketType !== "task" || normalizedPlannedScopeForTicket(ticket).length > 0) return ticket;
+
+  const inferred = await inferPlannedScopeFromLastImplementationRun(projectPath, ticket);
+  if (inferred.length === 0) return ticket;
+
+  return writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      plannedFiles: inferred
+    }
+  });
+};
+
+const buildMissingPlannedScopeClarificationQuestion = (): string => `${MISSING_PLANNED_SCOPE_MARKER}
+
+This implementation task cannot be retried because Relay has no planned file scope (\`plannedFiles\`).
+
+Submit the prefilled answer to run an agent redraft that redesigns this ticket with an optimistic \`plannedFiles\` list. You can answer other clarifications on this ticket in any order; Relay moves the ticket to **Ready** only after every clarification is answered and scope is defined.`;
+
+const needsClarificationColumnId = (config: Awaited<ReturnType<typeof readProjectConfig>>): string | null =>
+  config.columns.some((column) => column.id === RELAY_NEEDS_CLARIFICATION_STATUS) ? RELAY_NEEDS_CLARIFICATION_STATUS : null;
+
+const ensureTicketBlockedForMissingPlannedScope = async ({
+  projectPath,
+  ticketId,
+  ticket,
+  runId,
+  runEventSink
+}: {
+  projectPath: string;
+  ticketId: string;
+  ticket: TicketRecord;
+  runId: string;
+  runEventSink?: RendererRunEventSink;
+}): Promise<TicketRecord> => {
+  const config = await readProjectConfig(projectPath);
+  const needsClarificationStatus = needsClarificationColumnId(config);
+  const fromStatus = ticket.frontMatter.status;
+  const threadId = ticket.frontMatter.codexThreadId ?? `missing_scope_${ticketId}`;
+
+  let updated = ticket;
+  if (needsClarificationStatus && updated.frontMatter.status !== needsClarificationStatus) {
+    updated = await transitionTicketStatus(projectPath, ticketId, needsClarificationStatus, {
+      actor: "codex",
+      source: "agent_execution",
+      runId
+    });
+    await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, threadId, {
+      type: "ticket.status_changed",
+      fromStatus,
+      toStatus: updated.frontMatter.status,
+      actor: "codex",
+      source: "agent_execution",
+      timestamp: nowIso()
+    });
+  } else if (!needsClarificationStatus) {
+    await logWarn("codex:preflight", "needs clarification column missing; cannot move ticket off in progress", {
+      projectPath,
+      ticketId,
+      status: updated.frontMatter.status
+    });
+  }
+
+  if (updated.frontMatter.runStatus !== "blocked" || updated.frontMatter.authoringState !== "needs_input") {
+    updated = await writeTicket(projectPath, {
+      ...updated,
+      frontMatter: {
+        ...updated.frontMatter,
+        authoringState: "needs_input",
+        runStatus: "blocked"
+      }
+    });
+  }
+
+  if (runId && ticket.frontMatter.lastRunId === runId) {
+    await markWorkRunStatusSafely(projectPath, runId, "blocked", {
+      result: { ticketId, reason: "missing_planned_scope" },
+      message: "Implementation retry blocked until planned file scope is defined."
+    });
+  }
+
+  return updated;
+};
+
+const blockTicketForMissingPlannedScope = async ({
+  projectPath,
+  ticketId,
+  ticket,
+  runEventSink
+}: {
+  projectPath: string;
+  ticketId: string;
+  ticket: TicketRecord;
+  runEventSink?: RendererRunEventSink;
+}): Promise<ClarificationQuestion[]> => {
+  const runId = ticket.frontMatter.lastRunId ?? newId("run");
+  const threadId = ticket.frontMatter.codexThreadId ?? `missing_scope_${ticketId}`;
+  const clarifications = await readClarificationQuestions(projectPath, ticketId);
+  const openMissingScopeQuestions = clarifications.filter(
+    (question) => isMissingPlannedScopeClarificationQuestion(question) && !question.answer?.trim()
+  );
+
+  const questions =
+    openMissingScopeQuestions.length > 0
+      ? openMissingScopeQuestions
+      : await createClarificationQuestions(
+          projectPath,
+          ticketId,
+          [{ question: buildMissingPlannedScopeClarificationQuestion() }],
+          {
+            actor: "codex",
+            source: "agent_execution",
+            runId,
+            codexThreadId: threadId
+          }
+        );
+
+  await ensureTicketBlockedForMissingPlannedScope({ projectPath, ticketId, ticket, runId, runEventSink });
+
+  if (openMissingScopeQuestions.length === 0) {
+    await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, threadId, {
+      type: "clarification.requested",
+      questions,
+      timestamp: nowIso()
+    });
+  }
+
+  return questions;
+};
+
+export const maybeFinalizeImplementationScopeAfterClarification = async (
+  projectPathInput: string,
+  ticketId: string
+): Promise<TicketRecord | null> => {
+  const projectPath = await resolveBackendPath(projectPathInput);
+  const ticket = await readTicket(projectPath, ticketId);
+  if (ticket.frontMatter.ticketType !== "task") return null;
+
+  const clarifications = await readClarificationQuestions(projectPath, ticketId);
+  if (clarifications.length === 0) return null;
+  if (clarifications.some((question) => !question.answer?.trim())) return null;
+
+  const scopeQuestions = clarifications.filter(isMissingPlannedScopeClarificationQuestion);
+  if (scopeQuestions.length === 0) return null;
+  if (normalizePlannedScope(ticket.frontMatter.plannedFiles, projectPath).length === 0) {
+    return null;
+  }
+
+  const config = await readProjectConfig(projectPath);
+  const readyStatus = config.columns.some((column) => column.id === RELAY_READY_STATUS)
+    ? RELAY_READY_STATUS
+    : ticket.frontMatter.status;
+
+  const scopedTicket = await writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      authoringState: "ready",
+      runStatus: "idle"
+    }
+  });
+
+  const readyTicket =
+    scopedTicket.frontMatter.status === readyStatus
+      ? scopedTicket
+      : await transitionTicketStatus(projectPath, ticketId, readyStatus, {
+          actor: "user",
+          source: "clarification_ui"
+        });
+
+  try {
+    return await reconcileTicketQueueState(projectPath, ticketId);
+  } catch (error) {
+    await logWarn("codex:run", "ready ticket finalized but could not be scheduled", {
+      projectPath,
+      ticketId,
+      error: errorMessage(error, "Reconcile failed.")
+    });
+    return readyTicket;
+  }
+};
+
+export const approveScopeClarificationRedraft = async (
+  input: { projectPath: string; ticketId: string; clarificationQuestionId: string },
+  dependencies: TicketUpdateDependencies = {}
+): Promise<AgentTicketUpdateStartResult> => {
+  const projectPath = await resolveBackendPath(input.projectPath);
+  const ticket = await readTicket(projectPath, input.ticketId);
+  if (!(await isScopeRecoveryRedraftEligible(projectPath, ticket))) {
+    throw new Error("This task is not eligible for manual scope approve-and-redraft.");
+  }
+
+  const clarifications = await readClarificationQuestions(projectPath, input.ticketId);
+  const clarification = answeredScopeRecoveryClarifications(clarifications, ticket, projectPath).find(
+    (question) => question.id === input.clarificationQuestionId
+  );
+  if (!clarification) {
+    throw new Error("The selected scope clarification is no longer eligible for scope recovery.");
+  }
+
+  return startTicketUpdateRun(
+    {
+      projectPath,
+      ticketId: input.ticketId,
+      clarificationQuestionId: clarification.id,
+      purpose: scopeRecoveryPurpose,
+      request: buildScopeRecoveryTicketUpdateRequest(ticket, clarification, projectPath)
+    },
+    dependencies
+  );
+};
+
+export const reconcileSchedulableReadyTickets = async (
+  projectPathInput: string,
+  dependencies: CodexRunDependencies = {}
+): Promise<void> => {
+  const projectPath = await resolveBackendPath(projectPathInput);
+  const board = await readBoard(projectPath);
+
+  for (const ticket of board.tickets) {
+    if (ticket.ticketType !== "task" || ticket.status !== RELAY_READY_STATUS) continue;
+
+    if (ticket.runStatus === "queued" && ticket.lastRunId) {
+      try {
+        await reconcileTicketQueueState(projectPath, ticket.id, dependencies);
+      } catch (error) {
+        await logWarn("codex:scheduler", "failed to reconcile queued ready ticket", {
+          projectPath,
+          ticketId: ticket.id,
+          error: errorMessage(error, "Reconcile failed.")
+        });
+      }
+      continue;
+    }
+
+    if (ticket.runStatus === "running" || ticket.runStatus === "drafting" || ticket.runStatus === "blocked") {
+      continue;
+    }
+
+    try {
+      await reconcileTicketQueueState(projectPath, ticket.id, dependencies);
+    } catch (error) {
+      await logWarn("codex:scheduler", "failed to reconcile ready ticket for scheduling", {
+        projectPath,
+        ticketId: ticket.id,
+        error: errorMessage(error, "Reconcile failed.")
+      });
+    }
+  }
+
+  wakeProjectSchedulerSoon(projectPath);
+};
+
+const formatPlannedScopeForPrompt = (plannedScope: readonly string[]): string =>
+  plannedScope.length > 0 ? plannedScope.map((filePath) => `- ${filePath}`).join("\n") : "- None recorded.";
+
 export const extractLocalMarkdownImagePaths = async (projectPath: string, ticketMarkdown: string): Promise<string[]> => {
   const path = await backendPath();
   const projectRoot = path.resolve(projectPath);
@@ -2721,9 +3898,10 @@ export const extractLocalMarkdownImagePaths = async (projectPath: string, ticket
 export const buildExecutionInput = async (
   projectPath: string,
   ticketMarkdown: string,
-  clarifications: ClarificationQuestion[]
+  clarifications: ClarificationQuestion[],
+  plannedScope: readonly string[]
 ): Promise<CodexRunInput> => {
-  const prompt = buildExecutionPrompt(ticketMarkdown, clarifications);
+  const prompt = buildExecutionPrompt(ticketMarkdown, clarifications, plannedScope);
   const imagePaths = await extractLocalMarkdownImagePaths(projectPath, ticketMarkdown);
   if (imagePaths.length === 0) return prompt;
 
@@ -2784,8 +3962,40 @@ const updateTicketRunState = (
   patch: TicketRunStatePatch
 ): Promise<void> => runBackendEffect(updateTicketRunStateEffect(projectPath, ticketId, patch));
 
+const implementationCancelTodoStatus = async (projectPath: string): Promise<string | null> => {
+  const config = await readProjectConfig(projectPath);
+  return config.columns.some((column) => column.id === RELAY_TODO_STATUS) ? RELAY_TODO_STATUS : null;
+};
+
+const pauseImplementationTicket = async (projectPath: string, ticketId: string): Promise<void> => {
+  await updateTicketRunState(projectPath, ticketId, {
+    authoringState: "ready",
+    runStatus: "paused"
+  });
+};
+
+const discardImplementationTicket = async (projectPath: string, ticketId: string, runId: string): Promise<void> => {
+  const ticket = await readTicket(projectPath, ticketId);
+  const todoStatus = await implementationCancelTodoStatus(projectPath);
+  await updateTicketRunState(projectPath, ticketId, {
+    authoringState: "ready",
+    runStatus: "idle",
+    codexThreadId: null,
+    lastRunId: null,
+    lastRunStartedAt: null
+  });
+  if (todoStatus && ticket.frontMatter.status !== todoStatus) {
+    await transitionTicketStatus(projectPath, ticketId, todoStatus, {
+      actor: "system",
+      source: "agent_cancellation",
+      runId
+    });
+  }
+};
+
 type CodexRunPreflightOptions = {
   allowQueuedRunId?: string | null;
+  resume?: boolean;
 };
 
 const preflightCodexRunInternal = async (
@@ -2812,7 +4022,7 @@ const preflightCodexRunInternal = async (
       errors.push("This project is not a Git repository. Enable non-Git Codex runs in project settings first.");
     }
 
-    let ticket: Awaited<ReturnType<typeof readTicket>>;
+    let ticket: TicketRecord;
     try {
       ticket = await readTicket(projectPath, ticketId);
     } catch (error) {
@@ -2842,11 +4052,33 @@ const preflightCodexRunInternal = async (
       errors.push(`Move this ticket out of ${currentColumn.name} before starting the agent.`);
     }
 
+    const resumeRequested = options.resume === true || input.resume === true;
+    const continuationTicket = isImplementationContinuation(ticket.frontMatter);
+    const resumableQueuedImplementation =
+      resumeRequested &&
+      ticket.frontMatter.runStatus === "queued" &&
+      ticket.frontMatter.lastRunId === options.allowQueuedRunId &&
+      ticket.frontMatter.status === RELAY_IN_PROGRESS_STATUS &&
+      Boolean(ticket.frontMatter.codexThreadId);
+    const continuableImplementation = continuationTicket || resumableQueuedImplementation;
+    const resume = resumeRequested;
+    const plannedScopeBeforeEnsure =
+      resume && continuationTicket && ticket.frontMatter.ticketType === "task"
+        ? normalizedPlannedScopeForTicket(ticket, projectPath)
+        : [];
+
+    if (resume && continuationTicket && ticket.frontMatter.ticketType === "task") {
+      ticket = await ensurePlannedFilesForContinuableResume(projectPath, ticket);
+    }
+
     if (ticket.frontMatter.status === RELAY_COMPLETED_STATUS) {
       errors.push("Completed tickets are human accepted. Reopen this ticket before starting the agent.");
     }
     if (ticket.frontMatter.ticketType === "epic") {
       errors.push("Epics are planning containers. Start the agent from a child task ticket instead.");
+    }
+    if (ticket.frontMatter.ticketType === "feature") {
+      errors.push("Features are planning containers. Start the agent from a child task ticket instead.");
     }
 
     const board = await readBoard(projectPath);
@@ -2872,12 +4104,65 @@ const preflightCodexRunInternal = async (
       errors.push("The agent is still drafting this ticket. Wait for the draft to finish before starting a run.");
     } else if (ticket.frontMatter.runStatus === "running") {
       errors.push("Ticket is already marked as running. Stop or reconcile the current run before starting the agent again.");
+    } else if (continuableImplementation && !resume) {
+      errors.push(
+        "Ticket has paused or failed implementation work. Retry or continue from ticket detail before starting a new run."
+      );
+    }
+
+    if (resume) {
+      if (input.freshThread) {
+        errors.push("Paused or failed implementation work must continue on the existing Codex thread.");
+      }
+      if (!continuableImplementation) {
+        errors.push(
+          "Only paused or failed in-progress implementation tickets with a saved Codex thread can be continued or retried."
+        );
+      }
+      if (continuationTicket && ticket.frontMatter.status !== RELAY_IN_PROGRESS_STATUS) {
+        errors.push("Paused or failed implementation work can only continue while the ticket remains in progress.");
+      }
+      if (continuationTicket && !ticket.frontMatter.codexThreadId) {
+        errors.push("Paused or failed implementation work cannot continue because the stored Codex thread is missing.");
+      }
+    }
+
+    let plannedScope = normalizedPlannedScopeForTicket(ticket, projectPath);
+    if (ticket.frontMatter.ticketType === "task" && plannedScope.length === 0) {
+      if (resume && continuationTicket) {
+        await blockTicketForMissingPlannedScope({ projectPath, ticketId, ticket });
+        const refreshed = await readTicket(projectPath, ticketId);
+        ticket = refreshed;
+        plannedScope = normalizedPlannedScopeForTicket(refreshed, projectPath);
+        ticketStatus = refreshed.frontMatter.status;
+        runStatus = refreshed.frontMatter.runStatus;
+        errors.push(
+          "No planned file scope was recorded for this run. The ticket was moved to Needs Clarification so you can define scope before retrying."
+        );
+      } else {
+        errors.push("Task has no planned file scope. Define plannedFiles before starting the agent.");
+      }
+    } else if (
+
+      resume &&
+      continuationTicket &&
+      plannedScopeBeforeEnsure.length === 0 &&
+      plannedScope.length > 0
+    ) {
+      warnings.push(`Restored planned file scope from the previous run (${plannedScope.length} file${plannedScope.length === 1 ? "" : "s"}).`);
     }
 
     const clarifications = await readClarificationQuestions(projectPath, ticketId);
     unansweredClarificationCount = clarifications.filter((question) => !question.answer?.trim()).length;
     if (unansweredClarificationCount > 0) {
       errors.push(`Answer ${unansweredClarificationCount} open clarification question(s) before starting the agent.`);
+    }
+
+    if (ticket.frontMatter.ticketType === "task" && plannedScope.length > 0) {
+      const pathLockConflicts = await pathLockConflictsFor(projectPath, ticketId, plannedScope);
+      for (const conflict of pathLockConflicts) {
+        errors.push(`\`${conflict.path}\` is locked by task ${conflict.holderTicketId}.`);
+      }
     }
 
     if (!input.freshThread && ticket.frontMatter.codexThreadId && ticket.frontMatter.runStatus === "completed") {
@@ -2900,6 +4185,84 @@ const preflightCodexRunInternal = async (
 
 export const preflightCodexRun = (input: StartRunInput): Promise<CodexRunPreflightResult> => preflightCodexRunInternal(input);
 
+const deferRunForLockedPath = async ({
+  projectPath,
+  ticketId,
+  runId,
+  threadId,
+  filePath,
+  conflict,
+  runEventSink,
+  abortController
+}: {
+  projectPath: string;
+  ticketId: string;
+  runId: string;
+  threadId: string;
+  filePath: string;
+  conflict: PathLockConflict;
+  runEventSink?: RendererRunEventSink;
+  abortController: AbortController;
+}): Promise<void> => {
+  abortController.abort();
+  const revert = await revertRunGitChanges(projectPath, ticketId, runId);
+  await appendPlannedFileToTicket(projectPath, ticketId, filePath);
+  await releasePathLocksForRun(projectPath, ticketId, runId);
+
+  const config = await readProjectConfig(projectPath);
+  const readyStatus = config.columns.some((column) => column.id === RELAY_READY_STATUS)
+    ? RELAY_READY_STATUS
+    : (await readTicket(projectPath, ticketId)).frontMatter.status;
+  const beforeStatus = (await readTicket(projectPath, ticketId)).frontMatter.status;
+
+  await updateTicketRunState(projectPath, ticketId, {
+    authoringState: "ready",
+    runStatus: "idle",
+    lastRunId: runId
+  });
+  const readyTicket =
+    beforeStatus === readyStatus
+      ? await readTicket(projectPath, ticketId)
+      : await transitionTicketStatus(projectPath, ticketId, readyStatus, {
+          actor: "codex",
+          source: "agent_execution",
+          runId
+        });
+  if (beforeStatus !== readyTicket.frontMatter.status) {
+    await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, threadId, {
+      type: "ticket.status_changed",
+      fromStatus: beforeStatus,
+      toStatus: readyTicket.frontMatter.status,
+      actor: "codex",
+      source: "agent_execution",
+      timestamp: nowIso()
+    });
+  }
+
+  const message = `Codex needs \`${filePath}\`, which is locked by task ${conflict.holderTicketId}. Relay reverted this run and re-queued the ticket for when the path is free. ${revert.message}`;
+  await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, threadId, {
+    type: "run.failed",
+    message,
+    finalStatus: "failed",
+    timestamp: nowIso()
+  });
+  await markWorkRunStatusSafely(projectPath, runId, "failed", {
+    result: { ticketId, filePath, holderTicketId: conflict.holderTicketId, revertMessage: revert.message },
+    message
+  });
+  try {
+    await reconcileTicketQueueState(projectPath, ticketId);
+  } catch (error) {
+    await logWarn("codex:run", "deferred run could not be re-queued after path lock conflict", {
+      projectPath,
+      ticketId,
+      runId,
+      error: errorMessage(error, "Reconcile failed.")
+    });
+  }
+  wakeProjectSchedulerSoon(projectPath);
+};
+
 const startQueuedRunNow = async (
   input: StartRunInput,
   resume: boolean,
@@ -2919,6 +4282,7 @@ const startQueuedRunNow = async (
   const preflight = await preflightCodexRunInternal(input, { allowQueuedRunId: runId });
   if (!preflight.ok) {
     await removeQueuedImplementationRun(runId);
+    await releasePathLocksForRun(projectPath, ticketId, runId);
     const message = preflight.errors.join(" ");
     await updateTicketRunState(projectPath, ticketId, { runStatus: "failed" });
     await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
@@ -2942,15 +4306,23 @@ const startQueuedRunNow = async (
   let thread: CodexRunThread;
   let executionInput: CodexRunInput;
   let status: string;
+  let plannedScope: string[] = [];
   const abortController = new AbortController();
   const outputOffsets = new Map<string, number>();
   try {
     config = await readProjectConfig(projectPath);
     ticket = await readTicket(projectPath, ticketId);
     const clarifications = await readClarificationQuestions(projectPath, ticketId);
+    plannedScope = normalizedPlannedScopeForTicket(ticket, projectPath);
+    const lockAcquire = await tryAcquirePathLocks(projectPath, ticketId, runId, plannedScope);
+    if (!lockAcquire.ok) {
+      throw new Error(
+        lockAcquire.conflicts.map((conflict) => `\`${conflict.path}\` is locked by task ${conflict.holderTicketId}`).join(" ")
+      );
+    }
     const options = await implementationThreadOptionsForProject(projectPath, ticket.frontMatter.effort);
     existingThreadId = resume && !freshThread ? ticket.frontMatter.codexThreadId : null;
-    executionInput = await buildExecutionInput(projectPath, ticket.markdown, clarifications);
+    executionInput = await buildExecutionInput(projectPath, ticket.markdown, clarifications, plannedScope);
     status = config.columns.some((column) => column.id === RELAY_IN_PROGRESS_STATUS) ? RELAY_IN_PROGRESS_STATUS : ticket.frontMatter.status;
     if (!(await getQueuedImplementationRun(runId))) {
       await completeImplementationRun(runId);
@@ -2961,6 +4333,7 @@ const startQueuedRunNow = async (
     currentThreadId = existingThreadId ?? thread.id ?? currentThreadId;
   } catch (error) {
     await removeQueuedImplementationRun(runId);
+    await releasePathLocksForRun(projectPath, ticketId, runId);
     await logError("codex:run", "queued run failed before active registration", error, { projectPath, ticketId, runId });
     try {
       await updateTicketRunState(projectPath, ticketId, { runStatus: "failed" });
@@ -3002,6 +4375,7 @@ const startQueuedRunNow = async (
     if (abortController.signal.aborted) {
       throw new Error("Agent run was cancelled before streaming started.");
     }
+    await captureRunGitBaseline(projectPath, ticketId, runId, runStartedAt);
     await markWorkRunStatusSafely(projectPath, runId, "running", {
       message: "Codex implementation run started.",
       metadata: {
@@ -3037,8 +4411,19 @@ const startQueuedRunNow = async (
     streamed = await thread.runStreamed(executionInput, { signal: abortController.signal });
   } catch (error) {
     await logError("codex:run", "run failed before streaming started", error, { projectPath, ticketId, runId, threadId: currentThreadId });
+    let abortedStatus: "paused" | "cancelled" = "cancelled";
     try {
-      await updateTicketRunState(projectPath, ticketId, { runStatus: abortController.signal.aborted ? "cancelled" : "failed" });
+      if (abortController.signal.aborted) {
+        const current = await readTicket(projectPath, ticketId);
+        if (current.frontMatter.runStatus === "paused") {
+          abortedStatus = "paused";
+        } else if (current.frontMatter.lastRunId === runId && current.frontMatter.runStatus === "running") {
+          await pauseImplementationTicket(projectPath, ticketId);
+          abortedStatus = "paused";
+        }
+      } else {
+        await updateTicketRunState(projectPath, ticketId, { runStatus: "failed" });
+      }
     } catch (cleanupError) {
       await logWarn("codex:run", "failed to persist startup failure state", {
         projectPath,
@@ -3048,7 +4433,7 @@ const startQueuedRunNow = async (
       });
     }
     try {
-      await markWorkRunStatusSafely(projectPath, runId, abortController.signal.aborted ? "cancelled" : "failed", {
+      await markWorkRunStatusSafely(projectPath, runId, abortController.signal.aborted ? (abortedStatus === "paused" ? "suspended" : "cancelled") : "failed", {
         error,
         message: errorMessage(error, "Agent run failed before streaming started.")
       });
@@ -3056,7 +4441,7 @@ const startQueuedRunNow = async (
       await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
         type: "run.failed",
         message: errorMessage(error, "Agent run failed before streaming started."),
-        finalStatus: abortController.signal.aborted ? "cancelled" : "failed",
+        finalStatus: abortController.signal.aborted ? abortedStatus : "failed",
         timestamp: nowIso()
       });
     } catch (emitError) {
@@ -3082,6 +4467,7 @@ const startQueuedRunNow = async (
 
     void (async () => {
       let finalResponse = "";
+      const plannedScopeSet = new Set(plannedScope);
       try {
         if (existingThreadId) {
           await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
@@ -3128,6 +4514,51 @@ const startQueuedRunNow = async (
             const normalized = normalizeItemEvent(event, outputOffsets);
             for (const relayEvent of normalized) {
               await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, relayEvent);
+              if (relayEvent.type === "file.change") {
+                const normalizedPath = normalizeScopedRepoPath(relayEvent.path, projectPath);
+                if (!normalizedPath || !plannedScopeSet.has(normalizedPath)) {
+                  const outOfScopePath =
+                    normalizeScopedRepoPath(relayEvent.path, projectPath) ??
+                    normalizeScopedRepoPath(relayEvent.path) ??
+                    (relayEvent.path.trim() || relayEvent.path);
+                  if (!outOfScopePath) continue;
+                  const conflicts = await pathLockConflictsFor(projectPath, ticketId, [outOfScopePath]);
+                  if (conflicts.length > 0) {
+                    abortController.abort();
+                    await deferRunForLockedPath({
+                      projectPath,
+                      ticketId,
+                      runId,
+                      threadId: currentThreadId,
+                      filePath: outOfScopePath,
+                      conflict: conflicts[0],
+                      runEventSink,
+                      abortController
+                    });
+                    resolveOnce(currentThreadId);
+                    return;
+                  }
+                  const acquired = await tryAcquirePathLocks(projectPath, ticketId, runId, [outOfScopePath]);
+                  if (!acquired.ok) {
+                    abortController.abort();
+                    await deferRunForLockedPath({
+                      projectPath,
+                      ticketId,
+                      runId,
+                      threadId: currentThreadId,
+                      filePath: outOfScopePath,
+                      conflict: acquired.conflicts[0],
+                      runEventSink,
+                      abortController
+                    });
+                    resolveOnce(currentThreadId);
+                    return;
+                  }
+                  const appended = await appendPlannedFileToTicket(projectPath, ticketId, outOfScopePath);
+                  if (appended) plannedScopeSet.add(appended.path);
+                  continue;
+                }
+              }
             }
             continue;
           }
@@ -3236,19 +4667,31 @@ const startQueuedRunNow = async (
       } catch (error) {
         const aborted = abortController.signal.aborted;
         await logError("codex:run", aborted ? "run cancelled" : "run failed", error);
-        await updateTicketRunState(projectPath, ticketId, { runStatus: aborted ? "cancelled" : "failed" });
+        let abortedStatus: "paused" | "cancelled" = "cancelled";
+        if (aborted) {
+          const current = await readTicket(projectPath, ticketId);
+          if (current.frontMatter.runStatus === "paused") {
+            abortedStatus = "paused";
+          } else if (current.frontMatter.lastRunId === runId && current.frontMatter.runStatus === "running") {
+            await pauseImplementationTicket(projectPath, ticketId);
+            abortedStatus = "paused";
+          }
+        } else {
+          await updateTicketRunState(projectPath, ticketId, { runStatus: "failed" });
+        }
         await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
           type: "run.failed",
           message: error instanceof Error ? error.message : "Agent run failed.",
-          finalStatus: aborted ? "cancelled" : "failed",
+          finalStatus: aborted ? abortedStatus : "failed",
           timestamp: nowIso()
         });
-        await markWorkRunStatusSafely(projectPath, runId, aborted ? "cancelled" : "failed", {
+        await markWorkRunStatusSafely(projectPath, runId, aborted ? (abortedStatus === "paused" ? "suspended" : "cancelled") : "failed", {
           error,
           message: error instanceof Error ? error.message : "Agent run failed."
         });
         resolveOnce(currentThreadId);
       } finally {
+        await releasePathLocksForRun(projectPath, ticketId, runId);
         await completeImplementationRun(runId);
         wakeProjectSchedulerSoon(projectPath);
       }
@@ -3265,9 +4708,9 @@ const enqueueCodexRunPromise = async (
 ): Promise<CodexRunStartResult> => {
   const projectPath = await resolveBackendPath(input.projectPath);
   const ticketId = input.ticketId;
-  const normalizedInput: StartRunInput = { ...input, projectPath };
+  const normalizedInput: StartRunInput = { ...input, projectPath, resume };
   await logInfo("codex:run", "queueing run", { projectPath, ticketId, resume, freshThread: input.freshThread });
-  const preflight = await preflightCodexRunInternal(normalizedInput);
+  const preflight = await preflightCodexRunInternal(normalizedInput, { resume });
   if (!preflight.ok) {
     throw new Error(preflight.errors.join(" "));
   }
@@ -3280,7 +4723,7 @@ const enqueueCodexRunPromise = async (
     dependencies
   });
   try {
-    await setTicketQueued(projectPath, ticketId, runId);
+    await (resume ? setTicketQueuedInPlace(projectPath, ticketId, runId) : setTicketQueued(projectPath, ticketId, runId));
   } catch (error) {
     await removeQueuedImplementationRun(runId);
     await markWorkRunStatusSafely(projectPath, runId, "failed", {
@@ -3322,22 +4765,29 @@ export const reconcileTicketQueueState = async (
   const resolvedProjectPath = await resolveBackendPath(projectPath);
   const ticket = await readTicket(resolvedProjectPath, ticketId);
 
-  if (ticket.frontMatter.status === RELAY_READY_STATUS) {
-    if (ticket.frontMatter.runStatus === "queued" && ticket.frontMatter.lastRunId) {
+  if (ticket.frontMatter.runStatus === "queued" && ticket.frontMatter.lastRunId) {
+    if (ticket.frontMatter.status === RELAY_READY_STATUS || ticket.frontMatter.status === RELAY_IN_PROGRESS_STATUS) {
+      const resume = ticket.frontMatter.status === RELAY_IN_PROGRESS_STATUS;
       if (!(await getQueuedImplementationRun(ticket.frontMatter.lastRunId))) {
-        await submitTicketImplementationWork(
-          { projectPath: resolvedProjectPath, ticketId },
-          { runId: ticket.frontMatter.lastRunId, resume: Boolean(ticket.frontMatter.codexThreadId) }
-        );
+        await submitTicketImplementationWork({ projectPath: resolvedProjectPath, ticketId }, { runId: ticket.frontMatter.lastRunId, resume });
         await enqueueImplementationRun(ticket.frontMatter.lastRunId, {
           input: { projectPath: resolvedProjectPath, ticketId },
-          resume: Boolean(ticket.frontMatter.codexThreadId),
+          resume,
           dependencies
         });
       }
       wakeProjectSchedulerSoon(resolvedProjectPath);
       return ticket;
     }
+
+    await removeQueuedImplementationRun(ticket.frontMatter.lastRunId);
+    await markWorkRunStatusSafely(resolvedProjectPath, ticket.frontMatter.lastRunId, "cancelled", {
+      message: "Queued run cancelled by reconciliation."
+    });
+    return clearQueuedTicket(resolvedProjectPath, ticketId, null, ticket.frontMatter.lastRunId);
+  }
+
+  if (ticket.frontMatter.status === RELAY_READY_STATUS) {
     if (ticket.frontMatter.runStatus === "running" || ticket.frontMatter.runStatus === "drafting") return ticket;
 
     const preflight = await preflightCodexRunInternal({ projectPath: resolvedProjectPath, ticketId });
@@ -3368,14 +4818,6 @@ export const reconcileTicketQueueState = async (
     }
   }
 
-  if (ticket.frontMatter.runStatus === "queued" && ticket.frontMatter.lastRunId) {
-    await removeQueuedImplementationRun(ticket.frontMatter.lastRunId);
-    await markWorkRunStatusSafely(resolvedProjectPath, ticket.frontMatter.lastRunId, "cancelled", {
-      message: "Queued run cancelled by reconciliation."
-    });
-    return clearQueuedTicket(resolvedProjectPath, ticketId, null, ticket.frontMatter.lastRunId);
-  }
-
   return ticket;
 };
 
@@ -3383,15 +4825,39 @@ type CancelRunTarget = {
   readonly runId: string;
   readonly projectPath?: string;
   readonly ticketId?: string;
+  readonly revertChanges?: boolean;
 };
+
+type CancelRunOutcome = "cancelled" | "paused" | "discarded";
 
 const normalizeCancelRunInput = async (input: string | CancelRunInput): Promise<CancelRunTarget> =>
   typeof input === "string"
     ? { runId: input }
-    : { runId: input.runId, projectPath: await resolveBackendPath(input.projectPath), ticketId: input.ticketId };
+    : {
+        runId: input.runId,
+        projectPath: await resolveBackendPath(input.projectPath),
+        ticketId: input.ticketId,
+        revertChanges: input.revertChanges
+      };
 
-const cancelPersistedTicketRun = async ({ projectPath, ticketId, runId }: CancelRunTarget): Promise<boolean> => {
-  if (!projectPath || !ticketId) return false;
+const maybeRevertRunGitChanges = async ({
+  projectPath,
+  ticketId,
+  runId,
+  revertChanges
+}: CancelRunTarget): Promise<string | null> => {
+  if (!revertChanges || !projectPath || !ticketId) return null;
+  const result = await revertRunGitChanges(projectPath, ticketId, runId);
+  return result.message;
+};
+
+const cancelPersistedTicketRun = async ({
+  projectPath,
+  ticketId,
+  runId,
+  revertChanges
+}: CancelRunTarget): Promise<CancelRunOutcome | null> => {
+  if (!projectPath || !ticketId) return null;
 
   let ticket: Awaited<ReturnType<typeof readTicket>>;
   try {
@@ -3403,10 +4869,10 @@ const cancelPersistedTicketRun = async ({ projectPath, ticketId, runId }: Cancel
       runId,
       error: errorMessage(error, "Ticket could not be loaded.")
     });
-    return false;
+    return null;
   }
 
-  if (ticket.frontMatter.lastRunId !== runId) return false;
+  if (ticket.frontMatter.lastRunId !== runId) return null;
 
   if (ticket.frontMatter.runStatus === "queued") {
     const targetStatus = (await readProjectConfig(projectPath)).columns.some((column) => column.id === RELAY_TODO_STATUS)
@@ -3414,32 +4880,69 @@ const cancelPersistedTicketRun = async ({ projectPath, ticketId, runId }: Cancel
       : null;
     await clearQueuedTicket(projectPath, ticketId, targetStatus, runId);
     await markWorkRunStatusSafely(projectPath, runId, "cancelled", { message: "Queued Codex run cancelled." });
-    return true;
+    return "cancelled";
   }
 
-  if (ticket.frontMatter.runStatus !== "running" && ticket.frontMatter.runStatus !== "drafting") return false;
+  if (ticket.frontMatter.runStatus === "paused") {
+    if (revertChanges) {
+      await discardImplementationTicket(projectPath, ticketId, runId);
+      await markWorkRunStatusSafely(projectPath, runId, "cancelled", { message: "Paused Codex implementation work discarded." });
+      return "discarded";
+    }
+    await pauseImplementationTicket(projectPath, ticketId);
+    await markWorkRunStatusSafely(projectPath, runId, "suspended", { message: "Paused Codex implementation work preserved." });
+    return "paused";
+  }
+
+  if (ticket.frontMatter.runStatus !== "running" && ticket.frontMatter.runStatus !== "drafting") return null;
 
   const wasDrafting = ticket.frontMatter.runStatus === "drafting";
   const threadId = wasDrafting ? draftRunThreadId(runId) : ticket.frontMatter.codexThreadId ?? `pending_${runId}`;
-  const message = wasDrafting
-    ? "Stale ticket draft run cancelled after Relay restart."
-    : "Stale Codex implementation run cancelled after Relay restart.";
 
-  await updateTicketRunState(projectPath, ticketId, {
-    authoringState: wasDrafting ? "rough" : ticket.frontMatter.authoringState,
-    runStatus: "cancelled"
-  });
-  await writeRunLog(projectPath, ticketId, runId, threadId, {
-    type: "run.failed",
-    message,
-    finalStatus: "cancelled",
-    timestamp: nowIso()
-  });
-  await markWorkRunStatusSafely(projectPath, runId, "cancelled", { message });
-  return true;
+  if (wasDrafting) {
+    const message = "Stale ticket draft run cancelled after Relay restart.";
+    await updateTicketRunState(projectPath, ticketId, {
+      authoringState: "rough",
+      runStatus: "cancelled"
+    });
+    await writeRunLog(projectPath, ticketId, runId, threadId, {
+      type: "run.failed",
+      message,
+      finalStatus: "cancelled",
+      timestamp: nowIso()
+    });
+    await markWorkRunStatusSafely(projectPath, runId, "cancelled", { message });
+    return "cancelled";
+  }
+
+  if (revertChanges) {
+    const discardMessage = "Stale Codex implementation work discarded after Relay restart.";
+    await discardImplementationTicket(projectPath, ticketId, runId);
+    await writeRunLog(projectPath, ticketId, runId, threadId, {
+      type: "run.failed",
+      message: discardMessage,
+      finalStatus: "cancelled",
+      timestamp: nowIso()
+    });
+    await markWorkRunStatusSafely(projectPath, runId, "cancelled", { message: discardMessage });
+    return "discarded";
+  } else {
+    const pauseMessage = "Stale Codex implementation run paused after Relay restart.";
+    await pauseImplementationTicket(projectPath, ticketId);
+    await writeRunLog(projectPath, ticketId, runId, threadId, {
+      type: "run.failed",
+      message: pauseMessage,
+      finalStatus: "paused",
+      timestamp: nowIso()
+    });
+    await markWorkRunStatusSafely(projectPath, runId, "suspended", { message: pauseMessage });
+    return "paused";
+  }
 };
 
-export const cancelCodexRun = async (input: string | CancelRunInput): Promise<void> => {
+export const cancelCodexRun = async (
+  input: string | CancelRunInput
+): Promise<{ outcome: CancelRunOutcome; revertMessage: string | null }> => {
   const cancelInput = await normalizeCancelRunInput(input);
   const runId = cancelInput.runId;
   const queued = await getQueuedImplementationRun(runId);
@@ -3449,57 +4952,118 @@ export const cancelCodexRun = async (input: string | CancelRunInput): Promise<vo
     await completeImplementationRun(runId);
     if (active) {
       active.abortController.abort();
-      await updateTicketRunState(active.projectPath, active.ticketId, { runStatus: "cancelled" });
-      await markWorkRunStatusSafely(active.projectPath, runId, "cancelled", { message: "Codex implementation cancellation requested." });
-      return;
+      if (cancelInput.revertChanges) {
+        await discardImplementationTicket(active.projectPath, active.ticketId, runId);
+        await markWorkRunStatusSafely(active.projectPath, runId, "cancelled", { message: "Codex implementation discard requested." });
+      } else {
+        await pauseImplementationTicket(active.projectPath, active.ticketId);
+        await markWorkRunStatusSafely(active.projectPath, runId, "suspended", { message: "Codex implementation pause requested." });
+      }
+      const revertMessage = await maybeRevertRunGitChanges({
+        ...cancelInput,
+        projectPath: active.projectPath,
+        ticketId: active.ticketId
+      });
+      return { outcome: cancelInput.revertChanges ? "discarded" : "paused", revertMessage };
     }
     const projectPath = await resolveBackendPath(queued.input.projectPath);
     const targetStatus = (await readProjectConfig(projectPath)).columns.some((column) => column.id === RELAY_TODO_STATUS)
       ? RELAY_TODO_STATUS
       : null;
+    await releasePathLocksForRun(projectPath, queued.input.ticketId, runId);
     await clearQueuedTicket(projectPath, queued.input.ticketId, targetStatus, runId);
     await markWorkRunStatusSafely(projectPath, runId, "cancelled", { message: "Queued Codex implementation run cancelled." });
     wakeProjectSchedulerSoon(projectPath);
-    return;
+    return { outcome: "cancelled", revertMessage: null };
   }
 
   const implementationRun = await getActiveImplementationRun(runId);
   if (implementationRun) {
     implementationRun.abortController.abort();
-    await updateTicketRunState(implementationRun.projectPath, implementationRun.ticketId, { runStatus: "cancelled" });
-    await markWorkRunStatusSafely(implementationRun.projectPath, runId, "cancelled", {
-      message: "Codex implementation cancellation requested."
+    if (cancelInput.revertChanges) {
+      await discardImplementationTicket(implementationRun.projectPath, implementationRun.ticketId, runId);
+      await markWorkRunStatusSafely(implementationRun.projectPath, runId, "cancelled", {
+        message: "Codex implementation discard requested."
+      });
+    } else {
+      await pauseImplementationTicket(implementationRun.projectPath, implementationRun.ticketId);
+      await markWorkRunStatusSafely(implementationRun.projectPath, runId, "suspended", {
+        message: "Codex implementation pause requested."
+      });
+    }
+    await releasePathLocksForRun(implementationRun.projectPath, implementationRun.ticketId, runId);
+    const revertMessage = await maybeRevertRunGitChanges({
+      ...cancelInput,
+      projectPath: implementationRun.projectPath,
+      ticketId: implementationRun.ticketId
     });
-    return;
+    return { outcome: cancelInput.revertChanges ? "discarded" : "paused", revertMessage };
   }
 
   const draftRun = await getDraftRun(runId);
   if (!draftRun) {
-    await cancelPersistedTicketRun(cancelInput);
-    return;
+    const outcome = await cancelPersistedTicketRun(cancelInput);
+    const revertMessage = await maybeRevertRunGitChanges(cancelInput);
+    return { outcome: outcome ?? "cancelled", revertMessage };
   }
   draftRun.abortController.abort();
   await updateTicketRunState(draftRun.projectPath, draftRun.ticketId, { runStatus: "cancelled" });
   await markWorkRunStatusSafely(draftRun.projectPath, runId, "cancelled", { message: "Ticket draft cancellation requested." });
+  return { outcome: "cancelled", revertMessage: null };
 };
 
 export const approveCodexAction = async (_approvalId?: string, _decision?: string): Promise<void> => {
   throw new Error("The current Codex SDK does not expose interactive approval submission. Keep approval policy on-request in Codex config or use the future app-server adapter for richer approvals.");
 };
 
-const subticketDraftToCreateInput = (draft: TicketDraftSubticket, parentTitle: string): TicketCreateInput => ({
-  title: draft.title,
-  priority: draft.priority,
-  labels: draft.labels,
-  markdown: ticketMarkdownFromSubticketDraft(draft, parentTitle),
-  ticketType: "task"
+const featureStubDraftToCreateInput = (
+  stub: {
+    title: string;
+    summary: string;
+    priority: TicketDraft["priority"];
+    labels: string[];
+    context: string;
+    requirements: string[];
+    acceptanceCriteria: string[];
+    implementationNotes: string[];
+  },
+  parentTitle: string
+): TicketCreateInput => ({
+  title: stub.title,
+  summary: stub.summary,
+  priority: stub.priority,
+  labels: stub.labels,
+  markdown: ticketMarkdownFromFeatureStubDraft(stub, parentTitle),
+  ticketType: "feature"
 });
+
+const subticketDraftToCreateInput = (draft: TicketDraftSubticket, parentTitle: string): TicketCreateInput =>
+  featureStubDraftToCreateInput(
+    {
+      title: draft.title,
+      summary: draft.summary,
+      priority: draft.priority,
+      labels: [...draft.labels],
+      context: draft.context,
+      requirements: [...draft.requirements],
+      acceptanceCriteria: [...draft.acceptanceCriteria],
+      implementationNotes: [...(draft.implementationNotes ?? [])]
+    },
+    parentTitle
+  );
 
 export const draftToCreateInput = (draft: TicketDraft): TicketCreateInput => ({
   title: draft.title,
+  summary: draft.summary,
   priority: draft.priority,
   labels: draft.labels,
   markdown: ticketMarkdownFromDraft(draft),
   ticketType: draft.ticketType,
-  subtickets: draft.ticketType === "epic" ? draft.subtickets.map((subticket) => subticketDraftToCreateInput(subticket, draft.title)) : []
+  subtickets:
+    draft.ticketType === "epic"
+      ? [
+          ...draft.featureStubs.map((stub) => featureStubDraftToCreateInput(stub, draft.title)),
+          ...draft.subtickets.map((subticket) => subticketDraftToCreateInput(subticket, draft.title))
+        ]
+      : []
 });

@@ -7,6 +7,7 @@ import { parsePorcelainChangedFileCount } from "./GitStatus";
 import { BackendServicesBaseLive, runBackendEffect, type BackendServices } from "../../runtime";
 import { BackendPlatformLive } from "../../platform/BackendPlatform";
 
+export { captureRunGitBaseline, readRunGitBaseline, revertRunGitChanges, type RunGitBaseline } from "./GitRunBaseline";
 export { Git, GitCliFromRunner, GitCliLive, GitLive, GitMetadataCacheLive, parsePorcelainChangedFileCount };
 export type { GitCommandResult, GitCommandRunner };
 

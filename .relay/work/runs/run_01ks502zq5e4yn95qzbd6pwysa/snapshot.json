@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks502zq5e4yn95qzbd6pwysa",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks4yxwpdrp66tcf70ydvzw6p",
+  "runId": "run_01ks502zq5e4yn95qzbd6pwysa",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks4yxwpdrp66tcf70ydvzw6p:run_01ks502zq5e4yn95qzbd6pwysa",
+  "status": "running",
+  "attempts": 1,
+  "createdAt": "2026-05-21T10:07:52.558Z",
+  "updatedAt": "2026-05-21T10:07:52.589Z",
+  "lastAppliedEventSequence": 4,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks502zr3pwnj4y11q1q55dy3",
+    "leaseToken": "lease_01ks502zr3hd6kg33r5g768xeq",
+    "executor": "agent",
+    "providerId": "codex",
+    "claimedAt": "2026-05-21T10:07:52.579Z",
+    "heartbeatAt": "2026-05-21T10:07:52.588Z",
+    "startedAt": "2026-05-21T10:07:52.588Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks4yxwpdrp66tcf70ydvzw6p",
+    "idea": "We should add a button on the Codex:connected component at the left panel to open a modal.\n\nI want to move slightly away from being codex agnostic, \nI want to see in that panel if there is a codex cli, and if so check if the user is connected / logged in.\nI want to also see if there is a cursor cli and if user is connected, \nI want to also see if the user has a claude cli and if user is connected,\n\nThen i want to have a button next to each saying \"Use CLI\" which will change which cli relay uses for its actions.",
+    "effort": "high",
+    "runId": "run_01ks502zq5e4yn95qzbd6pwysa"
+  },
+  "metadata": {
+    "providerId": "codex",
+    "executor": "agent"
+  },
+  "message": "Ticket draft resumed after clarification."
+}

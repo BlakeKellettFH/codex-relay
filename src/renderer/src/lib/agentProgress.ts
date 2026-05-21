@@ -1,4 +1,5 @@
-import type { RendererRunEvent, RunStatus } from "@shared/schemas";
+import { RELAY_IN_PROGRESS_STATUS } from "@shared/schemas";
+import type { RendererRunEvent, RunStatus, TicketSummary } from "@shared/schemas";
 
 export type AgentProgressStatus = RunStatus;
 
@@ -48,6 +49,18 @@ export const formatElapsedDuration = (durationMs: number | null): string => {
   const minutes = totalMinutes % 60;
   const hours = Math.floor(totalMinutes / 60);
   return hours > 0 ? `${hours}:${pad2(minutes)}:${pad2(seconds)}` : `${pad2(minutes)}:${pad2(seconds)}`;
+};
+
+export const activeRunElapsedLabel = (
+  ticket: Pick<TicketSummary, "status" | "runStatus" | "lastRunStartedAt">,
+  now: number
+): string | null => {
+  if (ticket.status !== RELAY_IN_PROGRESS_STATUS || ticket.runStatus !== "running" || !ticket.lastRunStartedAt) return null;
+  const startedAt = Date.parse(ticket.lastRunStartedAt);
+  if (Number.isNaN(startedAt)) return null;
+  const elapsedMs = now - startedAt;
+  if (!Number.isFinite(elapsedMs)) return null;
+  return formatElapsedDuration(elapsedMs);
 };
 
 export const isWebSearchEvent = (event: RendererRunEvent): boolean =>
@@ -194,6 +207,8 @@ const statusCopy = (
       return { statusLabel: "Draft ready", statusDetail: "The generated ticket draft is ready.", statusTone: "success" };
     case "running":
       return { statusLabel: "Active", statusDetail: "The agent is working on this ticket.", statusTone: "active" };
+    case "paused":
+      return { statusLabel: "Paused", statusDetail: "Implementation work is paused and can be continued on the same thread.", statusTone: "warning" };
     case "blocked":
       return { statusLabel: "Needs input", statusDetail: "The agent is waiting on clarification.", statusTone: "warning" };
     case "failed":

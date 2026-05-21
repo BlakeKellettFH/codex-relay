@@ -15,16 +15,27 @@ import { relayActorSchema, relayEventSourceSchema, runStatusSchema } from "./pri
 export const startRunInputSchema = passthroughStruct({
   projectPath: Schema.String,
   ticketId: Schema.String,
-  freshThread: Schema.optional(Schema.Boolean)
+  freshThread: Schema.optional(Schema.Boolean),
+  resume: Schema.optional(Schema.Boolean)
 });
 export type StartRunInput = SchemaType<typeof startRunInputSchema>;
+
+export const codexCancelRunOutcomeSchema = Schema.Literals(["cancelled", "paused", "discarded"]);
+export type CodexCancelRunOutcome = SchemaType<typeof codexCancelRunOutcomeSchema>;
 
 export const cancelRunInputSchema = passthroughStruct({
   projectPath: Schema.String,
   ticketId: Schema.String,
-  runId: Schema.String
+  runId: Schema.String,
+  revertChanges: Schema.optional(Schema.Boolean)
 });
 export type CancelRunInput = SchemaType<typeof cancelRunInputSchema>;
+
+export const codexCancelRunResultSchema = passthroughStruct({
+  outcome: codexCancelRunOutcomeSchema,
+  revertMessage: Schema.NullOr(Schema.String)
+});
+export type CodexCancelRunResult = SchemaType<typeof codexCancelRunResultSchema>;
 
 export const repositoryChatInputSchema = passthroughStruct({
   projectPath: Schema.String,
@@ -109,7 +120,13 @@ const relayCodexEventMembers = [
     status: Schema.Literals(["completed", "failed", "declined"]),
     timestamp: isoString
   }),
-  Schema.Struct({ type: Schema.Literal("file.change"), path: Schema.String, summary: Schema.optional(Schema.String), timestamp: isoString }),
+  Schema.Struct({
+    type: Schema.Literal("file.change"),
+    path: Schema.String,
+    kind: Schema.optional(Schema.String),
+    summary: Schema.optional(Schema.String),
+    timestamp: isoString
+  }),
   Schema.Struct({ type: Schema.Literal("web.search"), query: Schema.String, timestamp: isoString }),
   Schema.Struct({
     type: Schema.Literal("todo.updated"),

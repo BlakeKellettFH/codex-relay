@@ -1,5 +1,6 @@
 import {
   cancelRunInputSchema,
+  codexCancelRunResultSchema,
   codexRunPreflightResultSchema,
   codexRunStartResultSchema,
   codexStatusSchema,
@@ -44,7 +45,8 @@ export const codexEndpoints = {
   cancelRun: defineEndpoint({
     method: "POST",
     path: "/api/codex/runs/cancel",
-    request: { location: "body", schema: cancelRunInputSchema }
+    request: { location: "body", schema: cancelRunInputSchema },
+    response: codexCancelRunResultSchema
   }),
   approveAction: defineEndpoint({
     method: "POST",

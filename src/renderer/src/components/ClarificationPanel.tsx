@@ -10,8 +10,11 @@ type ClarificationPanelProps = {
   questions: ClarificationQuestion[];
   answerDrafts: Record<string, string>;
   submittingId: string | null;
+  actionQuestionIds?: ReadonlySet<string>;
+  actionSubmittingId?: string | null;
   onDraftChange: (questionId: string, answer: string) => void;
   onSubmit: (questionId: string) => void;
+  onAction?: (questionId: string) => void;
   title?: string;
   summary?: string;
   className?: string;
@@ -23,8 +26,11 @@ export function ClarificationPanel({
   questions,
   answerDrafts,
   submittingId,
+  actionQuestionIds,
+  actionSubmittingId,
   onDraftChange,
   onSubmit,
+  onAction,
   title = "Clarifications",
   summary,
   className,
@@ -61,10 +67,23 @@ export function ClarificationPanel({
                 <MarkdownBlock source={question.question} compact />
               </div>
               {answered ? (
-                <div className="clarification-answer">
-                  <span>Answer</span>
-                  <MarkdownBlock source={question.answer ?? ""} compact />
-                </div>
+                <>
+                  <div className="clarification-answer">
+                    <span>Answer</span>
+                    <MarkdownBlock source={question.answer ?? ""} compact />
+                  </div>
+                  {actionQuestionIds?.has(question.id) && onAction ? (
+                    <Button
+                      className="primary-button"
+                      onClick={() => onAction(question.id)}
+                      disabled={actionSubmittingId === question.id}
+                      aria-label="Approve scope and redraft ticket"
+                    >
+                      <Send size={15} />
+                      {actionSubmittingId === question.id ? "Starting Redraft..." : "Approve Scope and Redraft"}
+                    </Button>
+                  ) : null}
+                </>
               ) : (
                 <div className="clarification-form">
                   <Textarea

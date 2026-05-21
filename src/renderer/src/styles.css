@@ -457,6 +457,134 @@ kbd {
   box-shadow: none;
 }
 
+.start-agent-button {
+  border-color: color-mix(in srgb, var(--relay-success) 48%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 14%), transparent),
+    color-mix(in srgb, var(--relay-success) 52%, #2d6232);
+  color: var(--relay-success-text);
+  font-weight: 620;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 18%),
+    0 10px 28px color-mix(in srgb, var(--relay-success) 20%, transparent);
+}
+
+.start-agent-button:hover {
+  color: #d4f5d6;
+  border-color: color-mix(in srgb, var(--relay-success) 62%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 16%), transparent),
+    color-mix(in srgb, var(--relay-success) 58%, #356f3a);
+}
+
+.start-agent-button:active {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 8%), transparent),
+    color-mix(in srgb, var(--relay-success) 44%, #255429);
+}
+
+.start-agent-button:disabled {
+  background: var(--relay-surface-3);
+  border-color: transparent;
+  color: var(--relay-text-muted);
+  box-shadow: none;
+}
+
+.pause-agent-button {
+  border-color: color-mix(in srgb, var(--relay-warning) 48%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 14%), transparent),
+    color-mix(in srgb, var(--relay-warning) 48%, #8a6a24);
+  color: var(--relay-warning-text);
+  font-weight: 620;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 18%),
+    0 10px 28px color-mix(in srgb, var(--relay-warning) 18%, transparent);
+}
+
+.pause-agent-button:hover {
+  color: #fff0c8;
+  border-color: color-mix(in srgb, var(--relay-warning) 62%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 16%), transparent),
+    color-mix(in srgb, var(--relay-warning) 54%, #9a7628);
+}
+
+.pause-agent-button:active {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 8%), transparent),
+    color-mix(in srgb, var(--relay-warning) 42%, #7a5f20);
+}
+
+.pause-agent-button:disabled {
+  background: var(--relay-surface-3);
+  border-color: transparent;
+  color: var(--relay-text-muted);
+  box-shadow: none;
+}
+
+.danger-button {
+  color: var(--relay-danger-text);
+  border-color: color-mix(in srgb, var(--relay-danger) 40%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 8%), transparent),
+    color-mix(in srgb, var(--relay-danger-muted) 68%, var(--relay-surface));
+}
+
+.danger-button:hover {
+  color: #ffd0c8;
+  border-color: color-mix(in srgb, var(--relay-danger) 54%, transparent);
+}
+
+.relay-tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  max-width: 100%;
+}
+
+.relay-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  z-index: 40;
+  transform: translateX(-50%);
+  max-width: min(280px, 70vw);
+  padding: 5px 8px;
+  border-radius: var(--relay-radius-sm);
+  background: color-mix(in srgb, var(--relay-chrome) 92%, black);
+  border: 1px solid var(--relay-border-strong);
+  box-shadow: var(--relay-shadow-popover, 0 8px 24px rgb(0 0 0 / 42%));
+  color: var(--relay-text);
+  font-size: var(--relay-text-xs);
+  line-height: 1.35;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 120ms ease,
+    visibility 120ms ease;
+}
+
+.relay-tooltip-above::after {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.relay-tooltip:hover::after,
+.relay-tooltip:focus-within::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+.detail-actions {
+  overflow: visible;
+}
+
 .full {
   width: 100%;
 }
@@ -897,6 +1025,7 @@ kbd {
 }
 
 .board-column {
+  min-width: 0;
   min-height: 0;
   border: 0;
   border-radius: var(--relay-radius-md);
@@ -916,12 +1045,181 @@ kbd {
     transform 180ms var(--relay-spring);
 }
 
-.board-column.over {
-  transform: translateY(-2px);
+.board-column-drop-target {
   box-shadow:
     var(--relay-inset-highlight),
-    inset 0 0 0 1px color-mix(in srgb, var(--relay-primary) 34%, transparent),
-    0 24px 70px rgb(0 0 0 / 30%);
+    inset 0 0 0 2px color-mix(in srgb, var(--relay-text-muted) 28%, transparent),
+    0 18px 48px rgb(0 0 0 / 18%);
+}
+
+.board-column-drop-target-ready {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--relay-success) 14%, transparent), rgb(255 255 255 / 1.8%)),
+    color-mix(in srgb, var(--relay-surface) 76%, transparent);
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 2px color-mix(in srgb, var(--relay-success) 42%, transparent),
+    0 18px 48px rgb(0 0 0 / 18%);
+}
+
+.board-column-drop-target-not-doing {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--relay-danger) 10%, transparent), rgb(255 255 255 / 1.8%)),
+    color-mix(in srgb, var(--relay-surface) 76%, transparent);
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 2px color-mix(in srgb, var(--relay-danger) 32%, transparent),
+    0 18px 48px rgb(0 0 0 / 18%);
+}
+
+.board-column-drop-target-todo {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--relay-info) 12%, transparent), rgb(255 255 255 / 1.8%)),
+    color-mix(in srgb, var(--relay-surface) 76%, transparent);
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 2px color-mix(in srgb, var(--relay-info) 36%, transparent),
+    0 18px 48px rgb(0 0 0 / 18%);
+}
+
+.board-column-drop-target-over.board-column-drop-target-ready {
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 2px color-mix(in srgb, var(--relay-success) 62%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--relay-success) 24%, transparent),
+    0 18px 48px rgb(0 0 0 / 22%);
+}
+
+.board-column-drop-target-over.board-column-drop-target-not-doing {
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 2px color-mix(in srgb, var(--relay-danger) 48%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--relay-danger) 18%, transparent),
+    0 18px 48px rgb(0 0 0 / 22%);
+}
+
+.board-column-drop-target-over.board-column-drop-target-todo {
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 2px color-mix(in srgb, var(--relay-info) 52%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--relay-info) 20%, transparent),
+    0 18px 48px rgb(0 0 0 / 22%);
+}
+
+.board-drag-overlay-root {
+  z-index: 1200;
+}
+
+.board-drag-overlay-preview {
+  width: 304px;
+  max-width: min(304px, 92vw);
+  pointer-events: none;
+  cursor: grabbing;
+  box-shadow:
+    0 22px 50px rgb(0 0 0 / 36%),
+    0 0 0 1px rgb(255 255 255 / 8%);
+  transform: rotate(-0.6deg) scale(1.02);
+}
+
+.board-drag-overlay-preview .board-drag-overlay-preview-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+}
+
+.board-drag-overlay-preview.ticket-card .ticket-card-layout {
+  padding: 10px 12px;
+}
+
+.board-drag-overlay-preview.hierarchy-board-group-trigger {
+  padding: 0;
+}
+
+.ticket-card.dragging,
+.hierarchy-board-group-trigger.dragging {
+  opacity: 0.22;
+}
+
+.board-drag-marker {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  border: 0;
+  padding: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 10%);
+}
+
+.board-drag-marker svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.board-drag-marker-draggable {
+  touch-action: none;
+  cursor: grab;
+}
+
+.board-drag-marker-draggable:active {
+  cursor: grabbing;
+}
+
+.board-drag-marker-draggable:focus-visible {
+  outline: none;
+  box-shadow: var(--relay-focus-ring);
+}
+
+.board-drag-marker-task {
+  color: var(--relay-text-muted);
+  background: rgb(255 255 255 / 4%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-border-strong) 55%, transparent);
+}
+
+.ticket-card-layout {
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.ticket-card-layout > .board-drag-marker,
+.ticket-card-layout > .board-task-active-spinner {
+  align-self: flex-start;
+  margin-top: 1px;
+}
+
+.ticket-card-layout:has(> .board-drag-marker),
+.ticket-card-layout:has(> .board-task-active-spinner),
+.ticket-card-layout:has(> .board-archive-button) {
+  padding: 10px 12px;
+}
+
+.ticket-card-layout:has(> .board-drag-marker) .card-open,
+.ticket-card-layout:has(> .board-task-active-spinner) .card-open,
+.ticket-card-layout:has(> .board-archive-button) .card-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+}
+
+.ticket-card-layout .card-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .column-header {
@@ -956,12 +1254,28 @@ kbd {
 }
 
 .column-body {
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 8px 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.board-column .epic-board-group,
+.board-column .feature-board-group,
+.board-column .epic-board-group-features,
+.board-column .feature-board-group-tasks {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.board-column .epic-board-group-features,
+.board-column .feature-board-group-tasks {
+  overflow: hidden;
 }
 
 .empty-column {
@@ -1006,6 +1320,10 @@ kbd {
 
 .ticket-card {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
   border: 1px solid var(--relay-border-strong);
   border-radius: var(--relay-radius-md);
   background:
@@ -1033,15 +1351,6 @@ kbd {
     0 10px 24px rgb(0 0 0 / 16%);
 }
 
-.ticket-card.keyboard-selected {
-  border-color: color-mix(in srgb, var(--relay-primary) 58%, var(--relay-border-strong));
-  box-shadow:
-    var(--relay-inset-highlight),
-    inset 3px 0 0 color-mix(in srgb, var(--relay-primary-text) 88%, transparent),
-    inset 0 0 0 1px color-mix(in srgb, var(--relay-primary) 20%, transparent),
-    0 10px 26px rgb(0 0 0 / 18%);
-}
-
 .ticket-card:focus-within {
   border-color: color-mix(in srgb, var(--relay-ring) 64%, var(--relay-border-strong));
   outline-color: color-mix(in srgb, var(--relay-ring) 72%, transparent);
@@ -1049,32 +1358,6 @@ kbd {
     var(--relay-inset-highlight),
     inset 0 0 0 1px color-mix(in srgb, var(--relay-ring) 24%, transparent),
     0 14px 32px rgb(0 0 0 / 22%);
-}
-
-.ticket-card.keyboard-selected:focus-within {
-  outline-color: color-mix(in srgb, var(--relay-primary-text) 80%, transparent);
-  box-shadow:
-    var(--relay-inset-highlight),
-    inset 3px 0 0 color-mix(in srgb, var(--relay-primary-text) 92%, transparent),
-    inset 0 0 0 1px color-mix(in srgb, var(--relay-ring) 28%, transparent),
-    0 14px 32px rgb(0 0 0 / 24%);
-}
-
-.board.board-has-focus .ticket-card:not(.keyboard-selected) {
-  filter: saturate(0.72);
-  opacity: 0.56;
-}
-
-.ticket-card.dragging {
-  z-index: 10;
-  opacity: 0.92;
-  border-color: color-mix(in srgb, var(--relay-primary) 64%, var(--relay-border-strong));
-  outline-color: color-mix(in srgb, var(--relay-primary-text) 68%, transparent);
-  box-shadow:
-    var(--relay-inset-highlight),
-    inset 0 0 0 1px color-mix(in srgb, var(--relay-primary) 28%, transparent),
-    0 18px 42px rgb(0 0 0 / 34%);
-  cursor: grabbing;
 }
 
 .card-open {
@@ -1085,7 +1368,7 @@ kbd {
   border: 0;
   border-radius: calc(var(--relay-radius-md) - 1px);
   background: transparent;
-  padding: 14px 42px 14px 14px;
+  padding: 14px;
   outline: none;
   box-shadow: none;
   transition: none;
@@ -1106,6 +1389,57 @@ kbd {
 .card-open:focus-visible {
   background: transparent;
   box-shadow: none;
+}
+
+.card-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.card-title-row .card-title {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.ticket-card .card-title,
+.hierarchy-board-group-trigger .card-title {
+  display: block;
+  font-size: var(--relay-text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-card .labels,
+.hierarchy-board-group-trigger .labels {
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.ticket-card .labels span:not(.label-overflow),
+.hierarchy-board-group-trigger .labels span:not(.label-overflow) {
+  max-width: 100%;
+}
+
+.ticket-board-failed-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--relay-danger-text);
+  margin-top: 1px;
+}
+
+.ticket-card-run-failed {
+  border-color: color-mix(in srgb, var(--relay-danger-text) 40%, var(--relay-border-strong));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--relay-danger-text) 6%, transparent) 0%, transparent 58%),
+    var(--relay-surface-2);
 }
 
 .card-title {
@@ -1268,6 +1602,227 @@ kbd {
   color: var(--relay-info-text);
 }
 
+.ticket-type-pill.feature {
+  background: color-mix(in srgb, var(--relay-accent) 18%, transparent);
+  color: var(--relay-accent);
+}
+
+.epic-link-panel.legacy-warning p {
+  margin: 0;
+  color: var(--relay-warning-text);
+  font-size: 0.9rem;
+}
+
+.epic-board-group {
+  display: grid;
+  gap: 8px;
+}
+
+.hierarchy-board-group-trigger,
+.epic-board-group-trigger,
+.feature-board-group-trigger {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: var(--relay-radius-md);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 2.2%) 0%, transparent 58%),
+    var(--relay-surface-2);
+  color: var(--relay-text);
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 1px transparent;
+  text-align: left;
+}
+
+.hierarchy-board-group-layout.ticket-card-layout {
+  padding: 10px 12px;
+}
+
+.hierarchy-board-group-layout > .hierarchy-board-group-rail > .board-drag-marker:first-child,
+.hierarchy-board-group-layout > .hierarchy-board-group-rail > .board-task-active-spinner:first-child {
+  align-self: flex-start;
+  margin-top: 1px;
+}
+
+.hierarchy-board-group-trigger.has-hierarchy-marker {
+  border-color: color-mix(in srgb, var(--hierarchy-marker-color) 58%, transparent);
+  box-shadow:
+    var(--relay-inset-highlight),
+    inset 0 0 0 1px color-mix(in srgb, var(--hierarchy-marker-color) 18%, transparent);
+}
+
+.hierarchy-board-group-trigger:hover,
+.epic-board-group-trigger:hover,
+.feature-board-group-trigger:hover {
+  border-color: color-mix(in srgb, var(--relay-border-strong) 70%, white);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 4%) 0%, transparent 58%),
+    var(--relay-surface-2);
+  color: var(--relay-text);
+  transform: none;
+}
+
+.hierarchy-board-group-trigger.has-hierarchy-marker:hover {
+  border-color: color-mix(in srgb, var(--hierarchy-marker-color) 78%, transparent);
+}
+
+.epic-board-group.expanded .epic-board-group-trigger,
+.feature-board-group.expanded .feature-board-group-trigger {
+  border-bottom-left-radius: var(--relay-radius-sm);
+  border-bottom-right-radius: var(--relay-radius-sm);
+}
+
+.hierarchy-board-group-trigger-body {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.hierarchy-board-group-trigger .card-title-row {
+  margin-bottom: 0;
+}
+
+.hierarchy-board-group-rail {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.board-archive-button {
+  cursor: pointer;
+}
+
+.board-archive-button:hover:not(:disabled) {
+  background: rgb(0 0 0 / 22%);
+  color: var(--relay-text);
+  transform: none;
+}
+
+.board-archive-button:focus-visible {
+  outline: none;
+  box-shadow: var(--relay-focus-ring);
+}
+
+.board-archive-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hierarchy-board-group-layout > .hierarchy-board-group-rail > .board-archive-button {
+  align-self: flex-start;
+}
+
+.hierarchy-board-group-expand {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--relay-border-strong) 55%, transparent);
+  background: rgb(0 0 0 / 14%);
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hierarchy-board-group-expand svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.hierarchy-board-group-expand:hover {
+  background: rgb(0 0 0 / 22%);
+  transform: none;
+  color: var(--relay-text);
+}
+
+.hierarchy-board-group-expand:focus-visible {
+  outline: none;
+  box-shadow: var(--relay-focus-ring);
+}
+
+.hierarchy-board-group-open {
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 100%;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.hierarchy-board-group-open:focus-visible {
+  outline: none;
+  border-radius: var(--relay-radius-sm);
+  box-shadow: var(--relay-focus-ring);
+}
+
+.hierarchy-board-group-meta {
+  display: block;
+  min-width: 0;
+  font-size: var(--relay-text-xs);
+  color: var(--relay-text-muted);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.epic-board-group-features {
+  display: grid;
+  gap: 8px;
+  padding-left: 8px;
+  border-left: 2px solid color-mix(in srgb, var(--relay-border-strong) 55%, transparent);
+}
+
+.epic-board-group-features.has-hierarchy-marker,
+.feature-board-group-tasks.has-hierarchy-marker {
+  border-left-color: color-mix(in srgb, var(--hierarchy-marker-color) 52%, transparent);
+}
+
+.ticket-detail-container-status-note {
+  margin: 0;
+  font-size: var(--relay-text-sm);
+  line-height: 1.45;
+  color: var(--relay-text-muted);
+}
+
+.feature-board-group {
+  display: grid;
+  gap: 6px;
+}
+
+.feature-board-group-tasks {
+  display: grid;
+  gap: 8px;
+  padding-left: 8px;
+  border-left: 2px solid color-mix(in srgb, var(--relay-border-strong) 55%, transparent);
+}
+
+.feature-board-group-collapsed-hint {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--relay-text-subtle);
+}
+
+.ticket-card.feature-task-card {
+  border-color: color-mix(in srgb, var(--relay-border) 85%, transparent);
+}
+
+.feature-board-group-trigger .hierarchy-board-group-expand:focus-visible,
+.epic-board-group-trigger .hierarchy-board-group-expand:focus-visible {
+  outline: none;
+  box-shadow: var(--relay-focus-ring);
+}
+
 .ticket-type-pill.subticket,
 .ticket-type-pill.task {
   background: rgb(255 255 255 / 5.5%);
@@ -1350,56 +1905,6 @@ kbd {
   flex: 0 0 auto;
   max-width: none;
   color: var(--relay-text-subtle);
-}
-
-.drag-handle {
-  position: absolute;
-  top: var(--relay-space-2);
-  right: var(--relay-space-2);
-  width: 28px;
-  height: 28px;
-  min-height: 28px;
-  padding: 0;
-  border-color: transparent;
-  border-radius: var(--relay-radius-sm);
-  background: transparent;
-  color: var(--relay-text-subtle);
-  box-shadow: none;
-  opacity: 0.78;
-  transition:
-    color 160ms var(--relay-ease),
-    background-color 160ms var(--relay-ease),
-    box-shadow 160ms var(--relay-ease),
-    opacity 160ms var(--relay-ease);
-}
-
-.ticket-card:hover .drag-handle,
-.ticket-card:focus-within .drag-handle,
-.ticket-card.keyboard-selected .drag-handle {
-  color: var(--relay-text-muted);
-  background: rgb(255 255 255 / 4%);
-  opacity: 1;
-}
-
-.drag-handle:hover {
-  color: var(--relay-text);
-  background: rgb(255 255 255 / 7%);
-  box-shadow: none;
-  transform: none;
-}
-
-.drag-handle:focus-visible {
-  color: var(--relay-text);
-  background: rgb(255 255 255 / 8%);
-  box-shadow: var(--relay-focus-ring);
-  transform: none;
-}
-
-.ticket-card.dragging .drag-handle {
-  color: var(--relay-primary-text);
-  background: var(--relay-primary-muted);
-  cursor: grabbing;
-  opacity: 1;
 }
 
 .sidebar-codex-status {
@@ -1627,7 +2132,7 @@ kbd {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34px;
   gap: 7px;
-  align-items: end;
+  align-items: start;
 }
 
 .floating-ticket-reference-editor textarea {
@@ -1653,6 +2158,10 @@ kbd {
   width: 34px;
   height: 34px;
   min-height: 34px;
+  padding: 0;
+  margin: 0;
+  align-self: start;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2337,14 +2846,16 @@ kbd {
 
 .ticket-detail-backdrop {
   z-index: 28;
-  display: block;
+  display: grid;
+  place-items: center;
   padding: 10dvh 10vw;
 }
 
 .detail-panel {
   position: relative;
-  width: 100%;
-  height: 100%;
+  width: min(1280px, 100%);
+  height: min(100%, calc(100dvh - 20dvh));
+  max-height: calc(100dvh - 20dvh);
   min-width: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -2408,18 +2919,25 @@ kbd {
   padding-right: 2px;
 }
 
+.ticket-detail-primary > .ticket-update-error,
+.ticket-detail-primary > .ticket-detail-primary-clarifications,
+.ticket-detail-primary > .ticket-summary-panel,
+.ticket-detail-primary > .ticket-update-panel {
+  flex: 0 0 auto;
+}
+
 .ticket-detail-primary.markdown-preview-expanded {
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .ticket-detail-primary.markdown-preview-expanded .ticket-markdown-tabs.preview-expanded,
 .ticket-detail-primary.markdown-preview-expanded .ticket-markdown-preview-panel.expanded {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-height: 0;
+  max-height: min(52dvh, 560px);
 }
 
 .ticket-detail-primary.markdown-preview-expanded .ticket-update-panel {
-  flex: 0 0 auto;
   margin-top: var(--relay-space-1);
 }
 
@@ -2559,6 +3077,71 @@ kbd {
   flex: 1 1 auto;
 }
 
+.ticket-detail-type-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ticket-detail-type-status-divider {
+  flex: 0 0 auto;
+  color: rgb(255 255 255 / 28%);
+  font-size: var(--relay-text-sm);
+  font-weight: 300;
+  line-height: 1;
+  user-select: none;
+}
+
+.ticket-detail-type-status-row .detail-status-row {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ticket-detail-type-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.ticket-detail-type-marker {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  border: 0;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 10%);
+}
+
+.ticket-detail-type-label {
+  font-size: var(--relay-text-sm);
+  font-weight: 640;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ticket-detail-type-indicator.has-hierarchy-marker .ticket-detail-type-label {
+  color: var(--hierarchy-marker-color);
+}
+
+.ticket-detail-type-indicator.task .ticket-detail-type-label {
+  color: var(--relay-text-muted);
+}
+
 .detail-status-row {
   display: flex;
   align-items: center;
@@ -2619,6 +3202,36 @@ kbd {
   background: rgb(0 0 0 / 14%);
 }
 
+.ticket-planned-files-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.ticket-planned-files-list li {
+  font-family: var(--relay-font-mono, ui-monospace, monospace);
+  font-size: var(--relay-text-xs);
+  color: var(--relay-text-muted);
+  word-break: break-all;
+}
+
+.ticket-detail-meta-empty {
+  margin: 0;
+  color: var(--relay-text-subtle);
+  font-size: var(--relay-text-sm);
+}
+
+.ticket-review-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--relay-space-2);
+}
+
 .detail-actions {
   margin-top: var(--relay-space-3);
 }
@@ -2641,8 +3254,101 @@ kbd {
   margin-top: var(--relay-space-1);
 }
 
-.ticket-markdown-tabs.preview-expanded {
-  flex: 1 1 min(62dvh, 680px);
+.ticket-summary-preview-panel {
+  display: grid;
+  gap: var(--relay-space-3);
+  min-height: 0;
+}
+
+.ticket-summary-preview {
+  min-width: 0;
+}
+
+.ticket-summary-preview .markdown-content {
+  color: rgb(255 255 255 / 82%);
+  font-size: 15px;
+  line-height: 1.68;
+}
+
+.ticket-detail-layout.full-body-open {
+  grid-template-columns: 1fr;
+  padding-top: 12px;
+}
+
+.ticket-detail-full-body {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.ticket-detail-full-body .ticket-markdown-tabs {
+  min-height: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  flex: initial;
+  margin-top: 0;
+}
+
+.ticket-detail-full-body-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding-bottom: var(--relay-space-3);
+}
+
+.ticket-detail-full-body-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ticket-detail-full-body .ticket-markdown-tablist {
+  flex: 0 0 auto;
+}
+
+.ticket-detail-full-body .ticket-markdown-tab-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: var(--relay-space-3);
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ticket-detail-full-body .ticket-markdown-preview-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ticket-detail-full-body .ticket-markdown-preview-panel .ticket-markdown-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.ticket-detail-full-body .ticket-markdown-edit-panel {
+  overflow: hidden;
+}
+
+.ticket-detail-full-body .ticket-markdown-edit-panel .detail-markdown {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  resize: none;
+  box-sizing: border-box;
+}
+
+.ticket-detail-full-body .ticket-markdown-preview .markdown-content {
+  color: rgb(255 255 255 / 74%);
+  font-size: 15px;
+  line-height: 1.72;
 }
 
 .ticket-markdown-tablist {
@@ -2691,9 +3397,14 @@ kbd {
   height: min(340px, 52dvh);
 }
 
+.ticket-markdown-preview-panel.collapsed .ticket-markdown-preview {
+  overflow-y: auto;
+}
+
 .ticket-markdown-preview-panel.expanded {
-  flex: 1 1 auto;
-  min-height: min(52dvh, 560px);
+  flex: 0 1 auto;
+  min-height: min(240px, 36dvh);
+  max-height: min(52dvh, 560px);
 }
 
 .ticket-markdown-preview-panel .ticket-markdown-preview {
@@ -3260,6 +3971,7 @@ kbd {
   min-height: 68px;
 }
 
+.ticket-summary-panel,
 .ticket-update-panel {
   margin-top: var(--relay-space-4);
   overflow: hidden;
@@ -3274,6 +3986,20 @@ kbd {
   box-shadow:
     var(--relay-inset-highlight),
     inset 0 0 0 1px rgb(255 255 255 / 5%);
+}
+
+.ticket-summary-field {
+  min-width: 0;
+  display: grid;
+  gap: var(--relay-space-2);
+}
+
+.ticket-summary-field > span {
+  color: var(--relay-text-subtle);
+  font-size: var(--relay-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .ticket-update-panel header {
@@ -4211,6 +4937,10 @@ kbd {
     width: 100%;
   }
 
+  .detail-actions .icon-button {
+    width: 32px;
+  }
+
   .topbar-chat-button {
     width: 34px;
     grid-column: 2;
@@ -4227,7 +4957,7 @@ kbd {
 
   .floating-ticket-controls {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   }
 
   .floating-ticket-controls label {

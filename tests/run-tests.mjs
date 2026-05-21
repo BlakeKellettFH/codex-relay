@@ -11,6 +11,12 @@ const outdir = path.join(os.tmpdir(), `relay-tests-${process.pid}`);
 const entryPoints = [
   path.join(testsDir, "attachment-drop.test.ts"),
   path.join(testsDir, "agent-progress.test.tsx"),
+  path.join(testsDir, "board-archive-button.test.tsx"),
+  path.join(testsDir, "board-archive.test.ts"),
+  path.join(testsDir, "board-column-layout.test.ts"),
+  path.join(testsDir, "board-drag-drop.test.tsx"),
+  path.join(testsDir, "board-hierarchy-visuals.test.ts"),
+  path.join(testsDir, "board-task-progress.test.tsx"),
   path.join(testsDir, "backend.test.ts"),
   path.join(testsDir, "clarification-panel.test.tsx"),
   path.join(testsDir, "create-ticket-mention-layout.test.ts"),
@@ -28,6 +34,7 @@ const entryPoints = [
   path.join(testsDir, "schemas.test.ts"),
   path.join(testsDir, "ticket-references.test.ts"),
   path.join(testsDir, "ticket-draft.test.ts"),
+  path.join(testsDir, "ticket-detail-type-indicator.test.tsx"),
   path.join(testsDir, "ticket-draft-ui.test.tsx"),
   path.join(testsDir, "toast-notification.test.tsx"),
   path.join(testsDir, "ticket-update.test.ts")
@@ -82,7 +89,8 @@ await build({
 const builtTests = entryPoints.map((entry) => path.join(outdir, `${path.basename(entry).replace(/\.(tsx|ts)$/, "")}.js`));
 const result = spawnSync(process.execPath, ["--test", "--test-concurrency=1", ...builtTests], {
   cwd: projectRoot,
-  stdio: "inherit"
+  stdio: "inherit",
+  env: { ...process.env, RELAY_TEST_RUN: "1" }
 });
 
 process.exit(result.status ?? 1);

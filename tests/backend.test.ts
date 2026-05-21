@@ -2,17 +2,25 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ConfigProvider, Effect, Layer, ManagedRuntime, Sink, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { access, appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { CodexOptions, Input, ThreadOptions } from "@openai/codex-sdk";
+import { captureRunGitBaseline, readRunGitBaseline, revertRunGitChanges } from "../src/services/git/GitRunBaseline";
+import { writeRunLog } from "../src/services/run-events";
 import {
+  approveScopeClarificationRedraft,
   cancelCodexRun,
   createCodex,
   getCodexStatus,
   preflightCodexRun,
   readCodexRunEvents,
   reconcileTicketQueueState,
+  maybeFinalizeImplementationScopeAfterClarification,
+  reconcileSchedulableReadyTickets,
+  resumeCodexRun,
   sendRepositoryChatMessage,
   startCodexRun,
   startTicketDraftRun,
@@ -37,15 +45,21 @@ import {
 import { BackendClock } from "../src/platform";
 import { BackendConfig, BackendConfigDefaults, loadBackendConfig } from "../src/config/AppConfig";
 import { runBackendEffect } from "../src/runtime";
+import type { HierarchyDraftPlan } from "../src/shared/schemas";
 import {
   answerClarificationQuestion,
   createClarificationQuestions,
+  applyHierarchyDraftPlan,
+  applyImplementationScopeRedraftToTicket,
+  createPendingTicketDraft,
   createSubticket,
+  createTaskUnderFeature,
   createTicket,
   deleteTicket,
   initializeProject,
   isTicketNotFoundError,
   listTicketReferenceCandidates,
+  linkFeatureSubticket,
   linkSubticket,
   moveTicket,
   readBoard,
@@ -58,6 +72,7 @@ import {
   summarizeProject,
   transitionTicketStatus,
   writeTicket,
+  unlinkFeatureSubticket,
   unlinkSubticket,
   writeProjectConfig
 } from "../src/storage";
@@ -94,6 +109,22 @@ const allowNonGitRuns = async (projectPath: string): Promise<void> => {
       ...config.settings,
       allowNonGitCodexRuns: true
     }
+  });
+};
+
+const defaultPlannedFilesForTitle = (title: string): string[] => {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return [`src/${slug || "task"}.ts`];
+};
+
+const createImplementationTicket = async (projectPath: string, input: TicketCreateInput): Promise<TicketRecord> => {
+  if (input.ticketType && input.ticketType !== "task") return createTicket(projectPath, input);
+  return createTicket(projectPath, {
+    ...input,
+    plannedFiles: input.plannedFiles ?? defaultPlannedFilesForTitle(input.title)
   });
 };
 
@@ -138,6 +169,7 @@ const deferred = (): { promise: Promise<void>; resolve: () => void } => {
 const validDraftJson = (title: string): string =>
   JSON.stringify({
     title,
+    summary: `Lean summary for ${title}.`,
     priority: "medium",
     labels: ["codex"],
     context: "Context from Codex.",
@@ -148,7 +180,13 @@ const validDraftJson = (title: string): string =>
     acceptanceCriteria: ["The requested behavior is covered."],
     clarificationQuestions: [],
     assumptions: [],
-    implementationNotes: ["Keep the change focused."]
+    implementationNotes: ["Keep the change focused."],
+    draftState: "ready",
+    blockingClarificationQuestions: [],
+    ticketType: "task",
+    subtickets: [],
+    featureStubs: [],
+    leanTasks: []
   });
 
 test("work ledger persists snapshots, event logs, and ignores corrupt trailing event lines", async () => {
@@ -1204,18 +1242,34 @@ test("epic tickets persist ordered subticket relationships across board reloads"
   const [firstChildId, secondChildId] = reloadedEpic.frontMatter.subticketIds;
   const firstChild = await readTicket(projectPath, firstChildId);
   const secondChild = await readTicket(projectPath, secondChildId);
-  assert.equal(firstChild.frontMatter.ticketType, "task");
+  assert.equal(firstChild.frontMatter.ticketType, "feature");
   assert.equal(firstChild.frontMatter.parentEpicId, epic.frontMatter.id);
   assert.equal(secondChild.frontMatter.parentEpicId, epic.frontMatter.id);
 
-  await transitionTicketStatus(projectPath, firstChildId, "in_progress", {
+  const task = await createTaskUnderFeature({
+    projectPath,
+    featureId: firstChildId,
+    input: { title: "Implement first child", priority: "medium" }
+  });
+
+  await transitionTicketStatus(projectPath, task.frontMatter.id, "in_progress", {
     actor: "user",
     source: "manual_board"
   });
 
+  await assert.rejects(
+    () =>
+      transitionTicketStatus(projectPath, firstChildId, "in_progress", {
+        actor: "user",
+        source: "manual_board"
+      }),
+    /cannot change workflow status/
+  );
+
   const board = await readBoard(projectPath);
   assert.equal(board.tickets.find((item) => item.id === epic.frontMatter.id)?.status, "todo");
-  assert.equal(board.tickets.find((item) => item.id === firstChildId)?.status, "in_progress");
+  assert.equal(board.tickets.find((item) => item.id === firstChildId)?.status, "todo");
+  assert.equal(board.tickets.find((item) => item.id === task.frontMatter.id)?.status, "in_progress");
   assert.equal(board.tickets.find((item) => item.id === firstChildId)?.parentEpicId, epic.frontMatter.id);
   assert.deepEqual((await readTicket(projectPath, epic.frontMatter.id)).frontMatter.subticketIds, [firstChildId, secondChildId]);
 
@@ -1239,28 +1293,30 @@ test("epic subtickets can be created, linked, unlinked, and deleted without dele
     projectPath,
     epicId: epic.frontMatter.id,
     ticket: {
-      title: "Created child",
+      title: "Created feature",
       priority: "medium",
       labels: [],
-      markdown: "# Created child\n"
+      markdown: "# Created feature\n"
     }
   });
-  const looseTicket = await createTicket(projectPath, {
-    title: "Loose child",
+  assert.equal(createdChild.frontMatter.ticketType, "feature");
+  const looseFeature = await createTicket(projectPath, {
+    title: "Loose feature",
+    ticketType: "feature",
     priority: "low",
     labels: [],
-    markdown: "# Loose child\n"
+    markdown: "# Loose feature\n"
   });
 
-  await linkSubticket(projectPath, epic.frontMatter.id, looseTicket.frontMatter.id);
+  await linkSubticket(projectPath, epic.frontMatter.id, looseFeature.frontMatter.id);
   assert.deepEqual((await readTicket(projectPath, epic.frontMatter.id)).frontMatter.subticketIds, [
     createdChild.frontMatter.id,
-    looseTicket.frontMatter.id
+    looseFeature.frontMatter.id
   ]);
-  assert.equal((await readTicket(projectPath, looseTicket.frontMatter.id)).frontMatter.parentEpicId, epic.frontMatter.id);
+  assert.equal((await readTicket(projectPath, looseFeature.frontMatter.id)).frontMatter.parentEpicId, epic.frontMatter.id);
 
-  await unlinkSubticket(projectPath, epic.frontMatter.id, looseTicket.frontMatter.id);
-  assert.equal((await readTicket(projectPath, looseTicket.frontMatter.id)).frontMatter.parentEpicId, null);
+  await unlinkSubticket(projectPath, epic.frontMatter.id, looseFeature.frontMatter.id);
+  assert.equal((await readTicket(projectPath, looseFeature.frontMatter.id)).frontMatter.parentEpicId, null);
   assert.deepEqual((await readTicket(projectPath, epic.frontMatter.id)).frontMatter.subticketIds, [createdChild.frontMatter.id]);
 
   await deleteTicket(projectPath, createdChild.frontMatter.id);
@@ -1276,8 +1332,352 @@ test("epic subtickets can be created, linked, unlinked, and deleted without dele
     labels: [],
     markdown: "# Nested candidate\n"
   });
+  const looseTask = await createTicket(projectPath, {
+    title: "Loose task",
+    priority: "low",
+    labels: [],
+    markdown: "# Loose task\n",
+    allowOrphanTask: true
+  });
+  await assert.rejects(
+    linkSubticket(projectPath, epic.frontMatter.id, looseTask.frontMatter.id),
+    /Epics can only link feature tickets/
+  );
   await assert.rejects(linkSubticket(projectPath, epic.frontMatter.id, nestedEpic.frontMatter.id), /Nested epics are not supported/);
   await assert.rejects(linkSubticket(projectPath, epic.frontMatter.id, epic.frontMatter.id), /itself/);
+});
+
+test("deleting a feature cascades to tasks linked only by parentFeatureId", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Loose subticket list feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Feature\n",
+    subticketIds: []
+  });
+  const task = await createTicket(projectPath, {
+    title: "Linked only by parentFeatureId",
+    ticketType: "task",
+    priority: "medium",
+    labels: [],
+    markdown: "# Task\n",
+    parentFeatureId: feature.frontMatter.id,
+    allowOrphanTask: false
+  });
+
+  await deleteTicket(projectPath, feature.frontMatter.id);
+
+  await assert.rejects(readTicket(projectPath, task.frontMatter.id), isTicketNotFoundError);
+});
+
+test("deleting a feature cascades to its tasks", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Settings feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Settings feature\n"
+  });
+  const task = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "Dark mode toggle", priority: "medium" }
+  });
+
+  await deleteTicket(projectPath, feature.frontMatter.id);
+
+  const board = await readBoard(projectPath);
+  assert.ok(!board.tickets.some((item) => item.id === feature.frontMatter.id));
+  assert.ok(!board.tickets.some((item) => item.id === task.frontMatter.id));
+  await assert.rejects(readTicket(projectPath, task.frontMatter.id), isTicketNotFoundError);
+});
+
+test("deleting an epic cascades to linked features and their tasks", async () => {
+  const projectPath = await createProject();
+  const epic = await createTicket(projectPath, {
+    title: "Accounts epic",
+    ticketType: "epic",
+    priority: "medium",
+    labels: [],
+    markdown: "# Accounts epic\n"
+  });
+  const feature = await createSubticket({
+    projectPath,
+    epicId: epic.frontMatter.id,
+    ticket: {
+      title: "OAuth feature",
+      priority: "medium",
+      labels: [],
+      markdown: "# OAuth feature\n"
+    }
+  });
+  const task = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "Google sign-in", priority: "high" }
+  });
+
+  await deleteTicket(projectPath, epic.frontMatter.id);
+
+  const board = await readBoard(projectPath);
+  assert.equal(board.tickets.length, 0);
+  await assert.rejects(readTicket(projectPath, epic.frontMatter.id), isTicketNotFoundError);
+  await assert.rejects(readTicket(projectPath, feature.frontMatter.id), isTicketNotFoundError);
+  await assert.rejects(readTicket(projectPath, task.frontMatter.id), isTicketNotFoundError);
+});
+
+test("feature tasks require a parent feature and can be added without codex", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Auth feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Auth feature\n"
+  });
+  const task = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "Add login form", description: "Minimal email/password form", priority: "high" }
+  });
+  assert.equal(task.frontMatter.ticketType, "task");
+  assert.equal(task.frontMatter.parentFeatureId, feature.frontMatter.id);
+  assert.match(task.markdown, /Parent feature: Auth feature/);
+  assert.deepEqual((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.subticketIds, [task.frontMatter.id]);
+  await assert.rejects(
+    createTicket(projectPath, {
+      title: "Orphan",
+      priority: "low",
+      labels: [],
+      markdown: "# Orphan\n",
+      allowOrphanTask: false
+    }),
+    /must belong to a feature/
+  );
+});
+
+const emptyHierarchyResearch = () => ({
+  generatedAt: "",
+  checkedUrls: [],
+  inspectedFiles: [],
+  limitations: [],
+  limits: {
+    maxResearchMs: 0,
+    maxUrls: 0,
+    maxUrlFetchMs: 0,
+    maxUrlContentChars: 0,
+    maxFilesToScan: 0,
+    maxFilesToRead: 0,
+    maxFileReadChars: 0,
+    maxMatchesPerFile: 0
+  }
+});
+
+const sampleLeanTask = (title: string) => ({
+  title,
+  summary: `Summary for ${title}.`,
+  priority: "medium" as const,
+  labels: ["draft"],
+  context: "Context.",
+  goal: "Goal.",
+  requirements: ["Requirement."],
+  acceptanceCriteria: ["Done."],
+  implementationPlan: ["Step."],
+  assumptions: [],
+  plannedFiles: [`src/${title.toLowerCase().replace(/\s+/g, "-")}.ts`]
+});
+
+const sampleRoot = (title: string) => ({
+  title,
+  summary: `Summary for ${title}.`,
+  priority: "medium" as const,
+  labels: ["draft"],
+  context: "Context.",
+  researchFindings: [],
+  requirements: ["Requirement."],
+  implementationPlan: ["Step."],
+  testPlan: ["npm test"],
+  acceptanceCriteria: ["Done."],
+  clarificationQuestions: [],
+  assumptions: [],
+  implementationNotes: []
+});
+
+test("createPendingTicketDraft creates draft_ticket with draftTargetType from preferredTicketType", async () => {
+  const projectPath = await createProject();
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Build billing dashboard", preferredTicketType: "feature" },
+    "run_pending_feature"
+  );
+  assert.equal(placeholder.frontMatter.ticketType, "draft_ticket");
+  assert.equal(placeholder.frontMatter.draftTargetType, "feature");
+  assert.equal(placeholder.frontMatter.status, "todo");
+  assert.equal(placeholder.frontMatter.runStatus, "drafting");
+});
+
+test("applyHierarchyDraftPlan normalizes legacy standalone_task plans into feature trees", async () => {
+  const projectPath = await createProject();
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Change primary button color", autoHierarchy: true },
+    "run_hierarchy_standalone"
+  );
+  const rootId = await applyHierarchyDraftPlan(
+    projectPath,
+    placeholder.frontMatter.id,
+    {
+      planKind: "standalone_task",
+      draftState: "ready",
+      blockingClarificationQuestions: [],
+      matchedEpicId: null,
+      matchedFeatureId: null,
+      features: [],
+      leanTasks: [],
+      standaloneTask: sampleLeanTask("Blue primary button"),
+      research: emptyHierarchyResearch()
+    } as unknown as HierarchyDraftPlan,
+    "run_hierarchy_standalone"
+  );
+  const feature = await readTicket(projectPath, rootId);
+  assert.equal(feature.frontMatter.ticketType, "feature");
+  assert.equal(feature.frontMatter.title, "Blue primary button");
+  const board = await readBoard(projectPath);
+  const tasks = board.tickets.filter((ticket) => ticket.parentFeatureId === feature.frontMatter.id);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].title, "Blue primary button");
+  assert.deepEqual(tasks[0].plannedFiles, ["src/blue-primary-button.ts"]);
+  assert.doesNotMatch((await readTicket(projectPath, tasks[0].id)).markdown, /## Planned File Scope/);
+});
+
+test("applyHierarchyDraftPlan extend_epic links feature and creates lean tasks", async () => {
+  const projectPath = await createProject();
+  const epic = await createTicket(projectPath, {
+    title: "Accounts epic",
+    ticketType: "epic",
+    priority: "medium",
+    labels: [],
+    markdown: "# Accounts epic\n"
+  });
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Add OAuth provider", autoHierarchy: true },
+    "run_hierarchy_extend_epic"
+  );
+  const featureId = await applyHierarchyDraftPlan(
+    projectPath,
+    placeholder.frontMatter.id,
+    {
+      planKind: "extend_epic",
+      draftState: "ready",
+      blockingClarificationQuestions: [],
+      matchedEpicId: epic.frontMatter.id,
+      matchedFeatureId: null,
+      root: sampleRoot("OAuth provider"),
+      features: [],
+      leanTasks: [sampleLeanTask("Wire Google OAuth")],
+      research: emptyHierarchyResearch()
+    },
+    "run_hierarchy_extend_epic"
+  );
+  const feature = await readTicket(projectPath, featureId);
+  assert.equal(feature.frontMatter.ticketType, "feature");
+  assert.equal(feature.frontMatter.parentEpicId, epic.frontMatter.id);
+  assert.deepEqual((await readTicket(projectPath, epic.frontMatter.id)).frontMatter.subticketIds, [featureId]);
+  const board = await readBoard(projectPath);
+  const tasks = board.tickets.filter((ticket) => ticket.parentFeatureId === featureId);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].title, "Wire Google OAuth");
+  assert.deepEqual(tasks[0].plannedFiles, ["src/wire-google-oauth.ts"]);
+});
+
+test("applyHierarchyDraftPlan extend_feature deletes placeholder and appends tasks only", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Settings feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Settings feature\n"
+  });
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Add dark mode toggle", autoHierarchy: true },
+    "run_hierarchy_extend_feature"
+  );
+  const returnedId = await applyHierarchyDraftPlan(
+    projectPath,
+    placeholder.frontMatter.id,
+    {
+      planKind: "extend_feature",
+      draftState: "ready",
+      blockingClarificationQuestions: [],
+      matchedEpicId: null,
+      matchedFeatureId: feature.frontMatter.id,
+      features: [],
+      leanTasks: [],
+      extendFeature: { leanTasks: [sampleLeanTask("Theme toggle UI")] },
+      research: emptyHierarchyResearch()
+    },
+    "run_hierarchy_extend_feature"
+  );
+  assert.equal(returnedId, feature.frontMatter.id);
+  await assert.rejects(readTicket(projectPath, placeholder.frontMatter.id), isTicketNotFoundError);
+  const tasks = (await readBoard(projectPath)).tickets.filter((ticket) => ticket.parentFeatureId === feature.frontMatter.id);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].title, "Theme toggle UI");
+  assert.deepEqual(tasks[0].plannedFiles, ["src/theme-toggle-ui.ts"]);
+});
+
+test("feature task links can be created but not unlinked into standalone tasks", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Billing feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Billing feature\n"
+  });
+  const created = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "Stripe webhook", priority: "medium" }
+  });
+  const loose = await createTicket(projectPath, {
+    title: "Loose task",
+    priority: "low",
+    labels: [],
+    markdown: "# Loose task\n",
+    allowOrphanTask: true
+  });
+  await linkFeatureSubticket({ projectPath, featureId: feature.frontMatter.id, ticketId: loose.frontMatter.id });
+  assert.equal((await readTicket(projectPath, loose.frontMatter.id)).frontMatter.parentFeatureId, feature.frontMatter.id);
+  await assert.rejects(
+    unlinkFeatureSubticket({ projectPath, featureId: feature.frontMatter.id, ticketId: loose.frontMatter.id }),
+    /must stay linked to a feature/
+  );
+  assert.equal((await readTicket(projectPath, loose.frontMatter.id)).frontMatter.parentFeatureId, feature.frontMatter.id);
+  assert.deepEqual((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.subticketIds, [
+    created.frontMatter.id,
+    loose.frontMatter.id
+  ]);
+});
+
+test("codex preflight blocks feature planning tickets", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Planning feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Planning feature\n"
+  });
+  const preflight = await preflightCodexRun({ projectPath, ticketId: feature.frontMatter.id });
+  assert.equal(preflight.ok, false);
+  assert.ok(preflight.errors.some((error) => /Features are planning containers/.test(error)));
 });
 
 test("legacy tickets without epic metadata load as task tickets", async () => {
@@ -1322,7 +1722,7 @@ test("ticket blocker metadata persists and rejects direct self blockers", async 
     labels: [],
     markdown: "# Blocker ticket\n"
   });
-  const blocked = await createTicket(projectPath, {
+  const blocked = await createImplementationTicket(projectPath, {
     title: "Blocked ticket",
     priority: "medium",
     labels: [],
@@ -1368,7 +1768,7 @@ test("codex preflight blocks active blockers and allows terminal blockers", asyn
     labels: [],
     markdown: "# Finish first\n"
   });
-  const blocked = await createTicket(projectPath, {
+  const blocked = await createImplementationTicket(projectPath, {
     title: "Wait for blocker",
     priority: "medium",
     labels: [],
@@ -1390,7 +1790,7 @@ test("codex preflight blocks active blockers and allows terminal blockers", asyn
 test("missing blocker references warn without crashing board or preflight", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Stale blocker",
     priority: "medium",
     labels: [],
@@ -1408,7 +1808,7 @@ test("missing blocker references warn without crashing board or preflight", asyn
 
 test("project summaries include ordered swimlane counts and active runs including empty lanes", async () => {
   const projectPath = await createProject();
-  const firstTicket = await createTicket(projectPath, {
+  const firstTicket = await createImplementationTicket(projectPath, {
     title: "Todo ticket",
     priority: "medium",
     labels: [],
@@ -1451,13 +1851,69 @@ test("project summaries include ordered swimlane counts and active runs includin
   );
 });
 
+test("project summaries only count running agent work as active sidebar runs", async () => {
+  const projectPath = await createProject();
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Queued ticket",
+    priority: "medium",
+    labels: [],
+    markdown: "# Queued ticket\n"
+  });
+
+  await moveTicket({ projectPath, ticketId: ticket.frontMatter.id, targetStatus: "ready" });
+  const queuedTicket = await readTicket(projectPath, ticket.frontMatter.id);
+  await writeTicket(projectPath, {
+    ...queuedTicket,
+    frontMatter: {
+      ...queuedTicket.frontMatter,
+      runStatus: "queued",
+      lastRunId: "run_queued_sidebar"
+    }
+  });
+
+  let summary = await summarizeProject(projectPath);
+  assert.equal(summary.activeRunCount, 0);
+  assert.deepEqual(
+    summary.swimlanes.map((swimlane) => [swimlane.id, swimlane.activeRunCount]),
+    [
+      ["todo", 0],
+      ["ready", 0],
+      ["in_progress", 0],
+      ["needs_clarification", 0],
+      ["review", 0],
+      ["not_doing", 0],
+      ["completed", 0]
+    ]
+  );
+
+  const failedTicket = await createImplementationTicket(projectPath, {
+    title: "Failed ticket",
+    priority: "medium",
+    labels: [],
+    markdown: "# Failed ticket\n"
+  });
+  await moveTicket({ projectPath, ticketId: failedTicket.frontMatter.id, targetStatus: "in_progress" });
+  const failedRecord = await readTicket(projectPath, failedTicket.frontMatter.id);
+  await writeTicket(projectPath, {
+    ...failedRecord,
+    frontMatter: {
+      ...failedRecord.frontMatter,
+      runStatus: "failed"
+    }
+  });
+
+  summary = await summarizeProject(projectPath);
+  assert.equal(summary.activeRunCount, 0);
+  assert.equal(summary.swimlanes.find((swimlane) => swimlane.id === "in_progress")?.activeRunCount, 0);
+});
+
 test("new projects include Ready between Todo and In Progress", async () => {
   const projectPath = await createProject();
   const config = await readProjectConfig(projectPath);
 
   assert.deepEqual(
     config.columns.map((column) => column.id),
-    ["todo", "ready", "in_progress", "needs_clarification", "review", "not_doing", "completed"]
+    ["todo", "ready", "in_progress", "needs_clarification", "review", "not_doing", "completed", "archive"]
   );
   assert.equal(config.settings.defaultModelReasoningEffort, null);
   assert.equal(config.settings.defaultTicketEffort, "medium");
@@ -1546,7 +2002,7 @@ test("legacy project configs are normalized with ready and review lanes without 
   const normalized = await readProjectConfig(projectPath);
   assert.deepEqual(
     normalized.columns.map((column) => column.id),
-    ["todo", "ready", "in_progress", "needs_clarification", "review", "not_doing", "completed"]
+    ["todo", "ready", "in_progress", "needs_clarification", "review", "not_doing", "completed", "archive"]
   );
   assert.equal(normalized.settings.defaultModelReasoningEffort, null);
   assert.equal(normalized.settings.defaultTicketEffort, "medium");
@@ -1563,13 +2019,13 @@ test("legacy project configs are normalized with ready and review lanes without 
 test("ticket reads stay scoped to the requested project after switching projects", async () => {
   const firstProject = await createProject();
   const secondProject = await createProject();
-  const firstTicket = await createTicket(firstProject, {
+  const firstTicket = await createImplementationTicket(firstProject, {
     title: "First project ticket",
     priority: "medium",
     labels: [],
     markdown: "# First project ticket\n"
   });
-  const secondTicket = await createTicket(secondProject, {
+  const secondTicket = await createImplementationTicket(secondProject, {
     title: "Second project ticket",
     priority: "medium",
     labels: [],
@@ -1649,13 +2105,13 @@ test("codex runs preserve the selected project context after a cross-project swi
   const firstProject = await createProject();
   const secondProject = await createProject();
   await allowNonGitRuns(secondProject);
-  const firstTicket = await createTicket(firstProject, {
+  const firstTicket = await createImplementationTicket(firstProject, {
     title: "Stale first project ticket",
     priority: "medium",
     labels: [],
     markdown: "# Stale first project ticket\n\nThis content must not be used.\n"
   });
-  const secondTicket = await createTicket(secondProject, {
+  const secondTicket = await createImplementationTicket(secondProject, {
     title: "Active second project ticket",
     priority: "medium",
     labels: [],
@@ -1716,7 +2172,7 @@ test("codex implementation runs pass local Markdown images as structured SDK inp
   await allowNonGitRuns(projectPath);
   await writeFile(path.join(projectPath, ".relay", "attachments", "ui.png"), "png");
   await writeFile(path.join(projectPath, "diagram.jpg"), "jpg");
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Local image ticket",
     priority: "medium",
     labels: [],
@@ -1764,7 +2220,7 @@ test("codex implementation runs pass local Markdown images as structured SDK inp
 test("codex implementation runs ignore unsafe or remote Markdown image references", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Ignored image ticket",
     priority: "medium",
     labels: [],
@@ -1806,7 +2262,7 @@ test("codex implementation runs ignore unsafe or remote Markdown image reference
 test("codex implementation runs keep string input when no local images are found", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Plain text ticket",
     priority: "medium",
     labels: [],
@@ -1862,7 +2318,7 @@ test("codex implementation runs pass configured SDK thread options", async () =>
       codexAdditionalDirectories: [additionalDirectory]
     }
   });
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Configured SDK options",
     priority: "medium",
     effort: "low",
@@ -1914,7 +2370,7 @@ test("codex implementation runs pass configured SDK thread options", async () =>
 test("successful codex runs move to review before human acceptance", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Review gate",
     priority: "medium",
     labels: ["codex"],
@@ -1953,10 +2409,332 @@ test("successful codex runs move to review before human acceptance", async () =>
   assert.equal((await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.status, "completed");
 });
 
+test("out-of-scope file changes expand planned scope dynamically when paths are unlocked", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Dynamic scope expansion",
+    priority: "medium",
+    labels: ["codex"],
+    markdown: "# Dynamic scope expansion\n",
+    plannedFiles: ["allowed.txt"]
+  });
+  const { runEventSink } = createFakeRunEventSink();
+  const dependencies: CodexRunDependencies = {
+    runEventSink,
+    createRunId: () => "run_dynamic_scope",
+    createCodexClient: () =>
+      ({
+        startThread: () => ({
+          id: "thread_dynamic_scope",
+          runStreamed: async () => ({
+            events: (async function*() {
+              yield { type: "thread.started", thread_id: "thread_dynamic_scope" };
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "file_change",
+                  changes: [
+                    { path: "allowed.txt", kind: "update" },
+                    { path: "extra.txt", kind: "create" }
+                  ]
+                }
+              };
+              yield { type: "item.completed", item: { type: "agent_message", text: "Scoped work complete." } };
+              yield { type: "turn.completed", usage: { total_tokens: 1 } };
+            })()
+          })
+        }),
+        resumeThread: () => {
+          throw new Error("resumeThread should not be used for a fresh run.");
+        }
+      }) as CodexRunDependencies["createCodexClient"] extends () => infer Client ? Client : never
+  };
+
+  await startCodexRun({ projectPath, ticketId: ticket.frontMatter.id }, dependencies);
+  await waitForAsync(
+    async () => (await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.runStatus === "completed",
+    "dynamic scope run completion"
+  );
+  const completed = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.deepEqual(completed.frontMatter.plannedFiles.sort(), ["allowed.txt", "extra.txt"].sort());
+  assert.equal((await readClarificationQuestions(projectPath, ticket.frontMatter.id)).length, 0);
+});
+
+test("answered scope-violation clarifications require manual approve-and-redraft before a blocked task becomes ready", async () => {
+  const projectPath = await createProject();
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Scope recovery",
+    priority: "medium",
+    labels: ["codex"],
+    markdown: "# Scope recovery\n\nOriginal plan.\n",
+    plannedFiles: ["src/http/resources/tickets.ts"]
+  });
+  await writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      status: "needs_clarification",
+      runStatus: "blocked",
+      authoringState: "needs_input",
+      lastRunId: "run_scope_recovery_blocked"
+    }
+  });
+
+  const approvedPath = path.join(projectPath, "src/shared/plannedScope.ts");
+  const [scopeClarification] = await createClarificationQuestions(
+    projectPath,
+    ticket.frontMatter.id,
+    [
+      {
+        question: `Codex attempted to modify file paths outside this ticket's planned scope, so Relay reverted the run.
+
+Please confirm whether implementation should expand the planned file scope to include:
+- ${approvedPath}
+
+Current planned scope:
+- src/http/resources/tickets.ts`
+      }
+    ],
+    {
+      actor: "codex",
+      source: "agent_execution",
+      runId: "run_scope_recovery_blocked",
+      codexThreadId: "thread_scope_recovery_blocked"
+    }
+  );
+  await answerClarificationQuestion(projectPath, ticket.frontMatter.id, scopeClarification.id, "confirmed");
+
+  assert.equal(await maybeFinalizeImplementationScopeAfterClarification(projectPath, ticket.frontMatter.id), null);
+  const stillBlocked = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(stillBlocked.frontMatter.status, "needs_clarification");
+  assert.equal(stillBlocked.frontMatter.runStatus, "blocked");
+
+  let reconcileCalls = 0;
+  let capturedPrompt = "";
+  const { runEventSink, events } = createFakeRunEventSink();
+  await approveScopeClarificationRedraft(
+    {
+      projectPath,
+      ticketId: ticket.frontMatter.id,
+      clarificationQuestionId: scopeClarification.id
+    },
+    {
+      runEventSink,
+      createRunId: () => "run_scope_recovery_redraft",
+      reconcileTicketQueueState: async () => {
+        reconcileCalls += 1;
+        return readTicket(projectPath, ticket.frontMatter.id);
+      },
+      createCodexClient: () =>
+        ({
+          startThread: () => ({
+            id: "thread_scope_recovery_redraft",
+            runStreamed: async (prompt: string) => {
+              capturedPrompt = prompt;
+              return {
+                events: (async function*() {
+                  yield { type: "thread.started", thread_id: "thread_scope_recovery_redraft" };
+                  yield {
+                    type: "item.completed",
+                    item: {
+                      type: "agent_message",
+                      text: JSON.stringify({
+                        title: "Scope recovery",
+                        priority: "high",
+                        labels: ["codex", "scope"],
+                        authoringState: "ready",
+                        plannedFiles: ["src/http/resources/tickets.ts", "src/shared/plannedScope.ts"],
+                        patch: {
+                          summary: "Expanded the task scope.",
+                          appendMarkdown: "## Implementation Plan\n\n- [ ] Update scope-aware redraft flow.\n",
+                          fullMarkdown: null
+                        },
+                        clarificationQuestions: []
+                      })
+                    }
+                  };
+                  yield { type: "turn.completed", usage: { total_tokens: 1 } };
+                })()
+              };
+            }
+          })
+        }) as never
+    }
+  );
+  await waitForAsync(
+    async () => events.some((event) => event.runId === "run_scope_recovery_redraft" && event.type === "run.completed"),
+    "scope recovery redraft completion"
+  );
+
+  const updated = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(updated.frontMatter.id, ticket.frontMatter.id);
+  assert.equal(updated.frontMatter.status, "ready");
+  assert.equal(updated.frontMatter.runStatus, "idle");
+  assert.equal(updated.frontMatter.authoringState, "ready");
+  assert.deepEqual(updated.frontMatter.plannedFiles, ["src/http/resources/tickets.ts", "src/shared/plannedScope.ts"]);
+  assert.equal(reconcileCalls, 1);
+  assert.match(capturedPrompt, /Approved extra paths:/);
+  assert.match(capturedPrompt, /src\/shared\/plannedScope\.ts/);
+  assert.match(capturedPrompt, /Current planned scope:/);
+});
+
+test("absolute repo paths already in planned scope do not trigger scope violations", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Absolute scoped path",
+    priority: "medium",
+    labels: ["codex"],
+    markdown: "# Absolute scoped path\n",
+    plannedFiles: ["src/shared/plannedScope.ts"]
+  });
+  const absolutePath = path.join(projectPath, "src/shared/plannedScope.ts");
+  const { runEventSink } = createFakeRunEventSink();
+  const dependencies: CodexRunDependencies = {
+    runEventSink,
+    createRunId: () => "run_absolute_scope",
+    createCodexClient: () =>
+      ({
+        startThread: () => ({
+          id: "thread_absolute_scope",
+          runStreamed: async () => ({
+            events: (async function*() {
+              yield { type: "thread.started", thread_id: "thread_absolute_scope" };
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "file_change",
+                  changes: [{ path: absolutePath, kind: "update" }]
+                }
+              };
+              yield { type: "item.completed", item: { type: "agent_message", text: "Done." } };
+              yield { type: "turn.completed", usage: { total_tokens: 1 } };
+            })()
+          })
+        }),
+        resumeThread: () => {
+          throw new Error("resumeThread should not be used for a fresh run.");
+        }
+      }) as CodexRunDependencies["createCodexClient"] extends () => infer Client ? Client : never
+  };
+
+  await startCodexRun({ projectPath, ticketId: ticket.frontMatter.id }, dependencies);
+  await waitForAsync(async () => (await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.runStatus === "completed", "absolute scoped run completion");
+  const clarifications = await readClarificationQuestions(projectPath, ticket.frontMatter.id);
+  assert.equal(clarifications.length, 0);
+});
+
+test("path locks block another ticket until the holder releases them", async () => {
+  const projectPath = await createProject();
+  const ticketA = await createImplementationTicket(projectPath, {
+    title: "Path lock holder",
+    priority: "medium",
+    labels: [],
+    markdown: "# Path lock holder\n",
+    plannedFiles: ["src/shared.ts"]
+  });
+  const ticketB = await createImplementationTicket(projectPath, {
+    title: "Path lock waiter",
+    priority: "medium",
+    labels: [],
+    markdown: "# Path lock waiter\n",
+    plannedFiles: ["src/shared.ts"]
+  });
+  const { pathLockConflictsFor, releasePathLocksForRun, tryAcquirePathLocks } = await import("../src/services/path-lock");
+  const acquired = await tryAcquirePathLocks(projectPath, ticketA.frontMatter.id, "run_lock_a", ["src/shared.ts"]);
+  assert.equal(acquired.ok, true);
+  const conflicts = await pathLockConflictsFor(projectPath, ticketB.frontMatter.id, ["src/shared.ts"]);
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0]?.holderTicketId, ticketA.frontMatter.id);
+  await releasePathLocksForRun(projectPath, ticketA.frontMatter.id, "run_lock_a");
+  assert.equal((await pathLockConflictsFor(projectPath, ticketB.frontMatter.id, ["src/shared.ts"])).length, 0);
+});
+
+test("codex preflight rejects tickets whose planned files are locked by another task", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticketA = await createImplementationTicket(projectPath, {
+    title: "Preflight lock holder",
+    priority: "medium",
+    labels: [],
+    markdown: "# Preflight lock holder\n",
+    plannedFiles: ["src/preflight-lock.ts"]
+  });
+  const ticketB = await createImplementationTicket(projectPath, {
+    title: "Preflight lock blocked",
+    priority: "medium",
+    labels: [],
+    markdown: "# Preflight lock blocked\n",
+    plannedFiles: ["src/preflight-lock.ts"]
+  });
+  const { tryAcquirePathLocks, releasePathLocksForRun } = await import("../src/services/path-lock");
+  await tryAcquirePathLocks(projectPath, ticketA.frontMatter.id, "run_preflight_lock", ["src/preflight-lock.ts"]);
+  const preflight = await preflightCodexRun({ projectPath, ticketId: ticketB.frontMatter.id });
+  assert.equal(preflight.ok, false);
+  assert.match(preflight.errors.join(" "), /locked by task/i);
+  assert.match(preflight.errors.join(" "), new RegExp(ticketA.frontMatter.id));
+  await releasePathLocksForRun(projectPath, ticketA.frontMatter.id, "run_preflight_lock");
+});
+
+test("in-scope file changes complete without creating scope clarifications", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Scoped success",
+    priority: "medium",
+    labels: ["codex"],
+    markdown: "# Scoped success\n",
+    plannedFiles: ["src/scoped-success.ts"]
+  });
+  let capturedPrompt = "";
+  const { runEventSink, events } = createFakeRunEventSink();
+  const dependencies: CodexRunDependencies = {
+    runEventSink,
+    createRunId: () => "run_scope_success",
+    createCodexClient: () =>
+      ({
+        startThread: () => ({
+          id: "thread_scope_success",
+          runStreamed: async (prompt: string) => {
+            capturedPrompt = prompt;
+            return {
+              events: (async function*() {
+                yield { type: "thread.started", thread_id: "thread_scope_success" };
+                yield {
+                  type: "item.completed",
+                  item: {
+                    type: "file_change",
+                    changes: [{ path: "src/scoped-success.ts", kind: "update" }]
+                  }
+                };
+                yield { type: "item.completed", item: { type: "agent_message", text: "Scoped work complete." } };
+                yield { type: "turn.completed", usage: { total_tokens: 1 } };
+              })()
+            };
+          }
+        }),
+        resumeThread: () => {
+          throw new Error("resumeThread should not be used for a fresh run.");
+        }
+      }) as CodexRunDependencies["createCodexClient"] extends () => infer Client ? Client : never
+  };
+
+  await startCodexRun({ projectPath, ticketId: ticket.frontMatter.id }, dependencies);
+  await waitFor(() => events.some((event) => event.runId === "run_scope_success" && event.type === "run.completed"), "in-scope completion");
+
+  const completed = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(completed.frontMatter.runStatus, "completed");
+  assert.equal(completed.frontMatter.status, "review");
+  assert.match(capturedPrompt, /Planned file scope for this run:/);
+  assert.match(capturedPrompt, /src\/scoped-success\.ts/);
+  assert.equal((await readClarificationQuestions(projectPath, ticket.frontMatter.id)).length, 0);
+});
+
 test("codex runs persist structured todo and MCP tool-call SDK events", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Structured SDK events",
     priority: "medium",
     labels: ["codex"],
@@ -2096,13 +2874,13 @@ test("codex scheduler runs Ready queue one implementation at a time in board ord
       agentConcurrency: 2
     }
   });
-  const firstTicket = await createTicket(projectPath, {
+  const firstTicket = await createImplementationTicket(projectPath, {
     title: "First queued run",
     priority: "medium",
     labels: ["codex"],
     markdown: "# First queued run\n"
   });
-  const secondTicket = await createTicket(projectPath, {
+  const secondTicket = await createImplementationTicket(projectPath, {
     title: "Second queued run",
     priority: "medium",
     labels: ["codex"],
@@ -2181,13 +2959,13 @@ test("codex scheduler runs Ready queue one implementation at a time in board ord
 test("active ticket drafts do not occupy the Ready implementation worker lane", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const firstTicket = await createTicket(projectPath, {
+  const firstTicket = await createImplementationTicket(projectPath, {
     title: "First implementation while drafting",
     priority: "medium",
     labels: ["codex"],
     markdown: "# First implementation while drafting\n"
   });
-  const secondTicket = await createTicket(projectPath, {
+  const secondTicket = await createImplementationTicket(projectPath, {
     title: "Second implementation while drafting",
     priority: "medium",
     labels: ["codex"],
@@ -2285,13 +3063,13 @@ test("active ticket drafts do not occupy the Ready implementation worker lane", 
 test("queued codex cancellation returns the ticket to Todo without SDK startup", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const firstTicket = await createTicket(projectPath, {
+  const firstTicket = await createImplementationTicket(projectPath, {
     title: "Occupy scheduler",
     priority: "medium",
     labels: ["codex"],
     markdown: "# Occupy scheduler\n"
   });
-  const secondTicket = await createTicket(projectPath, {
+  const secondTicket = await createImplementationTicket(projectPath, {
     title: "Cancel while queued",
     priority: "medium",
     labels: ["codex"],
@@ -2345,13 +3123,13 @@ test("queued codex cancellation returns the ticket to Todo without SDK startup",
 test("manual Ready moves enqueue idle tickets and moving out clears queued state", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const activeTicket = await createTicket(projectPath, {
+  const activeTicket = await createImplementationTicket(projectPath, {
     title: "Active manual queue blocker",
     priority: "medium",
     labels: ["codex"],
     markdown: "# Active manual queue blocker\n"
   });
-  const queuedTicket = await createTicket(projectPath, {
+  const queuedTicket = await createImplementationTicket(projectPath, {
     title: "Manual queued ticket",
     priority: "medium",
     labels: ["codex"],
@@ -2407,7 +3185,7 @@ test("manual Ready moves enqueue idle tickets and moving out clears queued state
 
 test("codex runs reject non-git projects until explicitly allowed", async () => {
   const projectPath = await createProject();
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Non git run",
     priority: "medium",
     labels: [],
@@ -2438,7 +3216,7 @@ test("codex run preflight blocks invalid workflow states", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
 
-  const completedTicket = await createTicket(projectPath, {
+  const completedTicket = await createImplementationTicket(projectPath, {
     title: "Accepted work",
     priority: "medium",
     labels: [],
@@ -2449,7 +3227,7 @@ test("codex run preflight blocks invalid workflow states", async () => {
   assert.equal(completedPreflight.ok, false);
   assert.match(completedPreflight.errors.join(" "), /Completed tickets are human accepted/);
 
-  const notDoingTicket = await createTicket(projectPath, {
+  const notDoingTicket = await createImplementationTicket(projectPath, {
     title: "Rejected work",
     priority: "medium",
     labels: [],
@@ -2471,7 +3249,40 @@ test("codex run preflight blocks invalid workflow states", async () => {
   assert.equal(epicPreflight.ok, false);
   assert.match(epicPreflight.errors.join(" "), /Epics are planning containers/);
 
-  const clarificationTicket = await createTicket(projectPath, {
+  const feature = await createTicket(projectPath, {
+    title: "Planning feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Planning feature\n",
+    ticketType: "feature"
+  });
+  const featurePreflight = await preflightCodexRun({ projectPath, ticketId: feature.frontMatter.id });
+  assert.equal(featurePreflight.ok, false);
+  assert.match(featurePreflight.errors.join(" "), /Features are planning containers/);
+
+  const missingScopeTask = await createTicket(projectPath, {
+    title: "Missing scope task",
+    priority: "low",
+    labels: [],
+    markdown: "# Missing scope task\n",
+    parentFeatureId: null
+  });
+  const missingScopePreflight = await preflightCodexRun({ projectPath, ticketId: missingScopeTask.frontMatter.id });
+  assert.equal(missingScopePreflight.ok, false);
+  assert.match(missingScopePreflight.errors.join(" "), /planned file scope/);
+
+  const standaloneTask = await createImplementationTicket(projectPath, {
+    title: "Micro change",
+    priority: "low",
+    labels: [],
+    markdown: "# Micro change\n",
+    parentFeatureId: null
+  });
+  const standalonePreflight = await preflightCodexRun({ projectPath, ticketId: standaloneTask.frontMatter.id });
+  assert.equal(standalonePreflight.ok, true);
+  assert.equal(standalonePreflight.warnings.join(" "), "");
+
+  const clarificationTicket = await createImplementationTicket(projectPath, {
     title: "Open question",
     priority: "medium",
     labels: [],
@@ -2488,7 +3299,7 @@ test("codex run preflight blocks invalid workflow states", async () => {
   assert.equal(clarificationPreflight.unansweredClarificationCount, 1);
   assert.match(clarificationPreflight.errors.join(" "), /clarification question/);
 
-  const staleRunningTicket = await createTicket(projectPath, {
+  const staleRunningTicket = await createImplementationTicket(projectPath, {
     title: "Stale running state",
     priority: "medium",
     labels: [],
@@ -2505,7 +3316,7 @@ test("codex run preflight blocks invalid workflow states", async () => {
   assert.equal(staleRunningPreflight.ok, false);
   assert.match(staleRunningPreflight.errors.join(" "), /already marked as running/);
 
-  const queuedTicket = await createTicket(projectPath, {
+  const queuedTicket = await createImplementationTicket(projectPath, {
     title: "Already queued",
     priority: "medium",
     labels: [],
@@ -2527,7 +3338,7 @@ test("codex run preflight blocks invalid workflow states", async () => {
 test("codex run failures preserve failed run status and renderer-facing events", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Failing run",
     priority: "high",
     labels: ["codex"],
@@ -2568,7 +3379,7 @@ test("codex run failures preserve failed run status and renderer-facing events",
 test("codex run startup failures finalize active run state", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Startup failure",
     priority: "high",
     labels: ["codex"],
@@ -2608,7 +3419,7 @@ test("codex run startup failures finalize active run state", async () => {
 test("codex run cancellation aborts the stream and cleans up the active run", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Cancellation cleanup",
     priority: "medium",
     labels: ["codex"],
@@ -2664,27 +3475,396 @@ test("codex run cancellation aborts the stream and cleans up the active run", as
 
   assert.equal(capturedSignal?.aborted, true);
   await waitFor(() => events.some((event) => event.type === "run.failed"), "run cancellation finalizer");
-  assert.equal((await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.runStatus, "cancelled");
-
-  const cancelled = await readTicket(projectPath, ticket.frontMatter.id);
-  await writeTicket(projectPath, {
-    ...cancelled,
-    frontMatter: {
-      ...cancelled.frontMatter,
-      runStatus: "failed"
-    }
-  });
-  await cancelCodexRun("run_cancel_cleanup");
-  assert.equal((await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.runStatus, "failed");
+  const afterCancel = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(afterCancel.frontMatter.runStatus, "paused");
+  assert.equal(afterCancel.frontMatter.status, "in_progress");
+  assert.equal(afterCancel.frontMatter.codexThreadId, "thread_cancel_cleanup");
+  assert.equal(afterCancel.frontMatter.lastRunId, "run_cancel_cleanup");
 
   const persistedEvents = await readCodexRunEvents(projectPath, ticket.frontMatter.id, "run_cancel_cleanup");
-  assert.equal(persistedEvents.some((event) => event.type === "run.failed" && /aborted/i.test(event.message)), true);
+  assert.equal(persistedEvents.some((event) => event.type === "run.failed" && event.finalStatus === "paused" && /aborted/i.test(event.message)), true);
+});
+
+test("paused implementation runs can be continued on the same Codex thread", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Paused implementation resume",
+    priority: "medium",
+    labels: ["codex"],
+    markdown: "# Paused implementation resume\n"
+  });
+  const firstGate = deferred();
+  const resumeGate = deferred();
+  let resumeThreadId: string | null = null;
+  const runIds = ["run_pause_initial", "run_pause_resume"];
+  const { runEventSink, events } = createFakeRunEventSink();
+  const dependencies: CodexRunDependencies = {
+    runEventSink,
+    createRunId: () => runIds.shift() ?? "run_pause_extra",
+    createCodexClient: () =>
+      ({
+        startThread: () => ({
+          id: "thread_pause_resume",
+          runStreamed: async (_prompt: string, options?: { signal?: AbortSignal }) => ({
+            events: (async function*() {
+              yield { type: "thread.started", thread_id: "thread_pause_resume" };
+              await new Promise<void>((_resolve, reject) => {
+                if (options?.signal?.aborted) {
+                  reject(new Error("The operation was aborted."));
+                  return;
+                }
+                options?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted.")), { once: true });
+              });
+              await firstGate.promise;
+            })()
+          })
+        }),
+        resumeThread: (threadId: string) => {
+          resumeThreadId = threadId;
+          return {
+            id: threadId,
+            runStreamed: async () => ({
+              events: (async function*() {
+                yield { type: "thread.started", thread_id: threadId };
+                await resumeGate.promise;
+                yield { type: "item.completed", item: { type: "agent_message", text: "Resumed work done." } };
+                yield { type: "turn.completed", usage: { total_tokens: 1 } };
+              })()
+            })
+          };
+        }
+      }) as CodexRunDependencies["createCodexClient"] extends () => infer Client ? Client : never
+  };
+
+  await startCodexRun({ projectPath, ticketId: ticket.frontMatter.id }, dependencies);
+  await waitFor(() => events.some((event) => event.runId === "run_pause_initial" && event.type === "run.started"), "initial run started");
+  const pausedResult = await cancelCodexRun({ projectPath, ticketId: ticket.frontMatter.id, runId: "run_pause_initial" });
+  assert.equal(pausedResult.outcome, "paused");
+  await waitForAsync(async () => (await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.runStatus === "paused", "ticket paused");
+
+  const genericPreflight = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id });
+  assert.equal(genericPreflight.ok, false);
+  assert.match(genericPreflight.errors.join(" "), /paused or failed implementation work/);
+
+  const resumePreflight = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id, resume: true });
+  assert.equal(resumePreflight.ok, true);
+
+  const resumed = await resumeCodexRun({ projectPath, ticketId: ticket.frontMatter.id }, dependencies);
+  assert.equal(resumed.state, "queued");
+  const queuedTicket = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(queuedTicket.frontMatter.status, "in_progress");
+  assert.equal(queuedTicket.frontMatter.runStatus, "queued");
+  assert.equal(queuedTicket.frontMatter.lastRunId, "run_pause_resume");
+
+  await waitForAsync(async () => (await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.runStatus === "running", "resumed run running");
+  assert.equal(resumeThreadId, "thread_pause_resume");
+  resumeGate.resolve();
+  await waitFor(() => events.some((event) => event.runId === "run_pause_resume" && event.type === "run.completed"), "resumed run completion");
+});
+
+test("codex preflight allows resume for failed in-progress implementation tickets", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Failed retry",
+    priority: "medium",
+    labels: [],
+    markdown: "# Failed retry\n"
+  });
+  await moveTicket({ projectPath, ticketId: ticket.frontMatter.id, targetStatus: "in_progress" });
+  const loaded = await readTicket(projectPath, ticket.frontMatter.id);
+  await writeTicket(projectPath, {
+    ...loaded,
+    frontMatter: {
+      ...loaded.frontMatter,
+      runStatus: "failed",
+      codexThreadId: "thread_failed_resume",
+      lastRunId: "run_failed_resume"
+    }
+  });
+
+  const blocked = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id, resume: false });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.errors.join(" "), /paused or failed implementation work/);
+
+  const resume = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id, resume: true });
+  assert.equal(resume.ok, true);
+});
+
+test("failed implementation retry restores plannedFiles from the previous run log", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Failed retry scope",
+    priority: "medium",
+    labels: [],
+    markdown: "# Failed retry scope\n",
+    plannedFiles: []
+  });
+  await moveTicket({ projectPath, ticketId: ticket.frontMatter.id, targetStatus: "in_progress" });
+  const runId = "run_failed_scope_restore";
+  const loaded = await readTicket(projectPath, ticket.frontMatter.id);
+  await writeTicket(projectPath, {
+    ...loaded,
+    frontMatter: {
+      ...loaded.frontMatter,
+      runStatus: "failed",
+      codexThreadId: "thread_failed_scope_restore",
+      lastRunId: runId,
+      plannedFiles: []
+    }
+  });
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_failed_scope_restore", {
+    type: "file.change",
+    path: "src/renderer/src/App.tsx",
+    kind: "update",
+    timestamp: "2026-05-12T10:00:00.000Z"
+  });
+
+  const resume = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id, resume: true });
+  assert.equal(resume.ok, true);
+  assert.match(resume.warnings.join(" "), /Restored planned file scope/);
+
+  const updated = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.deepEqual(updated.frontMatter.plannedFiles, ["src/renderer/src/App.tsx"]);
+});
+
+test("failed implementation retry without planned scope routes to Needs Clarification", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Failed retry missing scope",
+    priority: "medium",
+    labels: [],
+    markdown: "# Failed retry missing scope\n",
+    plannedFiles: []
+  });
+  await moveTicket({ projectPath, ticketId: ticket.frontMatter.id, targetStatus: "in_progress" });
+  const loaded = await readTicket(projectPath, ticket.frontMatter.id);
+  await writeTicket(projectPath, {
+    ...loaded,
+    frontMatter: {
+      ...loaded.frontMatter,
+      runStatus: "failed",
+      codexThreadId: "thread_failed_missing_scope",
+      lastRunId: "run_failed_missing_scope",
+      plannedFiles: []
+    }
+  });
+
+  const resume = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id, resume: true });
+  assert.equal(resume.ok, false);
+  assert.match(resume.errors.join(" "), /Needs Clarification/);
+  assert.match(resume.errors.join(" "), /clarification question/);
+  assert.equal(resume.unansweredClarificationCount, 1);
+
+  const blocked = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(blocked.frontMatter.status, "needs_clarification");
+  assert.equal(blocked.frontMatter.runStatus, "blocked");
+  assert.equal(blocked.frontMatter.authoringState, "needs_input");
+
+  const clarifications = await readClarificationQuestions(projectPath, ticket.frontMatter.id);
+  assert.equal(clarifications.length, 1);
+  assert.match(clarifications[0].question, /missing planned file scope/);
+
+  const scopeDraft = {
+    title: "Failed retry missing scope",
+    summary: "Redrafted scope",
+    priority: "medium" as const,
+    labels: [] as string[],
+    context: "Context",
+    researchFindings: [] as string[],
+    requirements: ["Requirement"],
+    implementationPlan: ["Step"],
+    testPlan: ["Test"],
+    acceptanceCriteria: ["Done"],
+    clarificationQuestions: [] as string[],
+    assumptions: [] as string[],
+    implementationNotes: [] as string[],
+    plannedFiles: ["src/services/codex/index.ts", "src/renderer/src/App.tsx"],
+    draftState: "ready" as const,
+    blockingClarificationQuestions: [] as string[],
+    ticketType: "task" as const,
+    subtickets: [],
+    featureStubs: [],
+    leanTasks: [],
+    research: {
+      generatedAt: "",
+      checkedUrls: [],
+      inspectedFiles: [],
+      limitations: [],
+      limits: { maxResearchMs: 0, maxUrls: 0, maxFiles: 0 }
+    }
+  };
+
+  const redrafted = await applyImplementationScopeRedraftToTicket(
+    projectPath,
+    ticket.frontMatter.id,
+    scopeDraft,
+    "run_failed_missing_scope"
+  );
+  assert.equal(redrafted.frontMatter.status, "needs_clarification");
+  assert.equal(redrafted.frontMatter.runStatus, "idle");
+  assert.equal(redrafted.frontMatter.authoringState, "needs_input");
+  assert.deepEqual(
+    [...redrafted.frontMatter.plannedFiles].sort(),
+    ["src/renderer/src/App.tsx", "src/services/codex/index.ts"].sort()
+  );
+
+  await answerClarificationQuestion(
+    projectPath,
+    ticket.frontMatter.id,
+    clarifications[0].id,
+    "Redraft and rescope files"
+  );
+  const finalized = await maybeFinalizeImplementationScopeAfterClarification(projectPath, ticket.frontMatter.id);
+  assert.ok(finalized);
+  assert.equal(finalized.frontMatter.status, "ready");
+  assert.equal(finalized.frontMatter.authoringState, "ready");
+  assert.equal(finalized.frontMatter.runStatus, "queued");
+  assert.ok(finalized.frontMatter.lastRunId);
+  assert.equal(finalized.frontMatter.codexThreadId, null);
+
+  const retryReady = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id, resume: true });
+  assert.equal(retryReady.ok, false);
+  assert.match(retryReady.errors.join(" "), /Only paused or failed in-progress implementation tickets/);
+});
+
+test("reconcileSchedulableReadyTickets queues idle ready tasks for the worker", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Idle ready poll pickup",
+    priority: "medium",
+    labels: [],
+    markdown: "# Idle ready poll pickup\n",
+    plannedFiles: ["src/renderer/src/App.tsx"]
+  });
+  await moveTicket({ projectPath, ticketId: ticket.frontMatter.id, targetStatus: "ready" });
+  const idleReady = await readTicket(projectPath, ticket.frontMatter.id);
+  await writeTicket(projectPath, {
+    ...idleReady,
+    frontMatter: {
+      ...idleReady.frontMatter,
+      runStatus: "idle",
+      lastRunId: null,
+      codexThreadId: null,
+      authoringState: "ready"
+    }
+  });
+
+  await reconcileSchedulableReadyTickets(projectPath);
+  const queued = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(queued.frontMatter.status, "ready");
+  assert.equal(queued.frontMatter.runStatus, "queued");
+  assert.ok(queued.frontMatter.lastRunId);
+});
+
+test("failed implementation retry without planned scope moves ticket even when clarification already exists", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Failed retry stale clarification",
+    priority: "medium",
+    labels: [],
+    markdown: "# Failed retry stale clarification\n",
+    plannedFiles: []
+  });
+  await moveTicket({ projectPath, ticketId: ticket.frontMatter.id, targetStatus: "in_progress" });
+  const loaded = await readTicket(projectPath, ticket.frontMatter.id);
+  await writeTicket(projectPath, {
+    ...loaded,
+    frontMatter: {
+      ...loaded.frontMatter,
+      runStatus: "failed",
+      codexThreadId: "thread_failed_stale_clarification",
+      lastRunId: "run_failed_stale_clarification",
+      plannedFiles: []
+    }
+  });
+  await createClarificationQuestions(
+    projectPath,
+    ticket.frontMatter.id,
+    [{ question: "Relay: missing planned file scope\n\nList file paths." }],
+    {
+      actor: "codex",
+      source: "agent_execution",
+      runId: "run_failed_stale_clarification",
+      codexThreadId: "thread_failed_stale_clarification"
+    }
+  );
+
+  const resume = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id, resume: true });
+  assert.equal(resume.ok, false);
+  const blocked = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(blocked.frontMatter.status, "needs_clarification");
+  assert.equal(blocked.frontMatter.runStatus, "blocked");
+});
+
+test("discarding paused implementation work clears continuation state and returns to Todo", async () => {
+  const projectPath = await createProject();
+  await runGit(projectPath, "-c", "core.hooksPath=/dev/null", "init");
+  await runGit(projectPath, "config", "user.email", "relay@test.local");
+  await runGit(projectPath, "config", "user.name", "Relay Test");
+  await writeFile(path.join(projectPath, "tracked.txt"), "tracked baseline\n", "utf8");
+  await runGit(projectPath, "add", "tracked.txt");
+  await runGit(projectPath, "commit", "-m", "baseline");
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Paused discard",
+    priority: "medium",
+    labels: ["codex"],
+    markdown: "# Paused discard\n"
+  });
+  const runId = "run_paused_discard";
+  await captureRunGitBaseline(projectPath, ticket.frontMatter.id, runId);
+  await writeFile(path.join(projectPath, "tracked.txt"), "tracked agent edit\n", "utf8");
+  await writeFile(path.join(projectPath, "created.txt"), "created by agent\n", "utf8");
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_paused_discard", {
+    type: "file.change",
+    path: "tracked.txt",
+    kind: "update",
+    summary: "update tracked.txt",
+    timestamp: new Date().toISOString()
+  });
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_paused_discard", {
+    type: "file.change",
+    path: "created.txt",
+    kind: "create",
+    summary: "create created.txt",
+    timestamp: new Date().toISOString()
+  });
+
+  await writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      status: "in_progress",
+      authoringState: "ready",
+      codexThreadId: "thread_paused_discard",
+      runStatus: "paused",
+      lastRunId: runId,
+      lastRunStartedAt: new Date().toISOString()
+    }
+  });
+
+  const discarded = await cancelCodexRun({ projectPath, ticketId: ticket.frontMatter.id, runId, revertChanges: true });
+  assert.equal(discarded.outcome, "discarded");
+  assert.match(discarded.revertMessage ?? "", /^Reverted run file changes/);
+
+  const cancelled = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(cancelled.frontMatter.runStatus, "idle");
+  assert.equal(cancelled.frontMatter.status, "todo");
+  assert.equal(cancelled.frontMatter.codexThreadId, null);
+  assert.equal(cancelled.frontMatter.lastRunId, null);
+  assert.equal(await readFile(path.join(projectPath, "tracked.txt"), "utf8"), "tracked baseline\n");
+  await assert.rejects(access(path.join(projectPath, "created.txt")));
 });
 
 test("codex run cancellation reconciles stale implementation state after restart", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
-  const ticket = await createTicket(projectPath, {
+  const ticket = await createImplementationTicket(projectPath, {
     title: "Stale implementation run",
     priority: "medium",
     labels: ["codex"],
@@ -2707,18 +3887,19 @@ test("codex run cancellation reconciles stale implementation state after restart
   await cancelCodexRun({ projectPath, ticketId: ticket.frontMatter.id, runId: "run_stale_impl" });
 
   const cancelled = await readTicket(projectPath, ticket.frontMatter.id);
-  assert.equal(cancelled.frontMatter.runStatus, "cancelled");
+  assert.equal(cancelled.frontMatter.runStatus, "paused");
   assert.equal(cancelled.frontMatter.status, "in_progress");
 
   const preflight = await preflightCodexRun({ projectPath, ticketId: ticket.frontMatter.id });
-  assert.equal(preflight.ok, true);
+  assert.equal(preflight.ok, false);
+  assert.match(preflight.errors.join(" "), /paused or failed implementation work/);
 
   const events = await readCodexRunEvents(projectPath, ticket.frontMatter.id, "run_stale_impl");
   const terminal = events.find((event) => event.type === "run.failed");
   assert.equal(terminal?.type, "run.failed");
   if (terminal?.type === "run.failed") {
-    assert.equal(terminal.finalStatus, "cancelled");
-    assert.match(terminal.message, /Stale Codex implementation run cancelled/);
+    assert.equal(terminal.finalStatus, "paused");
+    assert.match(terminal.message, /Stale Codex implementation run paused/);
   }
 });
 
@@ -2755,6 +3936,184 @@ test("codex run cancellation reconciles stale draft state after restart", async 
     assert.equal(terminal.finalStatus, "cancelled");
     assert.match(terminal.message, /Stale ticket draft run cancelled/);
   }
+});
+
+const runGit = async (projectPath: string, ...args: string[]): Promise<void> => {
+  await promisify(execFile)("git", args, { cwd: projectPath });
+};
+
+test("run git revert restores only run-touched tracked files and deletes run-created files", async () => {
+  const projectPath = await createProject();
+  await runGit(projectPath, "-c", "core.hooksPath=/dev/null", "init");
+  await runGit(projectPath, "config", "user.email", "relay@test.local");
+  await runGit(projectPath, "config", "user.name", "Relay Test");
+  await writeFile(path.join(projectPath, "README.md"), "# baseline\n", "utf8");
+  await writeFile(path.join(projectPath, "tracked.txt"), "tracked baseline\n", "utf8");
+  await runGit(projectPath, "add", "README.md", "tracked.txt");
+  await runGit(projectPath, "commit", "-m", "baseline");
+
+  const ticket = await createTicket(projectPath, {
+    title: "Git revert",
+    priority: "medium",
+    labels: ["git"],
+    markdown: "# Git revert\n"
+  });
+  const runId = "run_git_revert_test";
+  const baseline = await captureRunGitBaseline(projectPath, ticket.frontMatter.id, runId);
+  assert.ok(baseline);
+  assert.equal(baseline.changedPathsAtStart.includes("tracked.txt"), false);
+  assert.equal(baseline.changedPathsAtStart.includes("agent-change.txt"), false);
+
+  await writeFile(path.join(projectPath, "tracked.txt"), "tracked agent edit\n", "utf8");
+  await writeFile(path.join(projectPath, "agent-change.txt"), "from agent\n", "utf8");
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_git_revert_test", {
+    type: "file.change",
+    path: "tracked.txt",
+    kind: "update",
+    summary: "update tracked.txt",
+    timestamp: new Date().toISOString()
+  });
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_git_revert_test", {
+    type: "file.change",
+    path: "agent-change.txt",
+    kind: "create",
+    summary: "create agent-change.txt",
+    timestamp: new Date().toISOString()
+  });
+
+  const revert = await revertRunGitChanges(projectPath, ticket.frontMatter.id, runId);
+  assert.equal(revert.reverted, true);
+  assert.match(revert.message, /Reverted run file changes/);
+  assert.match(revert.message, /1 tracked file\(s\) restored/);
+  assert.match(revert.message, /1 new file\(s\) deleted/);
+  assert.match(revert.message, /0 path\(s\) skipped/);
+
+  await assert.rejects(access(path.join(projectPath, "agent-change.txt")));
+  assert.equal(await readFile(path.join(projectPath, "tracked.txt"), "utf8"), "tracked baseline\n");
+  assert.equal(await readFile(path.join(projectPath, "README.md"), "utf8"), "# baseline\n");
+
+  const persisted = await readRunGitBaseline(projectPath, ticket.frontMatter.id, runId);
+  assert.deepEqual(persisted?.touchedPaths, ["agent-change.txt", "tracked.txt"]);
+  assert.deepEqual(persisted?.createdPaths, ["agent-change.txt"]);
+  assert.deepEqual(persisted?.skippedPaths, []);
+  await access(path.join(projectPath, ".relay", "runs", ticket.frontMatter.id, `${runId}-change-log.json`));
+});
+
+test("run git revert skips dirty-at-start overlaps and reports warnings", async () => {
+  const projectPath = await createProject();
+  await runGit(projectPath, "-c", "core.hooksPath=/dev/null", "init");
+  await runGit(projectPath, "config", "user.email", "relay@test.local");
+  await runGit(projectPath, "config", "user.name", "Relay Test");
+  await writeFile(path.join(projectPath, "dirty.txt"), "baseline dirty\n", "utf8");
+  await writeFile(path.join(projectPath, "clean.txt"), "baseline clean\n", "utf8");
+  await runGit(projectPath, "add", "dirty.txt", "clean.txt");
+  await runGit(projectPath, "commit", "-m", "baseline");
+
+  await writeFile(path.join(projectPath, "dirty.txt"), "user local edits\n", "utf8");
+
+  const ticket = await createTicket(projectPath, {
+    title: "Git revert dirty overlap",
+    priority: "medium",
+    labels: ["git"],
+    markdown: "# Git revert dirty overlap\n"
+  });
+  const runId = "run_git_revert_dirty_overlap";
+  const baseline = await captureRunGitBaseline(projectPath, ticket.frontMatter.id, runId);
+  assert.ok(baseline);
+  assert.equal(baseline.changedPathsAtStart.includes("dirty.txt"), true);
+
+  await writeFile(path.join(projectPath, "dirty.txt"), "agent overwrote dirty file\n", "utf8");
+  await writeFile(path.join(projectPath, "clean.txt"), "agent changed clean file\n", "utf8");
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_git_revert_dirty_overlap", {
+    type: "file.change",
+    path: "dirty.txt",
+    kind: "update",
+    summary: "update dirty.txt",
+    timestamp: new Date().toISOString()
+  });
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_git_revert_dirty_overlap", {
+    type: "file.change",
+    path: "clean.txt",
+    kind: "update",
+    summary: "update clean.txt",
+    timestamp: new Date().toISOString()
+  });
+
+  const revert = await revertRunGitChanges(projectPath, ticket.frontMatter.id, runId);
+  assert.equal(revert.reverted, true);
+  assert.match(revert.message, /with warnings/);
+  assert.match(revert.message, /1 tracked file\(s\) restored/);
+  assert.match(revert.message, /0 new file\(s\) deleted/);
+  assert.match(revert.message, /1 path\(s\) skipped/);
+
+  assert.equal(await readFile(path.join(projectPath, "clean.txt"), "utf8"), "baseline clean\n");
+  assert.equal(await readFile(path.join(projectPath, "dirty.txt"), "utf8"), "agent overwrote dirty file\n");
+
+  const persisted = await readRunGitBaseline(projectPath, ticket.frontMatter.id, runId);
+  assert.deepEqual(persisted?.createdPaths, []);
+  assert.deepEqual(persisted?.skippedPaths, [{ path: "dirty.txt", reason: "Path was already dirty when the run started." }]);
+});
+
+test("cancelCodexRun with revertChanges returns the selective rollback summary", async () => {
+  const projectPath = await createProject();
+  await runGit(projectPath, "-c", "core.hooksPath=/dev/null", "init");
+  await runGit(projectPath, "config", "user.email", "relay@test.local");
+  await runGit(projectPath, "config", "user.name", "Relay Test");
+  await writeFile(path.join(projectPath, "tracked.txt"), "tracked baseline\n", "utf8");
+  await runGit(projectPath, "add", "tracked.txt");
+  await runGit(projectPath, "commit", "-m", "baseline");
+
+  const ticket = await createTicket(projectPath, {
+    title: "Cancel revert summary",
+    priority: "medium",
+    labels: ["git"],
+    markdown: "# Cancel revert summary\n"
+  });
+  const runId = "run_cancel_revert_summary";
+  await captureRunGitBaseline(projectPath, ticket.frontMatter.id, runId);
+  await writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      status: "in_progress",
+      authoringState: "ready",
+      codexThreadId: "thread_cancel_revert_summary",
+      runStatus: "running",
+      lastRunId: runId,
+      lastRunStartedAt: new Date().toISOString()
+    }
+  });
+
+  await writeFile(path.join(projectPath, "tracked.txt"), "tracked agent edit\n", "utf8");
+  await writeFile(path.join(projectPath, "created.txt"), "created by agent\n", "utf8");
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_cancel_revert_summary", {
+    type: "file.change",
+    path: "tracked.txt",
+    kind: "update",
+    summary: "update tracked.txt",
+    timestamp: new Date().toISOString()
+  });
+  await writeRunLog(projectPath, ticket.frontMatter.id, runId, "thread_cancel_revert_summary", {
+    type: "file.change",
+    path: "created.txt",
+    kind: "create",
+    summary: "create created.txt",
+    timestamp: new Date().toISOString()
+  });
+
+  const result = await cancelCodexRun({
+    projectPath,
+    ticketId: ticket.frontMatter.id,
+    runId,
+    revertChanges: true
+  });
+
+  assert.match(result.revertMessage ?? "", /^Reverted run file changes/);
+  assert.match(result.revertMessage ?? "", /1 tracked file\(s\) restored/);
+  assert.match(result.revertMessage ?? "", /1 new file\(s\) deleted/);
+  assert.match(result.revertMessage ?? "", /0 path\(s\) skipped/);
+  assert.equal(await readFile(path.join(projectPath, "tracked.txt"), "utf8"), "tracked baseline\n");
+  await assert.rejects(access(path.join(projectPath, "created.txt")));
 });
 
 test("clarification questions and answers persist with auditable events", async () => {

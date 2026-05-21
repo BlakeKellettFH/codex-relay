@@ -1,4 +1,5 @@
 import type { TicketDraft, TicketDraftSubticket } from "@shared/schemas";
+import { ticketPreviewSummary } from "@shared/ticketSummary";
 
 const list = (items: readonly string[] | undefined): string => {
   if (!items) return "- None.";
@@ -115,11 +116,22 @@ ${list(draftImplementationNotes(draft))}
 No Codex run has been started.
 `;
 
-export const ticketDraftDialogSubtext = (draft: TicketDraft, maxLength = 150): string => {
-  const summary = cleanMarkdownText((draft as TicketDraft & { summary?: string | null }).summary ?? "");
-  if (summary.length > 0) return summary;
+export const ticketDraftDialogSubtext = (draft: TicketDraft, maxLength = 240): string => {
+  const summary = cleanMarkdownText(draft.summary ?? "");
+  if (summary.length > 0) return truncatePreviewText(summary, maxLength);
 
   const bodyMarkdown = markdownFromDraft(draft).replace(/^# .*\n+/, "");
   const bodyText = cleanMarkdownText(bodyMarkdown);
   return truncatePreviewText(bodyText, maxLength);
 };
+
+export const ticketRecordPreviewSummary = (ticket: {
+  frontMatter: { summary?: string | null };
+  markdown: string;
+}): string => ticketPreviewSummary(ticket.frontMatter, ticket.markdown);
+
+export const stripPlannedFileScopeSection = (markdown: string): string =>
+  markdown
+    .replace(/^## Planned File Scope\s*\n[\s\S]*?(?=^## |\s*$)/m, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
