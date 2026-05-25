@@ -1,0 +1,20 @@
+{
+  "title": "Dispatch implementation runs by stored provider and normalize provider event streams",
+  "priority": "high",
+  "labels": ["backend", "implementation-runs", "run-events"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/services/codex/index.ts",
+    "src/services/run-events/index.ts",
+    "src/services/work/ticket/TicketWorkService.ts",
+    "src/services/work/index.ts",
+    "src/main.app.ts",
+    "tests/backend.test.ts"
+  ],
+  "patch": {
+    "summary": "Implementation work now stamps and dispatches by stored provider id, with app-start recovery and normalized run events for Codex, Cursor, and Claude. Backend tests cover mixed-provider queue continuity and terminal event handling.",
+    "fullMarkdown": "# Dispatch implementation runs by stored provider and normalize provider event streams\n\n## Requirements\n\n- Submit new implementation work with the selected provider id; queued or recovered work dispatches by the provider id on the work item.\n- Provider adapters expose resumable session ids and stream-json (or equivalent) events for implementation runs.\n- Normalize provider-native file, command, approval, and completion signals into the existing `RendererRunEvent` and run-log pipeline.\n- App-start recovery wakes queued work for any supported provider.\n- Run summaries and ticket run-state transitions continue to work with provider-backed events.\n\n## Acceptance Criteria\n\n- Switching providers affects only future implementation runs; queued or recovered runs resume on the stored provider.\n- Non-Codex implementation runs populate the run log, activity panel, and summary fields.\n- App-start recovery no longer assumes Codex-only work.\n- Backend tests cover mixed-provider queue continuity and normalized terminal events.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

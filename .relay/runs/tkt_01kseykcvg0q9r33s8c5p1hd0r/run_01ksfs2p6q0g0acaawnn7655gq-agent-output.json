@@ -1,0 +1,22 @@
+{
+  "title": "Tune repository chat autosave debounce and flush",
+  "priority": "medium",
+  "labels": [
+    "repository-chat",
+    "persistence",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/lib/repositoryChatPersist.ts",
+    "tests/repository-chat-persist.test.ts",
+    "tests/run-tests.mjs"
+  ],
+  "patch": {
+    "summary": "Repository chat autosave debounces PUTs at 1800ms with signature dedupe and ref-based flush on panel close, submit, clear, and unmount.",
+    "fullMarkdown": "# Tune repository chat autosave debounce and flush\n\n## Requirements\n\n- Export `REPOSITORY_CHAT_PERSIST_DEBOUNCE_MS` as 1800 from `repositoryChatPersist.ts`.\n- Centralize debounced save and `flushRepositoryChatPersist` in a persist controller using refs for latest projectPath, threadId, messages, and draft.\n- Flush on panel unmount, submit, clearChat, and onClose before the panel hides.\n- Skip PUT when `repositoryChatStoreSignature` is unchanged.\n- Keep `RepositoryChatPanel` persist effects off save-mutation status (stable mutate ref).\n\n## Acceptance Criteria\n\n- Continuous typing yields at most one PUT per ~1.8s idle window.\n- Close, send, or clear persists the latest draft even if the debounce timer has not fired.\n- Persist scheduling/sync effects do not re-subscribe when save mutation status changes.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

@@ -1,5 +1,9 @@
 import { Effect, Path } from "effect";
-import { archiveTicket as runArchiveTicket, archiveTicketBundle as runArchiveTicketBundle } from "../services/codex";
+import {
+  archiveTicket as runArchiveTicket,
+  archiveTicketBundle as runArchiveTicketBundle,
+  type TicketUpdateDependencies
+} from "../services/codex";
 import { parseOpenClarificationQuestionsFromMarkdown } from "../services/clarificationParser";
 import { fromPromise } from "../runtime";
 import type {
@@ -92,11 +96,14 @@ export const saveTicketAttachment = (input: TicketAttachmentSaveInput) =>
 export const moveTicket = (input: TicketMoveInput) =>
   Storage.use((storage) => storage.moveTicket(input));
 
-export const archiveTicket = (projectPath: string, ticketId: string) =>
-  fromPromise(() => runArchiveTicket(projectPath, ticketId));
+export const archiveTicket = (projectPath: string, ticketId: string, dependencies: TicketUpdateDependencies = {}) =>
+  fromPromise(() => runArchiveTicket(projectPath, ticketId, dependencies));
 
-export const archiveTicketBundle = (projectPath: string, ticketIds: readonly string[]) =>
-  fromPromise(() => runArchiveTicketBundle(projectPath, ticketIds));
+export const archiveTicketBundle = (
+  projectPath: string,
+  ticketIds: readonly string[],
+  dependencies: TicketUpdateDependencies = {}
+) => fromPromise(() => runArchiveTicketBundle(projectPath, ticketIds, dependencies));
 
 export const listClarifications = (projectPath: string, ticketId: string) =>
   Effect.gen(function*() {

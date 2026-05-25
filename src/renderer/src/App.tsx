@@ -59,8 +59,6 @@ import {
 import type {
   AgentProviderInventory,
   AgentProviderRecord,
-  AgentTicketUpdateInput,
-  AgentTicketUpdateStartResult,
   BoardSnapshot,
   ClarificationQuestion,
   CodexStatus,
@@ -113,11 +111,19 @@ export { activeRunElapsedLabel } from "./lib/agentProgress";
 import { BoardHierarchyVisualProvider } from "./components/BoardHierarchyVisualContext";
 import { TicketDetailTypeIndicator } from "./components/TicketDetailTypeIndicator";
 import {
-  ARCHIVE_TICKET_UPDATE_REQUEST,
+  epicReadyForBulkAccept,
+  featureReadyForBulkAccept
+} from "./lib/boardAccept";
+import { moveReviewAcceptBundle, reviewAcceptSuccessMessage } from "./lib/reviewAcceptBundle";
+import {
+  archiveAllCompletedContainerBundleIds,
   archiveBundleForEpic,
   archiveBundleForFeature,
+  archivableCompletedEpics,
+  archivableCompletedFeatures,
   epicCanArchive,
   featureCanArchive,
+  resolveDetailArchiveTarget,
   showTaskArchive,
   sortArchiveBundleIds,
   taskCanArchive
@@ -163,6 +169,7 @@ import {
   tasksForNotDoingDrop,
   tasksForTodoRestore,
   validateRestoreDragToTodo,
+  validateReviewDragToCompleted,
   type BoardDragItem,
   type BoardDropTarget
 } from "./lib/boardDragDrop";
@@ -191,6 +198,7 @@ import {
   relayErrorMessage,
   relayOpenProjectInEditor,
   useAddProjectMutation,
+  useArchiveTicketMutation,
   useApproveScopeClarificationMutation,
   useAnswerClarificationMutation,
   useBoardQuery,
@@ -1542,7 +1550,9 @@ function BoardColumnsGrid({
   onArchiveEpic,
   onArchiveFeature,
   onArchiveTask,
-  archivingContainerIds,
+  onArchiveAllCompleted,
+  archiveAllCompletedDisabled = false,
+  archiveAllCompletedBusy = false,
   now
 }: {
   boardRef: RefObject<HTMLDivElement | null>;
@@ -1560,7 +1570,9 @@ function BoardColumnsGrid({
   onArchiveEpic?: (epicId: string) => void;
   onArchiveFeature?: (featureId: string) => void;
   onArchiveTask?: (taskId: string) => void;
-  archivingContainerIds?: ReadonlySet<string>;
+  onArchiveAllCompleted?: () => void;
+  archiveAllCompletedDisabled?: boolean;
+  archiveAllCompletedBusy?: boolean;
   now: number;
 }): ReactElement {
   const { activeDrag, dragSourceColumn } = useBoardDragContext();
@@ -1611,7 +1623,9 @@ function BoardColumnsGrid({
           onArchiveEpic={onArchiveEpic}
           onArchiveFeature={onArchiveFeature}
           onArchiveTask={onArchiveTask}
-          archivingContainerIds={archivingContainerIds}
+          onArchiveAllCompleted={onArchiveAllCompleted}
+          archiveAllCompletedDisabled={archiveAllCompletedDisabled}
+          archiveAllCompletedBusy={archiveAllCompletedBusy}
           now={now}
           minified={minified}
           ticketCount={ticketCount}
@@ -1634,7 +1648,9 @@ function BoardColumn({
   onArchiveEpic,
   onArchiveFeature,
   onArchiveTask,
-  archivingContainerIds,
+  onArchiveAllCompleted,
+  archiveAllCompletedDisabled = false,
+  archiveAllCompletedBusy = false,
   now,
   minified = false,
   ticketCount
@@ -1651,7 +1667,9 @@ function BoardColumn({
   onArchiveEpic?: (epicId: string) => void;
   onArchiveFeature?: (featureId: string) => void;
   onArchiveTask?: (taskId: string) => void;
-  archivingContainerIds?: ReadonlySet<string>;
+  onArchiveAllCompleted?: () => void;
+  archiveAllCompletedDisabled?: boolean;
+  archiveAllCompletedBusy?: boolean;
   now: number;
   minified?: boolean;
   ticketCount: number;
@@ -1682,7 +1700,26 @@ function BoardColumn({
         <>
       <header className="column-header">
         <h2>{column.name}</h2>
-        <span>{visibleTicketCount}</span>
+        <div className="column-header-actions">
+          {column.id === RELAY_COMPLETED_STATUS && onArchiveAllCompleted ? (
+            <Button
+              type="button"
+              className="column-header-archive-all"
+              onClick={onArchiveAllCompleted}
+              disabled={archiveAllCompletedDisabled || archiveAllCompletedBusy}
+              aria-label="Archive all completed features and epics"
+              title="Archive all completed features and epics"
+            >
+              {archiveAllCompletedBusy ? (
+                <Loader2 className="spin" size={12} aria-hidden="true" />
+              ) : (
+                <Archive size={12} aria-hidden="true" />
+              )}
+              Archive all
+            </Button>
+          ) : null}
+          <span>{visibleTicketCount}</span>
+        </div>
       </header>
       <div className="column-body">
         {boardItems.map((item) => {
@@ -1703,7 +1740,6 @@ function BoardColumn({
                 onTicketButtonRef={onTicketButtonRef}
                 onArchiveEpic={onArchiveEpic}
                 onArchiveFeature={onArchiveFeature}
-                archivingContainerIds={archivingContainerIds}
                 now={now}
               />
             );
@@ -1723,7 +1759,6 @@ function BoardColumn({
                 onTicketFocus={onTicketFocus}
                 onTicketButtonRef={onTicketButtonRef}
                 onArchiveFeature={onArchiveFeature}
-                archivingContainerIds={archivingContainerIds}
                 now={now}
               />
             );
@@ -1740,7 +1775,6 @@ function BoardColumn({
               onFocus={onTicketFocus}
               onTicketButtonRef={onTicketButtonRef}
               onArchiveTask={onArchiveTask}
-              archivingContainerIds={archivingContainerIds}
               now={now}
             />
           );
@@ -1768,7 +1802,6 @@ function BoardTicketCard({
   onFocus,
   onTicketButtonRef,
   onArchiveTask,
-  archivingContainerIds,
   now
 }: {
   ticket: TicketSummary;
@@ -1780,12 +1813,10 @@ function BoardTicketCard({
   onFocus: (ticketId: string) => void;
   onTicketButtonRef: (ticketId: string, node: HTMLButtonElement | null) => void;
   onArchiveTask?: (taskId: string) => void;
-  archivingContainerIds?: ReadonlySet<string>;
   now: number;
 }): ReactElement {
   const draggable = ticket.ticketType === "task" && boardColumnDraggable(columnId);
   const showArchive = showTaskArchive(ticket, columnId);
-  const archiveBusy = archivingContainerIds?.has(ticket.id) ?? false;
   const { dragSourceColumn } = useBoardDragContext();
   const taskDragItem = { kind: "task" as const, ticketId: ticket.id };
   const { setNodeRef, setActivatorNodeRef, attributes, listeners, isDragging } = useBoardDraggable(
@@ -1811,7 +1842,6 @@ function BoardTicketCard({
           ticket={ticket}
           draggable={draggable}
           showArchive={showArchive}
-          archiveBusy={archiveBusy}
           onArchive={onArchiveTask ? () => onArchiveTask(ticket.id) : undefined}
           moveAriaLabel={boardDragMoveAriaLabel(ticket.title, taskDragItem, dragSourceColumn)}
           setActivatorNodeRef={setActivatorNodeRef}
@@ -1948,6 +1978,7 @@ export function getTicketDetailExecutionActionState({
 
 export type TicketReviewActionState = {
   showAcceptReject: boolean;
+  acceptEnabled: boolean;
 };
 
 const REVIEW_ACCEPT_REJECT_TICKET_TYPES = new Set<TicketType>(["task", "feature", "epic"]);
@@ -1955,88 +1986,60 @@ const REVIEW_ACCEPT_REJECT_TICKET_TYPES = new Set<TicketType>(["task", "feature"
 export function getTicketReviewActionState({
   ticketType,
   status,
-  columns
+  columns,
+  allTickets = [],
+  ticketId
 }: {
   ticketType: TicketType;
   status: string;
   columns: RelayColumn[];
+  allTickets?: readonly TicketSummary[];
+  ticketId?: string;
 }): TicketReviewActionState {
+  if (status === RELAY_COMPLETED_STATUS || status === RELAY_ARCHIVE_STATUS) {
+    return { showAcceptReject: false, acceptEnabled: false };
+  }
+
   const completedStatusAvailable = columns.some((column) => column.id === RELAY_COMPLETED_STATUS);
+  const summary = ticketId ? allTickets.find((entry) => entry.id === ticketId) : undefined;
+  const readyForBulkAccept =
+    summary?.ticketType === "feature"
+      ? featureReadyForBulkAccept(summary, allTickets, columns)
+      : summary?.ticketType === "epic"
+        ? epicReadyForBulkAccept(summary, allTickets, columns)
+        : false;
+  const showAcceptReject =
+    completedStatusAvailable &&
+    ((ticketType === "task" && status === RELAY_REVIEW_STATUS) ||
+      ((ticketType === "feature" || ticketType === "epic") && (status === RELAY_REVIEW_STATUS || readyForBulkAccept)));
   return {
-    showAcceptReject:
-      REVIEW_ACCEPT_REJECT_TICKET_TYPES.has(ticketType) &&
-      status === RELAY_REVIEW_STATUS &&
-      completedStatusAvailable
+    showAcceptReject,
+    acceptEnabled: showAcceptReject && getReviewAcceptEnabled(summary, allTickets, columns)
   };
+}
+
+export function getReviewAcceptEnabled(
+  summary: TicketSummary | undefined,
+  allTickets: readonly TicketSummary[],
+  columns: readonly RelayColumn[]
+): boolean {
+  if (!summary) return false;
+  if (summary.ticketType === "task") return summary.status === RELAY_REVIEW_STATUS;
+  if (summary.ticketType === "feature") return featureReadyForBulkAccept(summary, allTickets, columns);
+  if (summary.ticketType === "epic") return epicReadyForBulkAccept(summary, allTickets, columns);
+  return false;
 }
 
 export function getContainerTicketStatusNote(ticketType: "epic" | "feature", status: string): string {
   if (status === RELAY_REVIEW_STATUS) {
     if (ticketType === "epic") {
-      return "This epic is in Review. Accept or Reject moves only this epic to Completed; child features and tasks stay as they are.";
+      return "This epic is in Review. Accept moves this epic and every linked feature or task still in Review to Completed once every descendant is in Review or Completed. Reject moves only this epic to Completed.";
     }
-    return "This feature is in Review. Accept or Reject moves only this feature to Completed; child tasks stay as they are.";
+    return "This feature is in Review. Accept moves this feature and every linked task in Review to Completed once every linked task is in Review or Completed. Reject moves only this feature to Completed.";
   }
   return ticketType === "epic"
     ? "Epics follow child task columns. Open tasks below to move work across the board."
     : "Features follow child task columns. Open tasks below to move work across the board.";
-}
-
-const ARCHIVE_POLL_INTERVAL_MS = 500;
-const ARCHIVE_POLL_TIMEOUT_MS = 120_000;
-
-async function waitForTicketArchived(
-  projectPath: string,
-  ticketId: string,
-  readBoard: () => Promise<BoardSnapshot>,
-  onRefresh: () => void | Promise<void>
-): Promise<void> {
-  const deadline = Date.now() + ARCHIVE_POLL_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await Promise.resolve(onRefresh());
-    const snapshot = await readBoard();
-    const summary = snapshot.tickets.find((ticket) => ticket.id === ticketId);
-    if (summary?.status === RELAY_ARCHIVE_STATUS) return;
-    if (summary && summary.status !== RELAY_COMPLETED_STATUS) {
-      throw new Error(`Archive did not complete for ${summary.title}.`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_INTERVAL_MS));
-  }
-  throw new Error("Archive timed out waiting for the agent to finish.");
-}
-
-async function archiveTicketIdsWithAgent({
-  projectPath,
-  bundleIds,
-  allTickets,
-  archiveStatusAvailable,
-  startTicketUpdate,
-  readBoard,
-  onRefresh
-}: {
-  projectPath: string;
-  bundleIds: string[];
-  allTickets: TicketSummary[];
-  archiveStatusAvailable: boolean;
-  startTicketUpdate: (input: AgentTicketUpdateInput) => Promise<AgentTicketUpdateStartResult>;
-  readBoard: () => Promise<BoardSnapshot>;
-  onRefresh: () => void | Promise<void>;
-}): Promise<void> {
-  const ticketIds = sortArchiveBundleIds(bundleIds, allTickets);
-  if (ticketIds.length === 0) return;
-  if (!archiveStatusAvailable) {
-    throw new Error("Archive status is not configured for this project.");
-  }
-
-  for (const ticketId of ticketIds) {
-    await startTicketUpdate({
-      projectPath,
-      ticketId,
-      request: ARCHIVE_TICKET_UPDATE_REQUEST,
-      purpose: "archive"
-    });
-    await waitForTicketArchived(projectPath, ticketId, readBoard, onRefresh);
-  }
 }
 
 export function BoardView({
@@ -2075,54 +2078,30 @@ export function BoardView({
   const startRunMutation = useStartRunMutation();
   const cancelRunMutation = useCancelRunMutation();
   const moveTicketMutation = useMoveTicketMutation();
-  const startTicketUpdateMutation = useStartTicketUpdateMutation();
-  const [archivingContainerIds, setArchivingContainerIds] = useState<Set<string>>(() => new Set());
+  const archiveTicketMutation = useArchiveTicketMutation();
   const archiveStatusAvailable = useMemo(
     () => board.columns.some((column) => column.id === RELAY_ARCHIVE_STATUS),
     [board.columns]
   );
   const visibleColumns = useMemo(() => boardVisibleColumns(board.columns), [board.columns]);
-  const readBoardSnapshot = useCallback(() => relayApi.board.read({ projectPath }), [projectPath]);
   const archiveBundle = useCallback(
     async (containerId: string, bundleIds: string[], successMessage: string): Promise<void> => {
-      if (bundleIds.length === 0) return;
+      const ticketIds = sortArchiveBundleIds(bundleIds, board.tickets);
+      if (ticketIds.length === 0) return;
       if (!archiveStatusAvailable) {
         setToast({ kind: "error", message: "Archive status is not configured for this project." });
         return;
       }
 
-      setArchivingContainerIds((current) => new Set(current).add(containerId));
       try {
-        await archiveTicketIdsWithAgent({
-          projectPath,
-          bundleIds,
-          allTickets: board.tickets,
-          archiveStatusAvailable,
-          startTicketUpdate: (input) => startTicketUpdateMutation.mutateAsync(input),
-          readBoard: readBoardSnapshot,
-          onRefresh: onCreated
-        });
+        await archiveTicketMutation.mutateAsync({ projectPath, ticketIds });
         setToast({ kind: "success", message: successMessage });
         await Promise.resolve(onCreated());
       } catch (error) {
         setToast({ kind: "error", message: error instanceof Error ? error.message : "Unable to archive tickets." });
-      } finally {
-        setArchivingContainerIds((current) => {
-          const next = new Set(current);
-          next.delete(containerId);
-          return next;
-        });
       }
     },
-    [
-      archiveStatusAvailable,
-      board.tickets,
-      onCreated,
-      projectPath,
-      readBoardSnapshot,
-      setToast,
-      startTicketUpdateMutation
-    ]
+    [archiveStatusAvailable, archiveTicketMutation, board.tickets, onCreated, projectPath, setToast]
   );
   const archiveTask = useCallback(
     async (taskId: string): Promise<void> => {
@@ -2132,7 +2111,7 @@ export function BoardView({
         setToast({ kind: "info", message: "Only completed tasks can be archived." });
         return;
       }
-      await archiveBundle(taskId, [taskId], `Archived ${task.title}.`);
+      await archiveBundle(taskId, [taskId], `Queued ${task.title} for archive.`);
     },
     [archiveBundle, board.tickets, setToast]
   );
@@ -2150,7 +2129,7 @@ export function BoardView({
         return;
       }
       const bundleIds = archiveBundleForFeature(featureId, board.tickets);
-      await archiveBundle(featureId, bundleIds, `Archived ${feature.title} and ${bundleIds.length - 1} child ticket(s).`);
+      await archiveBundle(featureId, bundleIds, `Queued ${feature.title} and ${bundleIds.length - 1} child ticket(s) for archive.`);
     },
     [archiveBundle, board.tickets, setToast]
   );
@@ -2163,10 +2142,34 @@ export function BoardView({
         return;
       }
       const bundleIds = archiveBundleForEpic(epicId, board.tickets);
-      await archiveBundle(epicId, bundleIds, `Archived ${epic.title} and ${bundleIds.length - 1} child ticket(s).`);
+      await archiveBundle(epicId, bundleIds, `Queued ${epic.title} and ${bundleIds.length - 1} child ticket(s) for archive.`);
     },
     [archiveBundle, board.tickets, setToast]
   );
+  const archiveAllCompletedBundleIds = useMemo(
+    () => (archiveStatusAvailable ? archiveAllCompletedContainerBundleIds(board.tickets) : []),
+    [archiveStatusAvailable, board.tickets]
+  );
+  const archiveAllCompleted = useCallback(async (): Promise<void> => {
+    if (archiveAllCompletedBundleIds.length === 0) {
+      setToast({ kind: "info", message: "No completed features or epics are ready to archive." });
+      return;
+    }
+    const epicIds = new Set(archivableCompletedEpics(board.tickets).map((entry) => entry.id));
+    const featureCount = archivableCompletedFeatures(board.tickets, epicIds).length;
+    const epicCount = epicIds.size;
+    const containerLabel =
+      epicCount > 0 && featureCount > 0
+        ? `${epicCount} epic(s) and ${featureCount} feature(s)`
+        : epicCount > 0
+          ? `${epicCount} epic${epicCount === 1 ? "" : "s"}`
+          : `${featureCount} feature${featureCount === 1 ? "" : "s"}`;
+    await archiveBundle(
+      archiveAllCompletedBundleIds[0] ?? "",
+      archiveAllCompletedBundleIds,
+      `Queued ${containerLabel} for archive (${archiveAllCompletedBundleIds.length} ticket(s)).`
+    );
+  }, [archiveAllCompletedBundleIds, archiveBundle, board.tickets, setToast]);
   const filteredTickets = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return board.tickets;
@@ -2283,6 +2286,48 @@ export function BoardView({
               message: movedCount === 1 ? "Moved 1 task to ready." : `Moved ${movedCount} tasks to ready.`
             });
           }
+          return;
+        }
+
+        if (dropStatus === RELAY_COMPLETED_STATUS) {
+          const validation = validateReviewDragToCompleted(item, board.tickets, board.columns);
+          if (!validation.ok) {
+            setToast({ kind: "info", message: validation.message });
+            return;
+          }
+
+          if (item.kind === "task" && item.ticketId) {
+            const task = board.tickets.find((entry) => entry.id === item.ticketId);
+            if (!task) return;
+            await moveTicketMutation.mutateAsync({
+              projectPath,
+              ticketId: task.id,
+              targetStatus: RELAY_COMPLETED_STATUS
+            });
+            await Promise.resolve(onCreated());
+            setToast({ kind: "success", message: `${task.title} accepted.` });
+            return;
+          }
+
+          const container =
+            item.kind === "feature" && item.featureId
+              ? board.tickets.find((entry) => entry.id === item.featureId)
+              : item.kind === "epic" && item.epicId
+                ? board.tickets.find((entry) => entry.id === item.epicId)
+                : undefined;
+          if (!container || (container.ticketType !== "feature" && container.ticketType !== "epic")) return;
+
+          const sortedIds = await moveReviewAcceptBundle({
+            projectPath,
+            container,
+            allTickets: board.tickets,
+            columns: board.columns,
+            moveTicket: (input) => moveTicketMutation.mutateAsync(input)
+          });
+          if (sortedIds.length === 0) return;
+
+          await Promise.resolve(onCreated());
+          setToast({ kind: "success", message: reviewAcceptSuccessMessage(container, sortedIds) });
           return;
         }
 
@@ -2474,7 +2519,9 @@ export function BoardView({
               onArchiveEpic={(epicId) => void archiveEpic(epicId)}
               onArchiveFeature={(featureId) => void archiveFeature(featureId)}
               onArchiveTask={(taskId) => void archiveTask(taskId)}
-              archivingContainerIds={archivingContainerIds}
+              onArchiveAllCompleted={archiveStatusAvailable ? () => void archiveAllCompleted() : undefined}
+              archiveAllCompletedDisabled={archiveAllCompletedBundleIds.length === 0}
+              archiveAllCompletedBusy={archiveTicketMutation.isPending}
               now={now}
             />
           </BoardDragProvider>
@@ -4059,6 +4106,7 @@ function TicketDetail({
   const runSummaryQuery = useRunSummaryQuery(projectPath, ticketId);
   const saveAttachmentMutation = useSaveTicketAttachmentMutation();
   const saveTicketMutation = useSaveTicketMutation();
+  const archiveTicketMutation = useArchiveTicketMutation();
   const startTicketUpdateMutation = useStartTicketUpdateMutation();
   const cancelTicketUpdateMutation = useCancelTicketUpdateMutation();
   const preflightRunMutation = usePreflightRunMutation();
@@ -4288,54 +4336,25 @@ function TicketDetail({
     () => new Set(getScopeRecoveryClarificationActionQuestionIds(ticket, clarifications)),
     [clarifications, ticket]
   );
-  const reviewActionState = useMemo(
-    () =>
-      ticket
-        ? getTicketReviewActionState({
-            ticketType: ticket.frontMatter.ticketType,
-            status: ticket.frontMatter.status,
-            columns: board.columns
-          })
-        : { showAcceptReject: false },
-    [board.columns, ticket]
-  );
+  const reviewActionState = useMemo(() => {
+    if (!ticket) return { showAcceptReject: false, acceptEnabled: false };
+    return getTicketReviewActionState({
+      ticketType: ticket.frontMatter.ticketType,
+      status: ticket.frontMatter.status,
+      columns: board.columns,
+      allTickets: board.tickets,
+      ticketId: ticket.frontMatter.id
+    });
+  }, [board.columns, board.tickets, ticket]);
   const ticketIsCompleted = ticket?.frontMatter.status === "completed";
   const archiveStatusAvailable = board.columns.some((column) => column.id === RELAY_ARCHIVE_STATUS);
   const detailArchiveTarget = useMemo(() => {
     if (!ticket || !archiveStatusAvailable || !ticketIsCompleted) return null;
-    if (ticket.frontMatter.ticketType === "feature") {
-      const summary = board.tickets.find((entry) => entry.id === ticket.frontMatter.id);
-      if (!summary) return null;
-      return {
-        canArchive: featureCanArchive(summary, board.tickets),
-        bundleIds: archiveBundleForFeature(ticket.frontMatter.id, board.tickets),
-        blockedMessage: summary.parentEpicId
-          ? "Complete every task under this feature and epic before archiving."
-          : "Complete every task under this feature before archiving.",
-        successMessage: "Container and child tickets archived."
-      };
-    }
-    if (ticket.frontMatter.ticketType === "epic") {
-      const summary = board.tickets.find((entry) => entry.id === ticket.frontMatter.id);
-      if (!summary) return null;
-      return {
-        canArchive: epicCanArchive(summary, board.tickets),
-        bundleIds: archiveBundleForEpic(ticket.frontMatter.id, board.tickets),
-        blockedMessage: "Complete every task under this epic before archiving.",
-        successMessage: "Container and child tickets archived."
-      };
-    }
-    if (ticket.frontMatter.ticketType === "task") {
-      const summary = board.tickets.find((entry) => entry.id === ticket.frontMatter.id);
-      if (!summary) return null;
-      return {
-        canArchive: taskCanArchive(summary),
-        bundleIds: [ticket.frontMatter.id],
-        blockedMessage: "Only completed tasks can be archived.",
-        successMessage: `Archived ${summary.title}.`
-      };
-    }
-    return null;
+    const summary = board.tickets.find((entry) => entry.id === ticket.frontMatter.id);
+    return resolveDetailArchiveTarget(summary, board.tickets, {
+      archiveStatusAvailable,
+      ticketStatus: ticket.frontMatter.status
+    });
   }, [archiveStatusAvailable, board.tickets, ticket, ticketIsCompleted]);
 
   useEffect(() => {
@@ -4653,8 +4672,35 @@ function TicketDetail({
     }
   };
 
-  const acceptReviewTicket = (): void => {
-    void moveTicketTo(RELAY_COMPLETED_STATUS, "Ticket accepted.");
+  const acceptReviewTicket = async (): Promise<void> => {
+    if (!ticket) return;
+    const ticketType = ticket.frontMatter.ticketType;
+    if (ticketType === "task") {
+      await moveTicketTo(RELAY_COMPLETED_STATUS, "Ticket accepted.");
+      return;
+    }
+
+    const summary = board.tickets.find((entry) => entry.id === ticket.frontMatter.id);
+    if (!summary || !getReviewAcceptEnabled(summary, board.tickets, board.columns)) return;
+
+    setBusy(true);
+    try {
+      const sortedIds = await moveReviewAcceptBundle({
+        projectPath,
+        container: summary,
+        allTickets: board.tickets,
+        columns: board.columns,
+        moveTicket: (input) => moveTicketMutation.mutateAsync(input)
+      });
+      if (sortedIds.length === 0) return;
+      setToast({ kind: "success", message: reviewAcceptSuccessMessage(summary, sortedIds) });
+      await Promise.resolve(onChanged());
+      await refreshDetail();
+    } catch (error) {
+      setToast({ kind: "error", message: error instanceof Error ? error.message : "Unable to accept tickets." });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const rejectReviewTicket = (): void => {
@@ -5221,17 +5267,9 @@ function TicketDetail({
                         return;
                       }
                       void (async () => {
-                        setBusy(true);
                         try {
-                          await archiveTicketIdsWithAgent({
-                            projectPath,
-                            bundleIds: detailArchiveTarget.bundleIds,
-                            allTickets: board.tickets,
-                            archiveStatusAvailable,
-                            startTicketUpdate: (input) => startTicketUpdateMutation.mutateAsync(input),
-                            readBoard: () => relayApi.board.read({ projectPath }),
-                            onRefresh: onChanged
-                          });
+                          const ticketIds = sortArchiveBundleIds(detailArchiveTarget.bundleIds, board.tickets);
+                          await archiveTicketMutation.mutateAsync({ projectPath, ticketIds });
                           setToast({ kind: "success", message: detailArchiveTarget.successMessage });
                           await Promise.resolve(onChanged());
                           await refreshDetail();
@@ -5240,15 +5278,17 @@ function TicketDetail({
                             kind: "error",
                             message: error instanceof Error ? error.message : "Unable to archive tickets."
                           });
-                        } finally {
-                          setBusy(false);
                         }
                       })();
                     }}
-                    disabled={busy || ticketUpdateActive || draftInProgress}
+                    disabled={busy || archiveTicketMutation.isPending || ticketUpdateActive || draftInProgress}
                     aria-label="Archive"
                   >
-                    <Archive size={16} aria-hidden="true" />
+                    {archiveTicketMutation.isPending ? (
+                      <Loader2 className="spin" size={16} aria-hidden="true" />
+                    ) : (
+                      <Archive size={16} aria-hidden="true" />
+                    )}
                   </Button>
                 </Tooltip>
               )}
@@ -5258,8 +5298,10 @@ function TicketDetail({
                     <Button
                       type="button"
                       className="icon-button review-accept-button"
-                      onClick={acceptReviewTicket}
-                      disabled={busy || ticketUpdateActive || draftInProgress}
+                      onClick={() => {
+                        void acceptReviewTicket();
+                      }}
+                      disabled={busy || ticketUpdateActive || draftInProgress || !reviewActionState.acceptEnabled}
                       aria-label="Accept implementation"
                     >
                       <Check size={16} aria-hidden="true" />

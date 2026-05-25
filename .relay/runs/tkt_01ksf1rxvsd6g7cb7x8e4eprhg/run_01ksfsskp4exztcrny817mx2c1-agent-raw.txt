@@ -1,0 +1,17 @@
+{
+  "title": "Test detail archive affordance for completed containers",
+  "priority": "low",
+  "labels": ["ui", "test", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "tests/board-archive-button.test.tsx",
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/lib/boardArchive.ts"
+  ],
+  "patch": {
+    "summary": "Added `resolveDetailArchiveTarget` in boardArchive and six regression tests so ticket detail archive gating for completed epic/feature containers cannot regress silently.",
+    "fullMarkdown": "# Test detail archive affordance for completed containers\n\n## Requirements\n\n- Cover `resolveDetailArchiveTarget` `canArchive` true/false for completed vs incomplete epic and feature fixtures.\n- Assert archive control is absent when container status is not `completed`.\n\n## Acceptance Criteria\n\n- Detail archive tests fail if epic/feature types are omitted or eligible completed containers lose the archive button.\n- `tests/board-archive-button.test.tsx` runs green via `node tests/run-tests.mjs`.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

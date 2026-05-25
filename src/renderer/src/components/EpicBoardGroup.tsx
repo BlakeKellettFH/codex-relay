@@ -5,7 +5,12 @@ import type { FeatureBoardGroupItem } from "../lib/boardColumnLayout";
 import { showEpicArchive } from "../lib/boardArchive";
 import { epicGroupShouldExpandByDefault } from "../lib/boardColumnLayout";
 import { boardDragId, boardDragMoveAriaLabel } from "../lib/boardDragDrop";
-import { groupHasActiveChildTask } from "../lib/boardTaskProgress";
+import {
+  boardArchivingActiveLabel,
+  groupHasActiveChildTask,
+  hierarchyGroupActiveChildLabel,
+  showBoardContainerArchiveSpinner
+} from "../lib/boardTaskProgress";
 import { FeatureBoardGroup } from "./FeatureBoardGroup";
 import { hierarchyMarkerCssVars } from "../lib/boardHierarchyVisuals";
 import { useBoardHierarchyVisual } from "./BoardHierarchyVisualContext";
@@ -26,7 +31,6 @@ export function EpicBoardGroup({
   onTicketButtonRef,
   onArchiveEpic,
   onArchiveFeature,
-  archivingContainerIds,
   now
 }: {
   epic: TicketSummary;
@@ -42,7 +46,6 @@ export function EpicBoardGroup({
   onTicketButtonRef: (ticketId: string, node: HTMLButtonElement | null) => void;
   onArchiveEpic?: (epicId: string) => void;
   onArchiveFeature?: (featureId: string) => void;
-  archivingContainerIds?: ReadonlySet<string>;
   now: number;
 }): ReactElement {
   const [expanded, setExpanded] = useState(() => epicGroupShouldExpandByDefault(featureGroups, columns, allTickets));
@@ -57,9 +60,9 @@ export function EpicBoardGroup({
   const marker = useBoardHierarchyVisual(epic.id);
   const childTasks = featureGroups.flatMap((group) => group.tasks);
   const showGroupArchive = showEpicArchive(epic, columnId, allTickets);
-  const groupArchiveBusy = archivingContainerIds?.has(epic.id) ?? false;
+  const archivingContainer = showBoardContainerArchiveSpinner(epic);
   const taskCount = childTasks.length;
-  const activeChildTask = groupHasActiveChildTask(childTasks);
+  const activeChildTask = groupHasActiveChildTask(childTasks) || archivingContainer;
   const epicMeta = [
     `${featureGroups.length} feature${featureGroups.length === 1 ? "" : "s"}`,
     `${taskCount} task${taskCount === 1 ? "" : "s"} in column`
@@ -96,7 +99,9 @@ export function EpicBoardGroup({
         dragListeners={listeners}
         isDragging={isDragging}
         showArchive={showGroupArchive}
-        archiveBusy={groupArchiveBusy}
+        activeChildSpinnerLabel={
+          archivingContainer ? boardArchivingActiveLabel(epic) : hierarchyGroupActiveChildLabel(epic.title)
+        }
         onArchive={onArchiveEpic ? () => onArchiveEpic(epic.id) : undefined}
       />
 
@@ -119,7 +124,6 @@ export function EpicBoardGroup({
               onTicketFocus={onTicketFocus}
               onTicketButtonRef={onTicketButtonRef}
               onArchiveFeature={onArchiveFeature}
-              archivingContainerIds={archivingContainerIds}
               now={now}
             />
           ))}

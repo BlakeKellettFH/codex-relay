@@ -1,0 +1,22 @@
+{
+  "title": "Repository chat Cursor stream deltas and final text",
+  "priority": "high",
+  "labels": [
+    "backend",
+    "cursor",
+    "repository-chat"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/services/codex/index.ts",
+    "src/services/agents/cursorProvider.ts",
+    "tests/backend.test.ts",
+    "tests/cursor-cli.test.ts"
+  ],
+  "patch": {
+    "summary": "Repository chat now streams Cursor answer text from message.completed and terminal result events with suffix deduping, and final HTTP/SSE text matches via improved cursorProvider extraction.",
+    "fullMarkdown": "# Repository chat Cursor stream deltas and final text\n\n## Requirements\n\n- Forward assistant answer text from Cursor stream-json events used in practice (not only `agent.message.delta`).\n- Final `completed` event and HTTP response use the same trimmed answer string.\n- Cover stream-json sequences that previously produced zero deltas.\n\n## Acceptance Criteria\n\n- `tests/backend.test.ts` passes cursor-like payloads with answer text only at end or in `message.completed`.\n- Existing mocked delta stream test still passes.\n\n## Outcome\n\n- `repositoryChatAnswerTextFromRelayEvent` treats deltas as fragments and completed events as cumulative text; raw fallback handles `result` / `assistant` when normalization yields no text.\n- `sendRepositoryChatMessage` tracks `streamedAnswerText` and emits suffix-only deltas to avoid duplication.\n- `cursorAnswerTextFromEvents` prefers terminal completed/result text when it already includes prior fragments.\n- Tests added in `tests/backend.test.ts` and `tests/cursor-cli.test.ts`.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

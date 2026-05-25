@@ -72,13 +72,19 @@ export const linkedTasksForEpic = (epic: TicketSummary, allTickets: readonly Tic
   );
 };
 
+const isReviewOrTerminalTaskStatus = (status: string, columns: readonly RelayColumn[]): boolean =>
+  status === RELAY_REVIEW_STATUS || isTerminalTaskStatus(status, columns);
+
+const isReviewOrCompletedFeatureStatus = (status: string): boolean =>
+  status === RELAY_REVIEW_STATUS || status === RELAY_COMPLETED_STATUS;
+
 export const featureReadyForReview = (
   feature: TicketSummary,
   allTickets: readonly TicketSummary[],
   columns: readonly RelayColumn[]
 ): boolean => {
   const tasks = linkedTasksForFeature(feature, allTickets);
-  return tasks.length > 0 && tasks.every((task) => isTerminalTaskStatus(task.status, columns));
+  return tasks.length > 0 && tasks.every((task) => isReviewOrTerminalTaskStatus(task.status, columns));
 };
 
 export const epicReadyForReview = (
@@ -88,9 +94,9 @@ export const epicReadyForReview = (
 ): boolean => {
   const features = linkedFeaturesForEpic(epic, allTickets);
   if (features.length === 0) return false;
-  if (!features.every((feature) => feature.status === RELAY_COMPLETED_STATUS)) return false;
+  if (!features.every((feature) => isReviewOrCompletedFeatureStatus(feature.status))) return false;
   const tasks = linkedTasksForEpic(epic, allTickets);
-  return tasks.every((task) => isTerminalTaskStatus(task.status, columns));
+  return tasks.every((task) => isReviewOrTerminalTaskStatus(task.status, columns));
 };
 
 const ticketById = (board: BoardSnapshot, ticketId: string): TicketSummary | null =>

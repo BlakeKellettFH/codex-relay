@@ -1,0 +1,18 @@
+{
+  "title": "Wire archive UI for completed tasks and bundles",
+  "priority": "medium",
+  "labels": ["ui", "board", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/lib/boardArchive.ts",
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/components/BoardTaskCardLeading.tsx",
+    "tests/board-archive-button.test.tsx"
+  ],
+  "patch": {
+    "summary": "Completed tasks and bundles archive via agent update (`purpose: \"archive\"`) with board/detail buttons, busy state, and polling; container gating unchanged.",
+    "fullMarkdown": "# Wire archive UI for completed tasks and bundles\n\n## Requirements\n\n- Completed-column task cards show `BoardArchiveButton` when status is completed.\n- Completed task detail exposes Archive (same pattern as containers).\n- Archive flows use agent archive update, not `moveTicket` alone.\n\n## Acceptance Criteria\n\n- Completed task card archive removes the ticket from visible columns after a successful run.\n- Container archive still gates on `featureCanArchive` / `epicCanArchive` with existing toast messages.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

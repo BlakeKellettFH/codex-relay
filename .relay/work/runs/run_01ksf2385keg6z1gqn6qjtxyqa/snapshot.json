@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ksf2385keg6z1gqn6qjtxyqa",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ksf1h58s4jebdadpbe89mqg8",
+  "runId": "run_01ksf2385keg6z1gqn6qjtxyqa",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ksf1h58s4jebdadpbe89mqg8:run_01ksf2385keg6z1gqn6qjtxyqa",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-25T07:55:22.726Z",
+  "updatedAt": "2026-05-25T07:58:00.781Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ksf2388ahd65vk00q96sp5ca",
+    "leaseToken": "lease_01ksf2388ah6020ngc3skwg5qc",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-25T07:55:22.762Z",
+    "heartbeatAt": "2026-05-25T07:55:22.763Z",
+    "startedAt": "2026-05-25T07:55:22.763Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ksf1h58s4jebdadpbe89mqg8",
+    "idea": "Repository chat context:\nUser: i want to be able to have an accept on a epic and feature from the review tickets. if all tasks of a feature are complete or in review i want to be able to click accept on the whole feature and it should accept all tasks tickets as well as the feature ticket\n\nCreate a ticket from this latest user request:\nUser: i want to be able to have an accept on a epic and feature from the review tickets. if all tasks of a feature are complete or in review i want to be able to click accept on the whole feature and it should accept all tasks tickets as well as the feature ticket",
+    "effort": "medium",
+    "runId": "run_01ksf2385keg6z1gqn6qjtxyqa"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket draft completed.",
+  "result": {
+    "ticketId": "tkt_01ksf1h58s4jebdadpbe89mqg8",
+    "title": "Cascade accept for feature and epic review"
+  }
+}

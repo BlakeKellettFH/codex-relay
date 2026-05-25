@@ -98,7 +98,7 @@ test("linkedTasksForFeature merges subticketIds and parentFeatureId matches", ()
   assert.deepEqual(tasks.map((task) => task.id), ["task_a", "task_b"]);
 });
 
-test("featureReadyForReview requires at least one linked task and all terminal", () => {
+test("featureReadyForReview requires at least one linked task and all review or terminal", () => {
   const feature = ticket({ id: "feat_1", title: "Auth", ticketType: "feature", status: RELAY_TODO_STATUS });
   const openTask = ticket({
     id: "task_open",
@@ -114,18 +114,33 @@ test("featureReadyForReview requires at least one linked task and all terminal",
     status: RELAY_COMPLETED_STATUS,
     parentFeatureId: "feat_1"
   });
+  const reviewTask = ticket({
+    id: "task_review",
+    title: "Review",
+    ticketType: "task",
+    status: RELAY_REVIEW_STATUS,
+    parentFeatureId: "feat_1"
+  });
   assert.equal(featureReadyForReview(feature, [feature, openTask], DEFAULT_COLUMNS), false);
   assert.equal(featureReadyForReview(feature, [feature, doneTask], DEFAULT_COLUMNS), true);
+  assert.equal(featureReadyForReview(feature, [feature, reviewTask], DEFAULT_COLUMNS), true);
   assert.equal(featureReadyForReview(feature, [feature], DEFAULT_COLUMNS), false);
 });
 
-test("epicReadyForReview requires every feature completed and every task terminal", () => {
+test("epicReadyForReview requires every feature review or completed and every task review or terminal", () => {
   const epic = ticket({ id: "epic_1", title: "Platform", ticketType: "epic", status: RELAY_TODO_STATUS });
   const featureDone = ticket({
     id: "feat_done",
     title: "Done feature",
     ticketType: "feature",
     status: RELAY_COMPLETED_STATUS,
+    parentEpicId: "epic_1"
+  });
+  const featureReview = ticket({
+    id: "feat_review",
+    title: "Review feature",
+    ticketType: "feature",
+    status: RELAY_REVIEW_STATUS,
     parentEpicId: "epic_1"
   });
   const featureOpen = ticket({
@@ -143,6 +158,14 @@ test("epicReadyForReview requires every feature completed and every task termina
     parentFeatureId: "feat_done",
     parentEpicId: "epic_1"
   });
+  const taskReview = ticket({
+    id: "task_review",
+    title: "Review task",
+    ticketType: "task",
+    status: RELAY_REVIEW_STATUS,
+    parentFeatureId: "feat_review",
+    parentEpicId: "epic_1"
+  });
   const taskOpen = ticket({
     id: "task_open",
     title: "Open task",
@@ -153,6 +176,10 @@ test("epicReadyForReview requires every feature completed and every task termina
   });
   assert.equal(
     epicReadyForReview(epic, [epic, featureDone, taskDone], DEFAULT_COLUMNS),
+    true
+  );
+  assert.equal(
+    epicReadyForReview(epic, [epic, featureReview, taskReview], DEFAULT_COLUMNS),
     true
   );
   assert.equal(
@@ -177,6 +204,18 @@ test("resolveFeatureContainerStatus promotes to review and demotes from review t
   const board = boardSnapshot([feature, doneTask]);
   assert.equal(resolveFeatureContainerStatus(feature, board), RELAY_REVIEW_STATUS);
 
+  const reviewTask = ticket({
+    id: "task_review",
+    title: "Review",
+    ticketType: "task",
+    status: RELAY_REVIEW_STATUS,
+    parentFeatureId: "feat_1"
+  });
+  assert.equal(
+    resolveFeatureContainerStatus(feature, boardSnapshot([feature, reviewTask])),
+    RELAY_REVIEW_STATUS
+  );
+
   const reviewFeature = ticket({ ...feature, status: RELAY_REVIEW_STATUS });
   const openTask = ticket({
     id: "task_open",
@@ -189,6 +228,26 @@ test("resolveFeatureContainerStatus promotes to review and demotes from review t
     resolveFeatureContainerStatus(reviewFeature, boardSnapshot([reviewFeature, openTask])),
     RELAY_TODO_STATUS
   );
+});
+
+test("resolveEpicContainerStatus promotes epic when all features and tasks are review or terminal", () => {
+  const epic = ticket({ id: "epic_1", title: "Platform", ticketType: "epic", status: RELAY_TODO_STATUS });
+  const feature = ticket({
+    id: "feat_1",
+    title: "Auth",
+    ticketType: "feature",
+    status: RELAY_REVIEW_STATUS,
+    parentEpicId: "epic_1"
+  });
+  const task = ticket({
+    id: "task_1",
+    title: "Task",
+    ticketType: "task",
+    status: RELAY_REVIEW_STATUS,
+    parentFeatureId: "feat_1",
+    parentEpicId: "epic_1"
+  });
+  assert.equal(resolveEpicContainerStatus(epic, boardSnapshot([epic, feature, task])), RELAY_REVIEW_STATUS);
 });
 
 test("resolveEpicContainerStatus demotes epic in review when a feature leaves completed", () => {

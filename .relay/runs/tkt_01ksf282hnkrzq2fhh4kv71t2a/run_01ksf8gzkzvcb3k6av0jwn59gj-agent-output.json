@@ -1,0 +1,20 @@
+{
+  "title": "Cascade accept in ticket detail UI",
+  "priority": "medium",
+  "labels": [
+    "ui",
+    "review",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "tests/ticket-draft-ui.test.tsx"
+  ],
+  "patch": {
+    "summary": "Ticket detail Accept cascades accept-bundle moves for features and epics in review, with eligibility-based disable; task accept and reject behavior unchanged.",
+    "fullMarkdown": "# Cascade accept in ticket detail UI\n\n## Requirements\n\n- Feature or epic in `review`: Accept runs `acceptBundle` via `moveTicketMutation` with suppression on task moves.\n- Disable Accept when `featureEligibleForBulkAccept` or `epicEligibleForBulkAccept` is false.\n- Review status notes describe cascade accept vs non-cascade reject.\n- Task Accept path unchanged.\n\n## Acceptance Criteria\n\n- Accept on a review feature with two review tasks completes all three tickets.\n- Accept disabled when any linked task is `in_progress`.\n- Reject on a review feature completes only the feature.\n- `tests/ticket-draft-ui.test.tsx` reflects updated copy and eligibility helpers.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

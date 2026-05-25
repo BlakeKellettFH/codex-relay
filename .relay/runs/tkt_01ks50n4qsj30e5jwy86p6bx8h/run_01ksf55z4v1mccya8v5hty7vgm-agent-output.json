@@ -1,0 +1,28 @@
+{
+  "title": "Add provider selection persistence and switchability APIs",
+  "priority": "high",
+  "labels": [
+    "backend",
+    "agent-providers",
+    "api"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/shared/schemas/registry.ts",
+    "src/shared/schemas/agents.ts",
+    "src/shared/schemas/index.ts",
+    "src/services/registry/index.ts",
+    "src/shared/http/agents.ts",
+    "src/shared/http/index.ts",
+    "src/http/resources/agents.ts",
+    "src/http/resources/index.ts",
+    "tests/schemas.test.ts",
+    "tests/backend.test.ts"
+  ],
+  "patch": {
+    "summary": "Shipped shared provider schemas plus GET/POST provider APIs with registry-backed global selection (legacy default codex). Switching is blocked when the target is unusable or any registered project has active work-ledger snapshots.",
+    "fullMarkdown": "# Add provider selection persistence and switchability APIs\n\n## Requirements\n\n- Shared schema for codex, cursor, and claude with install/auth state and selected provider id\n- Registry persists global selected provider across restarts; existing installs default to codex\n- Additive HTTP endpoints to read provider inventory/selection and switch providers\n- Block switch when target is unavailable, unauthenticated, status unknown, or incomplete work-ledger snapshots exist in any registered project\n- Busy guard uses work-ledger snapshots, not sidebar counts; blocks on created, queued, running, cancelling, and stale\n\n## Acceptance Criteria\n\n- Read returns three providers, selected id, and switchability metadata\n- Allowed switch persists selection; blocked switch is deterministic and leaves registry unchanged\n- Schema tests cover migration when selected provider field is absent\n",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

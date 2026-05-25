@@ -8,11 +8,11 @@
   "action": "draft",
   "kind": "ticket.draft",
   "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ksf1exckn6dxhhy05deq7qrr:run_01ksf1exbsmfeygyc9sn66xvpy",
-  "status": "running",
+  "status": "completed",
   "attempts": 1,
   "createdAt": "2026-05-25T07:44:16.292Z",
-  "updatedAt": "2026-05-25T07:44:16.300Z",
-  "lastAppliedEventSequence": 4,
+  "updatedAt": "2026-05-25T07:49:44.450Z",
+  "lastAppliedEventSequence": 5,
   "executor": "agent",
   "providerId": "codex",
   "requiredCapabilities": [
@@ -44,5 +44,9 @@
     "providerId": "cursor",
     "executor": "agent"
   },
-  "message": "Ticket draft generation started."
+  "message": "Ticket draft completed.",
+  "result": {
+    "ticketId": "tkt_01ksf1exckn6dxhhy05deq7qrr",
+    "title": "Archive completed epic and feature bundles from ticket detail"
+  }
 }

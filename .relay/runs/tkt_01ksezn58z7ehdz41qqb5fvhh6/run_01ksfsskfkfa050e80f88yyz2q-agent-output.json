@@ -1,0 +1,20 @@
+{
+  "title": "Add blockedByTitles to lean task draft schema and Codex prompts",
+  "priority": "medium",
+  "labels": [
+    "drafting",
+    "schema"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/shared/schemas/ticket.ts",
+    "src/services/codex/index.ts",
+    "tests/schemas.test.ts"
+  ],
+  "patch": {
+    "summary": "Added optional blockedByTitles to the lean task draft schema and Codex prompts so feature drafts can declare sibling dependencies by title; mapping titles to blockedByIds on apply is a follow-up slice.",
+    "fullMarkdown": "# Add blockedByTitles to lean task draft schema and Codex prompts\n\n## Requirements\n\n- Optional `blockedByTitles` string array on `leanTaskDraftSchema` and Codex `leanTaskDraftSchemaJson`.\n- `normalizeLeanTaskDraft` trims, dedupes, and drops empty title strings via `cleanStringList`.\n- Feature-mode draft prompt tells agents to use `blockedByTitles` for sibling dependencies only.\n\n## Acceptance Criteria\n\n- Hierarchy draft plans parse with `leanTasks[].blockedByTitles`.\n- Codex draft JSON schema accepts the field; drafts without it still validate.\n\n## Delivered\n\n- `ticket.ts`: `blockedByTitles` on `leanTaskDraftSchema`.\n- `codex/index.ts`: JSON schema property, normalization, hierarchy and feature prompt bullets.\n- `schemas.test.ts`: parse coverage for absent and present `blockedByTitles`.\n\n## Follow-up\n\n- Apply/materialize: resolve `blockedByTitles` → `blockedByIds` when persisting feature trees.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

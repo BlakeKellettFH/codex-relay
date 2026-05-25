@@ -1,0 +1,19 @@
+{
+  "title": "Insert TEMP at top of README.md",
+  "priority": "low",
+  "labels": [
+    "docs",
+    "readme",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "README.md"
+  ],
+  "patch": {
+    "summary": "Prepended the TEMP intake banner to README.md: line 1 is TEMP, line 2 blank, line 3 is # Relay with the rest of the file unchanged.",
+    "fullMarkdown": "# Insert TEMP at top of README.md\n\n## Requirements\n\n- Line 1 of README.md is exactly `TEMP`.\n- Line 2 is blank; line 3 is `# Relay`; content below unchanged.\n- Only README.md is edited.\n\n## Acceptance Criteria\n\n- `head -n 3 README.md` shows TEMP, blank line, then `# Relay`.\n- `git diff README.md` shows only the top prepend.\n- No other repository files are modified.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

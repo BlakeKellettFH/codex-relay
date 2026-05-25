@@ -1,0 +1,222 @@
+{
+  "draftState": "ready",
+  "blockingClarificationQuestions": [],
+  "ticketType": "feature",
+  "title": "Cascade accept for feature and epic review",
+  "summary": "Accepting a feature or epic in Review will complete every eligible child still in review, then the container—so reviewers can close a whole slice in one action instead of accepting tasks one by one.\n- Accept cascades to linked tasks (and epic features) in `review`; reject stays single-ticket\n- Accept enabled only when every descendant is `review` or terminal; blocks `todo`/`ready`/`in_progress`\n- Extends tkt_01ks6810 layered review; parent completes only when all children are ready\n\nMain risk is mid-batch parent demotion from `maybePromoteOrDemoteContainers`—suppress reconciliation during bundle moves.",
+  "priority": "medium",
+  "labels": [
+    "board",
+    "review",
+    "hierarchy",
+    "ux"
+  ],
+  "context": "User wants Accept on a feature or epic in Review to also accept all child tasks (and, for epics, child features) when every descendant is already `completed` or `review`. This extends parent feature tkt_01ks6810f8qgk82fbeh7wfbqga, whose four child tasks shipped non-cascade Accept/Reject UI. Clarification: a parent feature or epic may move to Completed only when no linked work remains in active workflow columns (`todo`, `ready`, `in_progress`, etc.).",
+  "researchFindings": [
+    "`acceptReviewTicket` in `src/renderer/src/App.tsx` (~L4656) calls `moveTicketTo(RELAY_COMPLETED_STATUS)` for only the opened ticket; `getContainerTicketStatusNote` (~L1973) says Accept moves only the container.",
+    "`getTicketReviewActionState` (~L1955) shows Accept/Reject for task/feature/epic in `review` with no child-eligibility check.",
+    "`featureReadyForReview` / `epicReadyForReview` in `src/domain/boardReview.ts` use `isTerminalTaskStatus` only—`review` does not satisfy promotion; `epicReadyForReview` requires every linked feature `completed`.",
+    "`maybePromoteOrDemoteContainers` in `src/storage/boardReconciliation.ts` runs after every task `moveTicket` (`filesystem.ts` ~L1978); sequential task completes can demote a parent feature from `review` to `todo` mid-batch.",
+    "Archive bundles bottom-up via `archiveBundleForFeature`, `archiveBundleForEpic`, `sortArchiveBundleIds` in `src/renderer/src/lib/boardArchive.ts`; `archiveBundle` in `App.tsx` iterates sorted ids.",
+    "SPEC.md §5.5.1 (~L488–492) documents non-cascade container accept; must be updated for cascade accept while keeping task-only and reject paths unchanged.",
+    "Tests: `tests/board-review.test.ts` (gates), `tests/ticket-draft-ui.test.tsx` (~L774, non-cascade copy), `tests/backend.test.ts` (~L5361, feature promotion on task complete)."
+  ],
+  "requirements": [
+    "When a feature in `review` is accepted, move every linked task in `review` to `completed`, then move the feature to `completed`; leave tasks already terminal unchanged.",
+    "When an epic in `review` is accepted, move every linked feature in `review` (and their tasks in `review`) to `completed`, then move the epic to `completed`.",
+    "Enable Accept only when the container is in `review` and every linked descendant is `review` or terminal (`completed`, `not_doing`, `archive`, or a column with `terminal: true`); descendants in `todo`, `ready`, or `in_progress` disable Accept with clear copy.",
+    "Reject on feature/epic stays non-cascade (only the opened container moves to `completed`).",
+    "Task Accept remains single-ticket; accepting a task must not auto-accept its parent feature or epic.",
+    "Align container promotion gates with bulk-accept eligibility: treat child `review` like terminal for `featureReadyForReview`; treat features `review` or `completed` (and tasks review-or-terminal) for `epicReadyForReview`.",
+    "Update SPEC.md §5.5.1 and supersede non-cascade acceptance criteria on parent feature tkt_01ks6810f8qgk82fbeh7wfbqga."
+  ],
+  "implementationPlan": [
+    "Add `src/domain/boardAccept.ts` with `isReviewOrTerminalTaskStatus`, `featureEligibleForBulkAccept`, `epicEligibleForBulkAccept`, `acceptBundleForFeature`, `acceptBundleForEpic`, and `sortAcceptBundleIds` (tasks→features→epics); re-export from `src/renderer/src/lib/boardAccept.ts`.",
+    "Update `featureReadyForReview` / `epicReadyForReview` in `src/domain/boardReview.ts` to count child `review` as satisfying promotion; keep demotion when a child leaves review-or-terminal.",
+    "Extend `ticketMoveInputSchema` with optional `suppressContainerReconciliation`; in `moveTicket` skip `maybePromoteOrDemoteContainers` when true for task moves.",
+    "Wire `acceptReviewTicket` in `App.tsx` to compute bundle ids, loop `moveTicketMutation` with suppression on task moves, then move the container; disable Accept when eligibility fails.",
+    "Replace `getContainerTicketStatusNote` review copy to describe cascade accept; keep reject copy non-cascade.",
+    "Update SPEC.md §5.5.1 container accept bullets to document cascade scope and eligibility."
+  ],
+  "testPlan": [
+    "`node tests/run-tests.mjs tests/board-accept.test.ts` — bundle ordering, eligibility, accept-only-`review` ids.",
+    "`node tests/run-tests.mjs tests/board-review.test.ts` — promotion when all children `review` or terminal; demotion on reopen.",
+    "`node tests/run-tests.mjs tests/ticket-draft-ui.test.tsx` — updated container review notes and accept eligibility wiring.",
+    "`node tests/run-tests.mjs tests/backend.test.ts` — bulk feature accept completes review tasks + feature without mid-batch parent demotion."
+  ],
+  "acceptanceCriteria": [
+    "Feature in Review with all tasks `review` or terminal: Accept completes every task still in `review`, then the feature; board shows no review-blocked children.",
+    "Epic in Review with all features `review` or `completed` and all tasks `review` or terminal: Accept completes nested review tickets, then the epic.",
+    "Any linked task in `todo`, `ready`, or `in_progress` disables Accept and shows why in detail copy.",
+    "Reject on feature/epic in Review moves only that container to `completed`; child tasks/features unchanged.",
+    "Task Accept still moves only the opened task.",
+    "SPEC §5.5.1 matches cascade accept behavior; parent feature tkt_01ks6810 acceptance criteria updated or marked superseded."
+  ],
+  "clarificationQuestions": [],
+  "assumptions": [
+    "Parent feature tkt_01ks6810 is not auto-moved to Completed as part of implementation; it completes only via normal gates when every descendant is `review` or terminal (per clarification).",
+    "Bulk-accept scope moves only descendants with `status === review`; already-terminal children are left as-is.",
+    "Promotion gates and bulk-accept eligibility both treat child `review` as ready (user: complete or in review).",
+    "Reject path and workspace revert-on-reject remain out of scope.",
+    "Implementation loops existing `moveTicket` with `suppressContainerReconciliation` rather than a new HTTP route."
+  ],
+  "implementationNotes": [
+    "Supersedes non-cascade Accept criteria on tkt_01ks6810f8qgk82fbeh7wfbqga; child tasks tkt_01ks68bhm* remain the storage/UI/SPEC foundation.",
+    "Reuse `linkedTasksForFeature` / `linkedFeaturesForEpic` from `src/domain/boardReview.ts` for bundle membership.",
+    "Container `moveTicket` already skips reconciliation; only task moves in the accept loop need suppression."
+  ],
+  "plannedFiles": [
+    "src/domain/boardAccept.ts",
+    "src/domain/boardReview.ts",
+    "src/renderer/src/lib/boardAccept.ts",
+    "src/renderer/src/lib/boardReview.ts",
+    "src/shared/schemas/ticket.ts",
+    "src/storage/filesystem.ts",
+    "src/renderer/src/App.tsx",
+    "SPEC.md",
+    "tests/board-accept.test.ts",
+    "tests/board-review.test.ts",
+    "tests/ticket-draft-ui.test.tsx",
+    "tests/backend.test.ts"
+  ],
+  "subtickets": [],
+  "featureStubs": [],
+  "leanTasks": [
+    {
+      "title": "Accept bundle and promotion-gate domain helpers",
+      "summary": "Introduce accept-bundle and eligibility helpers and align promotion gates with review-or-terminal children.\n- New `boardAccept` domain module + renderer re-export\n- `featureReadyForReview` / `epicReadyForReview` count child `review`\n- Unit tests for bundles and eligibility",
+      "priority": "medium",
+      "labels": [
+        "backend",
+        "review"
+      ],
+      "context": "Foundation for cascade accept; mirrors `boardArchive.ts` bundle shape.",
+      "goal": "Pure functions compute accept bundles, eligibility, and updated promotion gates without UI or storage changes.",
+      "requirements": [
+        "Add accept bundle builders and `sortAcceptBundleIds` (tasks before features before epics).",
+        "Eligibility: all linked tasks `review` or terminal; epic also requires features `review` or `completed`.",
+        "Bundles include only ticket ids with `status === review` plus the container id last.",
+        "Update `featureReadyForReview` / `epicReadyForReview` to treat child `review` as satisfying gates."
+      ],
+      "acceptanceCriteria": [
+        "`tests/board-accept.test.ts` passes for feature/epic bundles and blocked eligibility.",
+        "`tests/board-review.test.ts` passes with updated promotion cases for all-`review` children."
+      ],
+      "implementationPlan": [
+        "Create `src/domain/boardAccept.ts` with eligibility and bundle helpers using `linkedTasksForFeature` / `linkedFeaturesForEpic`.",
+        "Update `src/domain/boardReview.ts` promotion helpers to use review-or-terminal checks.",
+        "Add `src/renderer/src/lib/boardAccept.ts` re-export; extend `src/renderer/src/lib/boardReview.ts` if needed.",
+        "Add `tests/board-accept.test.ts`; update `tests/board-review.test.ts` promotion fixtures."
+      ],
+      "assumptions": [
+        "Bundle membership uses the same linked-child resolution as `boardReview.ts`."
+      ],
+      "plannedFiles": [
+        "src/domain/boardAccept.ts",
+        "src/domain/boardReview.ts",
+        "src/renderer/src/lib/boardAccept.ts",
+        "src/renderer/src/lib/boardReview.ts",
+        "tests/board-accept.test.ts",
+        "tests/board-review.test.ts"
+      ]
+    },
+    {
+      "title": "Suppress reconciliation during bulk accept moves",
+      "summary": "Prevent `maybePromoteOrDemoteContainers` from demoting parents while accepting a review bundle.\n- Optional `suppressContainerReconciliation` on `TicketMoveInput`\n- `moveTicket` honors flag for task moves\n- Backend test for multi-task feature accept",
+      "priority": "medium",
+      "labels": [
+        "backend",
+        "storage"
+      ],
+      "context": "Mid-batch demotion is the main regression risk when completing review tasks sequentially.",
+      "goal": "Storage supports sequential accept-bundle moves without parent demotion between task completions.",
+      "requirements": [
+        "Add `suppressContainerReconciliation?: boolean` to `ticketMoveInputSchema`.",
+        "When true on a task move, skip `maybePromoteOrDemoteContainers` after `transitionTicketStatus`.",
+        "Default behavior unchanged when flag omitted."
+      ],
+      "acceptanceCriteria": [
+        "Accepting two review tasks then a review feature leaves the feature in `completed`, not demoted to `todo` mid-batch.",
+        "`tests/backend.test.ts` covers the bulk-accept path."
+      ],
+      "implementationPlan": [
+        "Extend `ticketMoveInputSchema` in `src/shared/schemas/ticket.ts`.",
+        "Guard `maybePromoteOrDemoteContainers` in `src/storage/filesystem.ts` `moveTicket`.",
+        "Add backend integration test: feature in `review`, two tasks in `review`, sequential completes with suppression, then feature complete."
+      ],
+      "assumptions": [
+        "No new dedicated HTTP route required if UI passes the suppress flag on each bundle task move."
+      ],
+      "plannedFiles": [
+        "src/shared/schemas/ticket.ts",
+        "src/storage/filesystem.ts",
+        "tests/backend.test.ts"
+      ]
+    },
+    {
+      "title": "Cascade accept in ticket detail UI",
+      "summary": "Wire Accept on feature/epic review detail to run the accept bundle and update user-facing copy.\n- `acceptReviewTicket` loops bundle moves with suppression\n- Disable Accept when eligibility fails\n- Update `getContainerTicketStatusNote`",
+      "priority": "medium",
+      "labels": [
+        "ui",
+        "review"
+      ],
+      "context": "User-visible behavior change on the existing Accept button in ticket detail.",
+      "goal": "Review detail Accept cascades to children; Reject and task Accept stay unchanged.",
+      "requirements": [
+        "For feature/epic in `review`, Accept runs `acceptBundle` order via `moveTicketMutation` with suppression on task moves.",
+        "Disable Accept when `featureEligibleForBulkAccept` / `epicEligibleForBulkAccept` is false.",
+        "Update review status notes to describe cascade accept vs non-cascade reject.",
+        "Task Accept path unchanged."
+      ],
+      "acceptanceCriteria": [
+        "Accept on review feature with two review tasks completes all three tickets.",
+        "Accept disabled when any linked task is `in_progress`.",
+        "Reject on review feature completes only the feature.",
+        "`tests/ticket-draft-ui.test.tsx` reflects new copy."
+      ],
+      "implementationPlan": [
+        "Import accept helpers in `src/renderer/src/App.tsx`; extend `acceptReviewTicket` to branch on `ticketType`.",
+        "Add eligibility to `reviewActionState` useMemo or parallel helper; bind `disabled` on Accept button.",
+        "Update `getContainerTicketStatusNote` strings for review status.",
+        "Adjust `tests/ticket-draft-ui.test.tsx` expectations."
+      ],
+      "assumptions": [
+        "Success toast can summarize count of accepted tickets (e.g. Feature and 2 tasks accepted)."
+      ],
+      "plannedFiles": [
+        "src/renderer/src/App.tsx",
+        "tests/ticket-draft-ui.test.tsx"
+      ]
+    },
+    {
+      "title": "SPEC cascade accept documentation",
+      "summary": "Document cascade accept semantics in SPEC and note parent-feature supersession.\n- §5.5.1 layered review bullets\n- Remove non-cascade accept MUST language",
+      "priority": "low",
+      "labels": [
+        "docs",
+        "spec"
+      ],
+      "context": "Keeps SPEC aligned with shipped behavior for future agents.",
+      "goal": "SPEC accurately describes cascade accept eligibility, scope, and unchanged reject/task behavior.",
+      "requirements": [
+        "Replace §5.5.1 non-cascade Accept bullet with cascade accept rules matching domain helpers.",
+        "Document eligibility (all descendants `review` or terminal) and scope (only `review` descendants move).",
+        "State reject remains non-cascade; task accept remains single-ticket."
+      ],
+      "acceptanceCriteria": [
+        "SPEC §5.5.1 matches implemented cascade accept and reject behavior."
+      ],
+      "implementationPlan": [
+        "Edit SPEC.md §5.5.1 container accept/reject and epic/feature review gate bullets.",
+        "Cross-check wording against `getContainerTicketStatusNote` in App.tsx."
+      ],
+      "assumptions": [
+        "No §6 board-layout changes required beyond accept semantics."
+      ],
+      "plannedFiles": [
+        "SPEC.md"
+      ]
+    }
+  ]
+}

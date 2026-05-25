@@ -1797,6 +1797,12 @@ export const transitionTicketStatus = async (
   const record = await readTicket(projectPath, ticketId);
   if (record.frontMatter.ticketType === "epic" || record.frontMatter.ticketType === "feature") {
     const allowedContainerStatuses = new Set([RELAY_REVIEW_STATUS, RELAY_COMPLETED_STATUS, RELAY_ARCHIVE_STATUS]);
+    if (options.source === "archive_queue") {
+      allowedContainerStatuses.add(RELAY_READY_STATUS);
+    }
+    if (options.source === "archive_processing") {
+      allowedContainerStatuses.add(RELAY_IN_PROGRESS_STATUS);
+    }
     if (!allowedContainerStatuses.has(targetStatus)) {
       throw new Error(
         "Epic and feature tickets can only move to Review, Completed, or Archive. Move child tasks between columns instead."
@@ -1975,7 +1981,7 @@ export const moveTicket = async (input: TicketMoveInput): Promise<BoardSnapshot>
     beforeTicketId: input.beforeTicketId,
     afterTicketId: input.afterTicketId
   });
-  if (updated.frontMatter.ticketType === "task") {
+  if (updated.frontMatter.ticketType === "task" && !input.suppressContainerReconciliation) {
     const { maybePromoteOrDemoteContainers } = await import("./boardReconciliation");
     await maybePromoteOrDemoteContainers(input.projectPath, input.ticketId);
   }

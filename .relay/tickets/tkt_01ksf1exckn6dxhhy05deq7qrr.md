@@ -1,45 +1,58 @@
 ---
 schemaVersion: 1
 id: tkt_01ksf1exckn6dxhhy05deq7qrr
-title: >-
-  Draft: Repository chat context: User: I need an archive button in the
-  completed tick...
-ticketType: draft_ticket
-status: todo
-position: 12000
+title: Archive completed epic and feature bundles from ticket detail
+ticketType: feature
+draftTargetType: null
+status: archive
+position: 42000
 priority: medium
 effort: medium
-labels: []
-draftTargetType: feature
+labels:
+  - board
+  - tickets
+  - archive
+  - ui
 parentEpicId: null
 parentFeatureId: null
-subticketIds: []
+subticketIds:
+  - tkt_01ksf1rxtmf1p8tfj4xrx15mty
+  - tkt_01ksf1rxv6tgkswvbmbf4kvef8
+  - tkt_01ksf1rxvsd6g7cb7x8e4eprhg
 plannedFiles: []
 blockedByIds: []
 relatedTicketIds: []
 createdAt: '2026-05-25T07:44:16.275Z'
-updatedAt: '2026-05-25T07:44:16.276Z'
-authoringState: drafting
-summary: ''
+updatedAt: '2026-05-25T14:55:08.354Z'
+authoringState: ready
+summary: >-
+  Completed epic and feature ticket detail now offers a gated Archive control
+  that archives the full descendant bundle in one action via POST
+  /api/tickets/archive, matching board archive behavior and adding route and
+  detail affordance tests.
 codexThreadId: null
-runStatus: drafting
-lastRunId: run_01ksf1exbsmfeygyc9sn66xvpy
+runStatus: idle
+lastRunId: null
 lastRunStartedAt: null
 ---
-# Draft: Repository chat context: User: I need an archive button in the completed tick...
+# Archive completed epic and feature bundles from ticket detail
 
-## Drafting State
+## Context
 
-The agent is drafting this ticket. The generated plan will replace this placeholder when the draft run completes.
+Completed epic or feature ticket detail exposes one Archive action that archives the full descendant tree when every child task is complete. Board Completed-column archive entry points share the same bundle helpers, gating, and POST archive API.
 
-## Original Idea
+## Requirements
 
-Repository chat context:
-User: I need an archive button in the completed ticket view, on the epic and features, if all tasks are compelte i should be able to open that ticket and click arcchive to archive all the epic feature and task ticks in one go
+- Show Archive on completed epic/feature detail when an archive column exists
+- Enable only when `featureCanArchive` or `epicCanArchive`; otherwise show the blocked toast
+- One click archives the container plus descendants bottom-up with agent lean rewrite
+- Board archive triggers remain behavior-equivalent
+- No clarification questions during archive runs
 
-Create a ticket from this latest user request:
-User: I need an archive button in the completed ticket view, on the epic and features, if all tasks are compelte i should be able to open that ticket and click arcchive to archive all the epic feature and task ticks in one go
+## Acceptance Criteria
 
-## Codex Handoff
-
-Ticket draft generation is in progress.
+- Completed feature with all tasks done: detail Archive moves feature and tasks off visible board columns
+- Completed epic with full tree done: archives epic, features, and tasks in one action
+- Completed container with an incomplete child: blocked toast, no tickets move
+- Archive flows use `POST /api/tickets/archive` via `useArchiveTicketMutation`, not client-side update polling
+- `node tests/run-tests.mjs` passes, including archive route and detail affordance coverage

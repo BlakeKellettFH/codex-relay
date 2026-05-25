@@ -6,8 +6,11 @@ import {
   RELAY_COMPLETED_STATUS
 } from "../src/shared/schemas/board";
 import {
+  archiveAllCompletedContainerBundleIds,
   archiveBundleForEpic,
   archiveBundleForFeature,
+  archivableCompletedEpics,
+  archivableCompletedFeatures,
   epicCanArchive,
   featureCanArchive,
   showEpicArchive,
@@ -170,6 +173,71 @@ test("sortArchiveBundleIds archives tasks before features and epics", () => {
   assert.deepEqual(sortArchiveBundleIds(["epic_1", "feat_a", "task_done"], allTickets), [
     "task_done",
     "feat_a",
+    "epic_1"
+  ]);
+});
+
+test("archiveAllCompletedContainerBundleIds archives completed epics and standalone features", () => {
+  const epic = ticket({ id: "epic_1", title: "Platform", ticketType: "epic", status: RELAY_COMPLETED_STATUS });
+  const featureUnderEpic = ticket({
+    id: "feat_a",
+    title: "Auth",
+    ticketType: "feature",
+    status: RELAY_COMPLETED_STATUS,
+    parentEpicId: "epic_1"
+  });
+  const standaloneFeature = ticket({
+    id: "feat_solo",
+    title: "Ops",
+    ticketType: "feature",
+    status: RELAY_COMPLETED_STATUS
+  });
+  const doneTask = ticket({
+    id: "task_done",
+    title: "Done",
+    ticketType: "task",
+    status: RELAY_COMPLETED_STATUS,
+    parentFeatureId: "feat_a",
+    parentEpicId: "epic_1"
+  });
+  const soloTask = ticket({
+    id: "task_solo",
+    title: "Solo done",
+    ticketType: "task",
+    status: RELAY_COMPLETED_STATUS,
+    parentFeatureId: "feat_solo"
+  });
+  const pendingTask = ticket({
+    id: "task_open",
+    title: "Open",
+    ticketType: "task",
+    status: "todo",
+    parentFeatureId: "feat_blocked",
+    parentEpicId: "epic_1"
+  });
+  const blockedFeature = ticket({
+    id: "feat_blocked",
+    title: "Blocked",
+    ticketType: "feature",
+    status: RELAY_COMPLETED_STATUS,
+    parentEpicId: "epic_1"
+  });
+  const allTickets = [epic, featureUnderEpic, standaloneFeature, doneTask, soloTask, pendingTask, blockedFeature];
+
+  assert.equal(archivableCompletedEpics(allTickets).length, 0);
+  assert.deepEqual(
+    archivableCompletedFeatures(allTickets, new Set()).map((ticket) => ticket.id),
+    ["feat_solo"]
+  );
+
+  const completeEpicTree = [epic, featureUnderEpic, doneTask, standaloneFeature, soloTask];
+  assert.equal(archivableCompletedEpics(completeEpicTree).length, 1);
+  assert.equal(archivableCompletedFeatures(completeEpicTree, new Set(["epic_1"])).length, 1);
+  assert.deepEqual(archiveAllCompletedContainerBundleIds(completeEpicTree), [
+    "task_done",
+    "task_solo",
+    "feat_a",
+    "feat_solo",
     "epic_1"
   ]);
 });

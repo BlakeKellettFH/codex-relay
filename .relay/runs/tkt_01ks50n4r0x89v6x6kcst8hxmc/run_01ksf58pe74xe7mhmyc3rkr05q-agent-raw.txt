@@ -1,0 +1,20 @@
+{
+  "title": "Add the sidebar CLI selector modal and status wiring",
+  "priority": "high",
+  "labels": ["renderer", "sidebar", "ux"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/lib/relayApi.ts",
+    "src/renderer/src/lib/relayQueries.ts",
+    "src/renderer/src/styles.css",
+    "tests/project-sidebar.test.tsx",
+    "tests/ticket-draft-ui.test.tsx"
+  ],
+  "patch": {
+    "summary": "Shipped a shared sidebar CLI selector modal for Codex, Cursor, and Claude with provider-aware footer labeling, disabled switch rules, and renderer inventory/switch wiring.",
+    "fullMarkdown": "# Add the sidebar CLI selector modal and status wiring\n\n## Requirements\n\n- Expanded sidebar footer and collapsed status control open the same provider selector modal.\n- Modal lists Codex, Cursor, and Claude with status copy, version when known, and `Use CLI` or `In use` actions.\n- `Use CLI` is disabled for providers that are not installed, unauthenticated, or `Installed, status unknown`, with explanatory text.\n- Footer status label reflects the selected provider, not always Codex.\n- Modal supports refresh, close, and Escape via the existing overlay shortcut pattern.\n\n## Acceptance Criteria\n\n- Sidebar tests render footer and modal trigger without regressing hide/add-project controls.\n- Modal shows correct disabled states and current-selection state for all three providers.\n- Collapsed indicator opens the selector instead of silently refetching provider status.\n- Renderer queries and mutations update visible selected-provider state after a successful switch.\n\n## Delivered\n\n- Provider inventory query and switch mutation in `relayApi.ts` / `relayQueries.ts` with cache sync after switch.\n- Shared selector modal and selected-provider labels in `App.tsx` for expanded and collapsed sidebar paths.\n- Modal row styling in `styles.css`; coverage in `project-sidebar.test.tsx` and `ticket-draft-ui.test.tsx` (45 targeted tests passed).",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

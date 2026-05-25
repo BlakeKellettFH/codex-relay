@@ -1,0 +1,18 @@
+{
+  "title": "Isolate repository chat transcript from draft re-renders",
+  "priority": "medium",
+  "labels": ["repository-chat", "ui", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/components/RepositoryChatTranscript.tsx",
+    "src/renderer/src/components/RepositoryChatComposer.tsx",
+    "tests/ticket-draft-ui.test.tsx"
+  ],
+  "patch": {
+    "summary": "Split repository chat into memoized transcript and draft-bound composer so keystrokes no longer re-render message Markdown; stabilized copy callbacks preserve memo benefits.",
+    "fullMarkdown": "# Isolate repository chat transcript from draft re-renders\n\n## Requirements\n\n- Memoized `RepositoryChatTranscript` for messages, pending/thinking/draft indicators, and errors — no `draft` prop.\n- `RepositoryChatComposer` owns textarea, options, and actions with `draft` / `onDraftChange`.\n- Keep `RepositoryChatPanelContent` export and DOM shape stable for `tests/ticket-draft-ui.test.tsx`.\n- Stabilize answer-copy callbacks in `RepositoryChatPanel` so memo is not defeated by inline handlers.\n\n## Acceptance Criteria\n\n- Draft-only edits leave transcript props unchanged when messages, pending flags, and error are unchanged.\n- `ticket-draft-ui` repository chat markup tests and transcript-isolation assertion pass.\n- Long assistant replies stay stable while typing (no transcript flicker or scroll reset).",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

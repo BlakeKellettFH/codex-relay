@@ -22,7 +22,8 @@ import {
   tasksEligibleForReadyQueue,
   tasksForNotDoingDrop,
   tasksForTodoRestore,
-  validateRestoreDragToTodo
+  validateRestoreDragToTodo,
+  validateReviewDragToCompleted
 } from "../src/renderer/src/lib/boardDragDrop";
 import type { RelayColumn, TicketSummary } from "../src/shared/schemas";
 
@@ -55,6 +56,7 @@ const ticket = (patch: Partial<TicketSummary> & Pick<TicketSummary, "id" | "titl
 const columns: RelayColumn[] = [
   { id: "todo", name: "Todo", position: 1000, terminal: false },
   { id: "ready", name: "Ready", position: 1500, terminal: false },
+  { id: "review", name: "Review", position: 4000, terminal: false },
   { id: "not_doing", name: "Not Doing", position: 1600, terminal: true },
   { id: "completed", name: "Completed", position: 5000, terminal: true }
 ];
@@ -79,6 +81,7 @@ test("board drag ids parse task, feature, epic, and drop columns", () => {
   assert.equal(parseBoardDropColumnId(boardDragId.column("ready")), "ready");
   assert.equal(parseBoardDropColumnId(boardDragId.column("not_doing")), "not_doing");
   assert.equal(parseBoardDropColumnId(boardDragId.column("todo")), "todo");
+  assert.equal(parseBoardDropColumnId(boardDragId.column("completed")), "completed");
 });
 
 test("columnAcceptsBoardDrop routes todo restore and ready/not-doing queue targets", () => {
@@ -91,6 +94,47 @@ test("columnAcceptsBoardDrop routes todo restore and ready/not-doing queue targe
   assert.equal(columnAcceptsBoardDrop("not_doing", task, "todo"), false);
   assert.equal(columnAcceptsBoardDrop("not_doing", feature, "todo"), true);
   assert.equal(columnAcceptsBoardDrop("todo", feature, "todo"), false);
+});
+
+test("columnAcceptsBoardDrop routes review accept drops to completed", () => {
+  const task = { kind: "task" as const, ticketId: "task_1" };
+  const feature = { kind: "feature" as const, featureId: "feat_1" };
+
+  assert.equal(columnAcceptsBoardDrop("completed", task, "review"), true);
+  assert.equal(columnAcceptsBoardDrop("completed", feature, "review"), true);
+  assert.equal(columnAcceptsBoardDrop("ready", task, "review"), false);
+  assert.equal(columnAcceptsBoardDrop("todo", task, "review"), false);
+  assert.equal(columnAcceptsBoardDrop("completed", task, "todo"), false);
+});
+
+test("validateReviewDragToCompleted requires review tasks and ready containers", () => {
+  const feature = ticket({ id: "feat_1", title: "Auth", ticketType: "feature", status: "review" });
+  const reviewTask = ticket({
+    id: "task_review",
+    title: "Login",
+    ticketType: "task",
+    status: "review",
+    parentFeatureId: "feat_1"
+  });
+  const todoTask = ticket({
+    id: "task_todo",
+    title: "Signup",
+    ticketType: "task",
+    status: "todo",
+    parentFeatureId: "feat_1"
+  });
+  const allTickets = [feature, reviewTask, todoTask];
+
+  assert.deepEqual(validateReviewDragToCompleted({ kind: "task", ticketId: "task_review" }, allTickets, columns), {
+    ok: true
+  });
+  assert.deepEqual(validateReviewDragToCompleted({ kind: "task", ticketId: "task_todo" }, allTickets, columns), {
+    ok: false,
+    message: "Only tickets in Review can be accepted."
+  });
+  assert.deepEqual(validateReviewDragToCompleted({ kind: "feature", featureId: "feat_1" }, allTickets, columns), {
+    ok: true
+  });
 });
 
 test("validateRestoreDragToTodo enforces epic and feature hierarchy", () => {

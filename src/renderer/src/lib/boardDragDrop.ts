@@ -3,9 +3,11 @@ import {
   RELAY_COMPLETED_STATUS,
   RELAY_NOT_DOING_STATUS,
   RELAY_READY_STATUS,
+  RELAY_REVIEW_STATUS,
   RELAY_TODO_STATUS
 } from "@shared/schemas";
 import type { BoardSnapshot, CancelRunInput, CodexCancelRunResult, RelayColumn, TicketMoveInput, TicketSummary } from "@shared/schemas";
+import { acceptBundleForEpic, acceptBundleForFeature } from "./boardAccept";
 import { isTaskReadyPlaceable } from "./boardColumnLayout";
 
 export type BoardDragKind = "task" | "feature" | "epic";
@@ -17,9 +19,13 @@ export type BoardDragItem = {
   epicId?: string;
 };
 
-export type BoardDropTarget = typeof RELAY_READY_STATUS | typeof RELAY_NOT_DOING_STATUS | typeof RELAY_TODO_STATUS;
+export type BoardDropTarget =
+  | typeof RELAY_READY_STATUS
+  | typeof RELAY_NOT_DOING_STATUS
+  | typeof RELAY_TODO_STATUS
+  | typeof RELAY_COMPLETED_STATUS;
 
-export type BoardDragSourceColumn = typeof RELAY_TODO_STATUS | typeof RELAY_NOT_DOING_STATUS;
+export type BoardDragSourceColumn = typeof RELAY_TODO_STATUS | typeof RELAY_NOT_DOING_STATUS | typeof RELAY_REVIEW_STATUS;
 
 const ACTIVE_AGENT_RUN_STATUSES = new Set<TicketSummary["runStatus"]>(["running", "queued", "paused", "drafting"]);
 
@@ -57,14 +63,22 @@ export const parseBoardDropColumnId = (id: string): BoardDropTarget | null => {
   if (id === boardDragId.column(RELAY_READY_STATUS)) return RELAY_READY_STATUS;
   if (id === boardDragId.column(RELAY_NOT_DOING_STATUS)) return RELAY_NOT_DOING_STATUS;
   if (id === boardDragId.column(RELAY_TODO_STATUS)) return RELAY_TODO_STATUS;
+  if (id === boardDragId.column(RELAY_COMPLETED_STATUS)) return RELAY_COMPLETED_STATUS;
   return null;
 };
 
 export const isBoardDropColumn = (columnId: string): columnId is BoardDropTarget =>
-  columnId === RELAY_READY_STATUS || columnId === RELAY_NOT_DOING_STATUS || columnId === RELAY_TODO_STATUS;
+  columnId === RELAY_READY_STATUS ||
+  columnId === RELAY_NOT_DOING_STATUS ||
+  columnId === RELAY_TODO_STATUS ||
+  columnId === RELAY_COMPLETED_STATUS;
 
-export const boardDragSourceColumnFromColumn = (columnId: string | null): BoardDragSourceColumn | null =>
-  columnId === RELAY_NOT_DOING_STATUS ? RELAY_NOT_DOING_STATUS : columnId === RELAY_TODO_STATUS ? RELAY_TODO_STATUS : null;
+export const boardDragSourceColumnFromColumn = (columnId: string | null): BoardDragSourceColumn | null => {
+  if (columnId === RELAY_NOT_DOING_STATUS) return RELAY_NOT_DOING_STATUS;
+  if (columnId === RELAY_TODO_STATUS) return RELAY_TODO_STATUS;
+  if (columnId === RELAY_REVIEW_STATUS) return RELAY_REVIEW_STATUS;
+  return null;
+};
 
 /** Tasks queue to Ready only; features and epics may drop descendant work onto Not Doing. */
 export const boardDragAllowsNotDoingDrop = (item: BoardDragItem | null): boolean =>
@@ -73,6 +87,9 @@ export const boardDragAllowsNotDoingDrop = (item: BoardDragItem | null): boolean
 export const boardDragMoveAriaLabel = (title: string, item: BoardDragItem, sourceColumn: BoardDragSourceColumn | null): string => {
   if (sourceColumn === RELAY_NOT_DOING_STATUS) {
     return `Move ${title} to Todo`;
+  }
+  if (sourceColumn === RELAY_REVIEW_STATUS) {
+    return `Move ${title} to Completed`;
   }
   if (boardDragAllowsNotDoingDrop(item)) {
     return `Move ${title} to Ready or Not Doing`;
@@ -88,6 +105,9 @@ export const columnAcceptsBoardDrop = (
   if (!item || !sourceColumn) return false;
   if (sourceColumn === RELAY_NOT_DOING_STATUS) {
     return columnId === RELAY_TODO_STATUS;
+  }
+  if (sourceColumn === RELAY_REVIEW_STATUS) {
+    return columnId === RELAY_COMPLETED_STATUS;
   }
   if (columnId === RELAY_READY_STATUS) return true;
   if (columnId === RELAY_NOT_DOING_STATUS) return boardDragAllowsNotDoingDrop(item);
@@ -163,6 +183,39 @@ export const featureScopeFullyNotDoing = (featureId: string, allTickets: TicketS
 export type RestoreDragToTodoValidation =
   | { ok: true }
   | { ok: false; message: string };
+
+export const validateReviewDragToCompleted = (
+  item: BoardDragItem,
+  allTickets: readonly TicketSummary[],
+  columns: readonly RelayColumn[]
+): RestoreDragToTodoValidation => {
+  if (item.kind === "task" && item.ticketId) {
+    const task = allTickets.find((entry) => entry.id === item.ticketId);
+    if (!task || task.ticketType !== "task") {
+      return { ok: false, message: "Task not found." };
+    }
+    if (task.status !== RELAY_REVIEW_STATUS) {
+      return { ok: false, message: "Only tickets in Review can be accepted." };
+    }
+    return { ok: true };
+  }
+
+  if (item.kind === "feature" && item.featureId) {
+    if (acceptBundleForFeature(item.featureId, allTickets, columns).length === 0) {
+      return { ok: false, message: "Accept every linked task before accepting this feature." };
+    }
+    return { ok: true };
+  }
+
+  if (item.kind === "epic" && item.epicId) {
+    if (acceptBundleForEpic(item.epicId, allTickets, columns).length === 0) {
+      return { ok: false, message: "Accept every linked feature and task before accepting this epic." };
+    }
+    return { ok: true };
+  }
+
+  return { ok: false, message: "Unable to accept this item." };
+};
 
 export const validateRestoreDragToTodo = (item: BoardDragItem, allTickets: TicketSummary[]): RestoreDragToTodoValidation => {
   const tasks = tasksForTodoRestore(resolveDragTasks(item, allTickets));

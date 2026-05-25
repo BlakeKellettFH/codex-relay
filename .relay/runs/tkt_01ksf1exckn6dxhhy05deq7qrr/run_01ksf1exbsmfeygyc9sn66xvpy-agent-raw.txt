@@ -1,0 +1,153 @@
+{
+  "draftState": "ready",
+  "blockingClarificationQuestions": [],
+  "ticketType": "feature",
+  "title": "Archive completed epic and feature bundles from ticket detail",
+  "summary": "When a completed epic or feature is opened in ticket detail, one Archive action should summarize and move the container plus every completed child task into the hidden Archive column.\n- Detail view Archive control gated by featureCanArchive / epicCanArchive\n- Bundle order: tasks, then features, then epic via sortArchiveBundleIds\n- Depends on parent feature tkt_01kseyph9agqpws8zz0w4q2h2m Review tasks; this draft closes the repository-chat duplicate.",
+  "priority": "medium",
+  "labels": ["board", "tickets", "archive", "ui"],
+  "context": "Repository-chat request: archive button on completed epic/feature detail that archives the whole tree in one click when all tasks are complete. Parent feature tkt_01kseyph9agqpws8zz0w4q2h2m and three Review tasks (tkt_01ksf03k0ht1p5g152bakkprt2, tkt_01ksf03k156jwpq2s0avhvw37h, tkt_01ksf03k1r7gsmkpsjkch67jh7) already implement summarize-then-archive, bundle helpers, board triggers, and detailArchiveTarget in App.tsx (~4304–4339, ~5213–5249). Draft tkt_01ksf1exckn6dxhhy05deq7qrr is a duplicate and should be closed after this plan lands on the parent extension.",
+  "researchFindings": [
+    "src/renderer/src/lib/boardArchive.ts: featureCanArchive/epicCanArchive require every descendant task status completed; archiveBundleForFeature returns [featureId, ...taskIds]; archiveBundleForEpic walks features and epic-direct tasks; sortArchiveBundleIds orders task→feature→epic.",
+    "src/renderer/src/App.tsx detailArchiveTarget useMemo (completed status + archive column configured) returns canArchive, bundleIds, blockedMessage for feature/epic/task; detail Archive Button calls archiveTicketIdsWithAgent with detailArchiveTarget.bundleIds.",
+    "src/renderer/src/App.tsx BoardView: archiveEpic/archiveFeature/archiveBundle use the same client-side archiveTicketIdsWithAgent loop (startTicketUpdate purpose archive + waitForTicketArchived polling) instead of relayApi.tickets.archive.",
+    "src/services/codex/index.ts: archiveTicket and archiveTicketBundle (POST orchestration) call startTicketUpdateRun with purpose archive and waitForTicketArchived server-side.",
+    "src/http/resources/tickets.ts route ticketEndpoints.archive delegates to TicketWorkflows.archiveTicketBundle or archiveTicket; src/renderer/src/lib/relayQueries.ts exports useArchiveTicketMutation but App.tsx does not use it yet.",
+    "tests/board-archive.test.ts covers gating and bundle IDs; tests/board-archive-button.test.tsx covers board card/group triggers; tests/ticket-update.test.ts covers archive purpose; no backend.test.ts case for POST /api/tickets/archive or detail-view archive affordance."
+  ],
+  "requirements": [
+    "Completed epic or feature ticket detail shows an Archive icon when the ticket status is completed and the project has an archive column.",
+    "Archive is enabled only when featureCanArchive or epicCanArchive is true; otherwise show the existing blocked toast (incomplete child tasks).",
+    "One click archives the full bundle (container plus all descendant tasks/features) bottom-up with agent lean rewrite, not status-only moves.",
+    "Board Completed column archive entry points remain behavior-equivalent after any renderer refactor.",
+    "Do not create clarification questions during archive runs."
+  ],
+  "implementationPlan": [
+    "Treat parent feature tkt_01kseyph9agqpws8zz0w4q2h2m as the canonical home; merge this scope there or link as a related extension and close duplicate draft tkt_01ksf1exckn6dxhhy05deq7qrr.",
+    "Replace App.tsx archiveTicketIdsWithAgent / waitForTicketArchived client orchestration with useArchiveTicketMutation calling relayApi.tickets.archive for board archiveBundle/archiveEpic/archiveFeature and ticket-detail Archive.",
+    "Preserve archivingContainerIds busy state and existing success/error toasts; pass ticketIds bundle from archiveBundleForEpic/archiveBundleForFeature/detailArchiveTarget.",
+    "Add backend integration test for POST /api/tickets/archive bundle ordering with mocked archive agent completion.",
+    "Add renderer test asserting completed epic/feature detail exposes Archive and respects canArchive gating messages."
+  ],
+  "testPlan": [
+    "node tests/run-tests.mjs tests/board-archive.test.ts tests/board-archive-button.test.tsx tests/ticket-update.test.ts",
+    "New backend archive route test in tests/backend.test.ts",
+    "New detail-archive affordance test alongside board-archive-button or ticket-draft-ui patterns"
+  ],
+  "acceptanceCriteria": [
+    "Open a completed feature with all child tasks completed: detail Archive archives feature plus tasks and they leave visible board columns.",
+    "Open a completed epic with full tree completed: detail Archive archives epic, features, and tasks in one action.",
+    "Open a completed container with an incomplete child task: Archive shows blocked toast and no tickets move.",
+    "Archive flows use POST /api/tickets/archive (useArchiveTicketMutation), not repeated client startTicketUpdate polling.",
+    "node tests/run-tests.mjs passes including new archive route and detail tests."
+  ],
+  "clarificationQuestions": [],
+  "assumptions": [
+    "Parent Review tasks ship first; this feature only closes the repository-chat gap (HTTP mutation wiring + missing tests), not re-implement archive purpose or bundle helpers.",
+    "Container and all archivable children are already in completed status before detail Archive is offered (ticketIsCompleted gate in detailArchiveTarget).",
+    "Agent tiered lean rewrite rules from parent feature remain unchanged."
+  ],
+  "implementationNotes": [
+    "Dedupe: cancel or merge draft tkt_01ksf1exckn6dxhhy05deq7qrr into parent tkt_01kseyph9agqpws8zz0w4q2h2m after implementation.",
+    "If Review tasks merge to main first, lean task 1 may be a small diff removing ~40 lines of duplicate polling in App.tsx."
+  ],
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/lib/relayQueries.ts",
+    "src/renderer/src/lib/boardArchive.ts",
+    "tests/backend.test.ts",
+    "tests/board-archive-button.test.tsx"
+  ],
+  "subtickets": [],
+  "featureStubs": [],
+  "leanTasks": [
+    {
+      "title": "Route renderer archive flows through POST /api/tickets/archive",
+      "summary": "Board and ticket-detail archive should call the server bundle orchestrator instead of duplicating client-side agent polling.\n- Replace archiveTicketIdsWithAgent in App.tsx with useArchiveTicketMutation\n- Keep archivingContainerIds busy UX and existing toasts\n- Use sortArchiveBundleIds bundle ids from boardArchive helpers",
+      "priority": "medium",
+      "labels": ["ui", "api"],
+      "context": "useArchiveTicketMutation and TicketWorkflows.archiveTicketBundle exist but App.tsx still loops startTicketUpdate + waitForTicketArchived locally.",
+      "goal": "Single archive code path via HTTP for board bundles and detail Archive.",
+      "requirements": [
+        "BoardView archiveBundle/archiveEpic/archiveFeature call useArchiveTicketMutation with projectPath and ticketIds bundle.",
+        "Ticket detail Archive handler uses the same mutation with detailArchiveTarget.bundleIds.",
+        "Remove or inline unused archiveTicketIdsWithAgent and waitForTicketArchived helpers once mutation covers polling."
+      ],
+      "acceptanceCriteria": [
+        "No direct startTicketUpdate purpose archive calls remain in App.tsx archive handlers.",
+        "Successful bundle archive refreshes board and shows existing success toasts.",
+        "Archive errors surface via mutation catch with prior toast messaging."
+      ],
+      "implementationPlan": [
+        "Import useArchiveTicketMutation in BoardView and ticket detail scope; wire archiveBundle to mutateAsync({ projectPath, ticketIds: sortArchiveBundleIds(...) }).",
+        "Update detail Archive onClick to use the mutation instead of archiveTicketIdsWithAgent.",
+        "Map mutation isPending to archivingContainerIds / busy disabled state."
+      ],
+      "assumptions": [
+        "Server archiveTicketBundle polling in codex/index.ts is authoritative; client polling can be deleted."
+      ],
+      "plannedFiles": [
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/lib/relayQueries.ts",
+        "src/renderer/src/lib/relayApi.ts"
+      ]
+    },
+    {
+      "title": "Add POST /api/tickets/archive backend integration test",
+      "summary": "Lock in server-side bundle archive orchestration with an automated HTTP test.\n- POST archive with ticketIds bundle\n- Mock or stub agent archive completion\n- Assert sort order and archive status transition",
+      "priority": "medium",
+      "labels": ["api", "backend"],
+      "context": "ticketEndpoints.archive is registered in src/http/resources/tickets.ts but tests/backend.test.ts has no archive route coverage.",
+      "goal": "Prevent regressions in archiveTicketBundle HTTP contract.",
+      "requirements": [
+        "Test posts to /api/tickets/archive with a multi-id bundle and expects 200 TicketArchiveResult shape.",
+        "Verify tickets end in archive status or appropriate error when a ticket is not completed."
+      ],
+      "acceptanceCriteria": [
+        "New backend.test.ts case passes in CI alongside existing ticket move tests.",
+        "Bundle archives tasks before features before epics per sortArchiveBundleIds."
+      ],
+      "implementationPlan": [
+        "Follow existing backend.test.ts HTTP harness patterns for ticket mutations.",
+        "Seed completed task/feature/epic fixtures; mock startTicketUpdateRun archive completion if needed.",
+        "Assert final board snapshot excludes archived ids from visible columns."
+      ],
+      "assumptions": [
+        "Test project fixture already includes archive column (see board column lists in backend tests ~3021)."
+      ],
+      "plannedFiles": [
+        "tests/backend.test.ts",
+        "src/http/resources/tickets.ts",
+        "src/workflows/tickets.ts"
+      ]
+    },
+    {
+      "title": "Test detail Archive affordance for completed containers",
+      "summary": "Automate that completed epic/feature detail surfaces Archive and honors child-completion gating.\n- Static or shallow render of detail archive control\n- Assert blocked vs enabled paths align with featureCanArchive/epicCanArchive\n- Complements existing board-archive-button tests",
+      "priority": "low",
+      "labels": ["ui", "test"],
+      "context": "User request targets ticket detail view; board-archive-button.test.tsx only covers board group triggers and task cards.",
+      "goal": "Regression guard for repository-chat detail-view requirement.",
+      "requirements": [
+        "Test documents expected detailArchiveTarget.canArchive true/false cases for epic and feature fixtures.",
+        "Archive control absent when ticket status is not completed."
+      ],
+      "acceptanceCriteria": [
+        "Test fails if detailArchiveTarget omits epic/feature types or drops Archive button for eligible completed containers.",
+        "node tests/run-tests.mjs includes the new test file green."
+      ],
+      "implementationPlan": [
+        "Extract minimal pure helper test for detailArchiveTarget logic or render TicketDetail header fragment with mocked board.tickets.",
+        "Mirror fixtures from tests/board-archive.test.ts complete vs incomplete trees."
+      ],
+      "assumptions": [
+        "Full TicketDetail E2E is unnecessary; unit/static coverage of gating logic is sufficient."
+      ],
+      "plannedFiles": [
+        "tests/board-archive-button.test.tsx",
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/lib/boardArchive.ts"
+      ]
+    }
+  ]
+}

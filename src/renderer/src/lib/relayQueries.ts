@@ -321,6 +321,7 @@ export const useMoveTicketMutation = () => {
 export const useArchiveTicketMutation = () => {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: ["tickets", "archive"],
     mutationFn: (input: TicketArchiveInput) => relayApi.tickets.archive(input),
     onSuccess: async (result, input) => {
       queryClient.setQueryData(relayQueryKeys.board(input.projectPath), result.board);
@@ -328,9 +329,8 @@ export const useArchiveTicketMutation = () => {
       const ticketIds =
         input.ticketIds?.filter((ticketId) => ticketId.trim().length > 0) ??
         (input.ticketId?.trim() ? [input.ticketId.trim()] : [result.ticket.frontMatter.id]);
-      await Promise.all(
-        ticketIds.map((ticketId) => invalidateTicketQueries(queryClient, input.projectPath, ticketId))
-      );
+      await Promise.all(ticketIds.map((ticketId) => invalidateTicketQueries(queryClient, input.projectPath, ticketId)));
+      await invalidateProjectData(queryClient, input.projectPath);
     }
   });
 };

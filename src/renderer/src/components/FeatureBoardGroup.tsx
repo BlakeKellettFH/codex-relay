@@ -4,7 +4,12 @@ import type { RelayColumn, TicketSummary } from "@shared/schemas";
 import { activeRunElapsedLabel } from "../lib/agentProgress";
 import { showFeatureArchive } from "../lib/boardArchive";
 import { featureGroupShouldExpandByDefault } from "../lib/boardColumnLayout";
-import { groupHasActiveChildTask } from "../lib/boardTaskProgress";
+import {
+  boardArchivingActiveLabel,
+  groupHasActiveChildTask,
+  hierarchyGroupActiveChildLabel,
+  showBoardContainerArchiveSpinner
+} from "../lib/boardTaskProgress";
 import { boardDragId, boardDragMoveAriaLabel } from "../lib/boardDragDrop";
 import { BoardTaskCardLeading } from "./BoardTaskCardLeading";
 import { Button } from "./ui";
@@ -93,7 +98,6 @@ export function FeatureBoardGroup({
   onTicketFocus,
   onTicketButtonRef,
   onArchiveFeature,
-  archivingContainerIds,
   now
 }: {
   feature: TicketSummary;
@@ -107,12 +111,11 @@ export function FeatureBoardGroup({
   onTicketFocus: (ticketId: string) => void;
   onTicketButtonRef: (ticketId: string, node: HTMLButtonElement | null) => void;
   onArchiveFeature?: (featureId: string) => void;
-  archivingContainerIds?: ReadonlySet<string>;
   now: number;
 }): ReactElement {
   const [expanded, setExpanded] = useState(() => featureGroupShouldExpandByDefault(tasks, columns, allTickets));
   const showGroupArchive = showFeatureArchive(feature, columnId, allTickets);
-  const groupArchiveBusy = archivingContainerIds?.has(feature.id) ?? false;
+  const archivingContainer = showBoardContainerArchiveSpinner(feature);
   const draggable = boardColumnDraggable(columnId);
   const { dragSourceColumn } = useBoardDragContext();
   const featureDragItem = { kind: "feature" as const, featureId: feature.id };
@@ -122,7 +125,7 @@ export function FeatureBoardGroup({
     columnId
   );
   const marker = useBoardHierarchyVisual(feature.id);
-  const activeChildTask = groupHasActiveChildTask(tasks);
+  const activeChildTask = groupHasActiveChildTask(tasks) || archivingContainer;
   const activeTaskCount = tasks.filter((task) => task.runStatus === "running" || task.runStatus === "queued" || task.runStatus === "paused").length;
   const featureMeta = [
     `${tasks.length} task${tasks.length === 1 ? "" : "s"}`,
@@ -162,7 +165,9 @@ export function FeatureBoardGroup({
         dragListeners={listeners}
         isDragging={isDragging}
         showArchive={showGroupArchive}
-        archiveBusy={groupArchiveBusy}
+        activeChildSpinnerLabel={
+          archivingContainer ? boardArchivingActiveLabel(feature) : hierarchyGroupActiveChildLabel(feature.title)
+        }
         onArchive={onArchiveFeature ? () => onArchiveFeature(feature.id) : undefined}
       />
 

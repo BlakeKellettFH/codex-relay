@@ -16,7 +16,13 @@ import {
 import clsx from "clsx";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
 import type { RelayColumn, TicketSummary } from "@shared/schemas";
-import { RELAY_NOT_DOING_STATUS, RELAY_READY_STATUS, RELAY_TODO_STATUS } from "@shared/schemas";
+import {
+  RELAY_COMPLETED_STATUS,
+  RELAY_NOT_DOING_STATUS,
+  RELAY_READY_STATUS,
+  RELAY_REVIEW_STATUS,
+  RELAY_TODO_STATUS
+} from "@shared/schemas";
 import type { BoardDragItem, BoardDragSourceColumn, BoardDropTarget } from "../lib/boardDragDrop";
 import {
   boardDragId,
@@ -295,6 +301,7 @@ export function useBoardColumnDropTarget(columnId: string): {
           columnId === RELAY_READY_STATUS && "board-column-drop-target-ready",
           columnId === RELAY_TODO_STATUS && "board-column-drop-target-todo",
           columnId === RELAY_NOT_DOING_STATUS && "board-column-drop-target-not-doing",
+          columnId === RELAY_COMPLETED_STATUS && "board-column-drop-target-completed",
           isOver && "board-column-drop-target-over"
         )
       : undefined;
@@ -303,7 +310,7 @@ export function useBoardColumnDropTarget(columnId: string): {
 }
 
 export const boardColumnDraggable = (columnId: string): boolean =>
-  columnId === RELAY_TODO_STATUS || columnId === RELAY_NOT_DOING_STATUS;
+  columnId === RELAY_TODO_STATUS || columnId === RELAY_NOT_DOING_STATUS || columnId === RELAY_REVIEW_STATUS;
 
 /** @deprecated Use boardColumnDraggable */
 export const todoColumnDraggable = boardColumnDraggable;

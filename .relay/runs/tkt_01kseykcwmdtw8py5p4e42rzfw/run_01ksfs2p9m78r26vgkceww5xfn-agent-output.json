@@ -1,0 +1,21 @@
+{
+  "title": "Quiet repository chat autosave HTTP logs",
+  "priority": "low",
+  "labels": [
+    "repository-chat",
+    "logging",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/http/middleware/requestLogging.ts",
+    "tests/request-logging.test.ts",
+    "tests/run-tests.mjs"
+  ],
+  "patch": {
+    "summary": "Skipped INFO `[http] API request` logging for `PUT /api/projects/repository-chat` autosave; other routes unchanged. Added `shouldLogApiRequestAtInfo()` and unit tests registered in the test runner.",
+    "fullMarkdown": "# Quiet repository chat autosave HTTP logs\n\n## Requirements\n\n- `PUT /api/projects/repository-chat` must not emit INFO `[http] API request` lines during autosave.\n- All other methods and paths continue logging at INFO unchanged.\n\n## Acceptance Criteria\n\n- Tests prove repository-chat PUT is skipped (not downgraded; Relay has no debug level).\n- Dev typing in repository chat shows less repeated PUT `[http]` noise.\n\n## Outcome\n\n`requestLoggingMiddleware` uses `shouldLogApiRequestAtInfo()` to skip INFO lines for repository-chat autosave PUTs only. Tests cover skip vs continue paths; registered in `tests/run-tests.mjs`.\n",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

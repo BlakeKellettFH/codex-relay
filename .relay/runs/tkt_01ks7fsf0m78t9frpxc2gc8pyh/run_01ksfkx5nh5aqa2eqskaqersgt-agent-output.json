@@ -1,0 +1,21 @@
+{
+  "title": "Repository chat thinking vs streaming UI",
+  "priority": "high",
+  "labels": [
+    "ui",
+    "repository-chat",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/styles.css",
+    "tests/ticket-draft-ui.test.tsx"
+  ],
+  "patch": {
+    "summary": "Repository chat separates thinking from composer in-flight state so streamed assistant text appears before the POST completes, with the Thinking... row hidden once SSE deltas arrive.",
+    "fullMarkdown": "# Repository chat thinking vs streaming UI\n\n## Requirements\n\n- Expose separate thinking vs in-flight props to `RepositoryChatPanelContent` (`pendingThinking` vs `pendingChat`).\n- Hide the thinking row once assistant stream text exists for the active request (`hasStreamedAssistant`).\n- Handle SSE `failed` by surfacing `errorMessage`, toasting, and clearing streaming refs.\n\n## Acceptance Criteria\n\n- Panel test covers **Thinking...** and streamed content without a concurrent pending spinner row.\n- Manual Cursor chat shows typing transcript before the POST resolves.\n\n## Outcome\n\n- `RepositoryChatPanel` tracks `hasStreamedAssistant` on first SSE `delta`; `pendingThinking` is mutation-pending without streamed content.\n- `RepositoryChatPanelContent` renders a **Thinking...** row (`thinking` class) distinct from draft **pending** and composer disable.\n- SSE terminal handlers and HTTP completion clear streaming refs and reset thinking state.\n- Tests updated in `tests/ticket-draft-ui.test.tsx`; shared spinner styles for thinking/pending rows in `styles.css`.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

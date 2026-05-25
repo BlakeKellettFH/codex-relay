@@ -1,0 +1,20 @@
+{
+  "title": "Implement project context loader and prompt formatter",
+  "priority": "medium",
+  "labels": [
+    "agents",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/services/project-context/index.ts",
+    "tests/project-context.test.ts",
+    "tests/run-tests.mjs"
+  ],
+  "patch": {
+    "summary": "Added a project context loader and prompt formatter that reads top-level `.relay/context/*.md` files with 16 KiB per-file and 32 KiB total content budgets, plus unit tests.",
+    "fullMarkdown": "# Implement project context loader and prompt formatter\n\n## Requirements\n\n- Export `loadProjectContextDocuments` and `formatProjectContextPromptSection` from `src/services/project-context/index.ts` using Effect `FileSystem` / `readDirectory` (same pattern as ticket reads).\n- Return empty array or empty string when `.relay/context/` is missing or has no injectable `.md` files.\n- Format output as `Project context (from .relay/context/):` followed by `## filename` sections.\n- Enforce 16 KiB per-file and 32 KiB total content budgets with `...` truncation.\n- Add `tests/project-context.test.ts` and register it in `tests/run-tests.mjs`.\n\n## Acceptance Criteria\n\n- Loader returns lexicographically sorted `.md` documents; `README.md` and non-`.md` entries are ignored.\n- Oversized content is truncated per file and across the total budget; files beyond the budget are omitted.\n- Missing or non-injectable context yields empty results.\n- Tests pass via `node tests/run-tests.mjs`.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { ConfigProvider, Effect, Layer, ManagedRuntime, Sink, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -19,6 +19,7 @@ import {
   readCodexRunEvents,
   reconcileTicketQueueState,
   maybeFinalizeImplementationScopeAfterClarification,
+  drainProjectSchedulerForProject,
   reconcileSchedulableReadyTickets,
   resumeCodexRun,
   sendRepositoryChatMessage,
@@ -27,9 +28,13 @@ import {
   type CodexRunDependencies,
   type CreateCodexDependencies,
   type RepositoryChatCodexClient,
-  type RepositoryChatStreamEvent,
   type RepositoryChatThread,
-  type TicketDraftStartDependencies
+  type TicketDraftStartDependencies,
+  archiveTicket,
+  archiveTicketBundle,
+  type TicketUpdateCodexClient,
+  type TicketUpdateDependencies,
+  type TicketUpdateThread
 } from "../src/services/codex";
 import { resolveAvailableCodexCli, runCodexVersionEffect, type CodexCliCandidate } from "../src/services/codex/cli";
 import { createClaudeAgentProvider } from "../src/services/agents/claudeProvider";
@@ -49,8 +54,25 @@ import {
 } from "../src/services/work";
 import { BackendClock } from "../src/platform";
 import { BackendConfig, BackendConfigDefaults, loadBackendConfig } from "../src/config/AppConfig";
-import { runBackendEffect } from "../src/runtime";
-import type { AppRegistry, HierarchyDraftPlan } from "../src/shared/schemas";
+import { HttpRestApi, type HttpRestApiHandle, type HttpRestApiOptions } from "../src/http";
+import { route, type HttpResourceRoute } from "../src/http/resources";
+import { ticketRoutes } from "../src/http/resources/tickets";
+import { runBackendEffect, fromPromise } from "../src/runtime";
+import { ticketEndpoints } from "../src/shared/http";
+import type {
+  AppRegistry,
+  HierarchyDraftPlan,
+  RepositoryChatStreamEvent,
+  TicketCreateInput,
+  TicketRecord
+} from "../src/shared/schemas";
+import {
+  boardVisibleColumns,
+  RELAY_ARCHIVE_STATUS,
+  RELAY_COMPLETED_STATUS,
+  RELAY_READY_STATUS
+} from "../src/shared/schemas/board";
+import { PENDING_ARCHIVE_LABEL, sortArchiveBundleIds } from "../src/renderer/src/lib/boardArchive";
 import {
   answerClarificationQuestion,
   createClarificationQuestions,
@@ -95,6 +117,29 @@ const createProject = async (): Promise<string> => {
   const projectPath = await mkdtemp(path.join(os.tmpdir(), "relay-backend-"));
   await initializeProject(projectPath);
   return projectPath;
+};
+
+const createProjectWithAgentConcurrency = async (agentConcurrency: number): Promise<string> => {
+  const projectPath = await createProject();
+  const config = await readProjectConfig(projectPath);
+  await writeProjectConfig(projectPath, {
+    ...config,
+    settings: {
+      ...config.settings,
+      agentConcurrency
+    }
+  });
+  return projectPath;
+};
+
+const initializeGitProject = async (projectPath: string): Promise<void> => {
+  const runGit = promisify(execFile);
+  await runGit("git", ["init", "-b", "main"], { cwd: projectPath });
+  await runGit("git", ["config", "user.name", "Relay Test"], { cwd: projectPath });
+  await runGit("git", ["config", "user.email", "relay@example.com"], { cwd: projectPath });
+  await writeFile(path.join(projectPath, "README.md"), "# Relay Test Repo\n");
+  await runGit("git", ["add", "."], { cwd: projectPath });
+  await runGit("git", ["commit", "-m", "init"], { cwd: projectPath });
 };
 
 const auditEvents = async (projectPath: string): Promise<Array<{ eventType: string; actor: string; source: string; payload: unknown }>> => {
@@ -169,6 +214,128 @@ const deferred = (): { promise: Promise<void>; resolve: () => void } => {
     resolve = innerResolve;
   });
   return { promise, resolve };
+};
+
+type TicketUpdateThreadOptions = Parameters<TicketUpdateCodexClient["startThread"]>[0];
+type TicketUpdateRunOptions = NonNullable<Parameters<TicketUpdateThread["run"]>[1]> & { signal: AbortSignal };
+
+const archiveUpdateJson = (title: string): string =>
+  JSON.stringify({
+    title,
+    priority: "medium",
+    labels: [],
+    authoringState: "ready",
+    plannedFiles: null,
+    patch: {
+      summary: `Archived ${title}`,
+      fullMarkdown: `# ${title}\n\n## Requirements\n\n- Archived\n`,
+      appendMarkdown: null
+    },
+    clarificationQuestions: []
+  });
+
+const createArchiveTicketUpdateCodexClient = (
+  threadId: string,
+  title: string
+): TicketUpdateCodexClient => ({
+  startThread: () => ({
+    id: threadId,
+    run: async (input, runOptions) => {
+      if (typeof input !== "string") throw new TypeError("Archive tests expect string prompts.");
+      if (!runOptions?.signal) throw new TypeError("Archive tests expect an AbortSignal.");
+      return { items: [], usage: null, finalResponse: archiveUpdateJson(title) };
+    }
+  })
+});
+
+const createArchiveBundleDependencies = (
+  expectedOrder: readonly string[]
+): { dependencies: TicketUpdateDependencies; archivedOrder: string[]; events: RendererRunEvent[] } => {
+  const archivedOrder: string[] = [];
+  let nextRunIndex = 0;
+  let nextClientIndex = 0;
+  const { runEventSink, events } = createFakeRunEventSink();
+  return {
+    archivedOrder,
+    events,
+    dependencies: {
+      runEventSink,
+      createRunId: () => `run_archive_bundle_${nextRunIndex++}`,
+      createCodexClient: () => {
+        const ticketId = expectedOrder[nextClientIndex];
+        if (!ticketId) throw new Error("Archive bundle mock received more runs than expected tickets.");
+        nextClientIndex += 1;
+        archivedOrder.push(ticketId);
+        return createArchiveTicketUpdateCodexClient(`thread_archive_${ticketId}`, `Archived ${ticketId}`);
+      }
+    }
+  };
+};
+
+const createArchiveTicketRoute = (dependencies: TicketUpdateDependencies): HttpResourceRoute =>
+  route(ticketEndpoints.archive, (input) =>
+    Effect.gen(function*() {
+      const bundleIds = input.ticketIds?.filter((ticketId) => ticketId.trim().length > 0) ?? [];
+      if (bundleIds.length > 0) {
+        return yield* fromPromise(() => archiveTicketBundle(input.projectPath, bundleIds, dependencies));
+      }
+      const ticketId = input.ticketId?.trim();
+      if (!ticketId) {
+        return yield* Effect.fail(new Error("Provide ticketId or ticketIds to archive."));
+      }
+      return yield* fromPromise(() => archiveTicket(input.projectPath, ticketId, dependencies));
+    })
+  );
+
+const startTestArchiveApi = async (
+  t: TestContext,
+  routes: ReadonlyArray<HttpResourceRoute>,
+  runEffect: HttpRestApiOptions["runEffect"] = runBackendEffect
+): Promise<HttpRestApiHandle | null> => {
+  try {
+    return await HttpRestApi.start({
+      token: "test-token",
+      runEffect,
+      routes
+    });
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "EPERM") {
+      t.skip("Sandbox disallowed binding a localhost HTTP server.");
+      return null;
+    }
+    throw error;
+  }
+};
+
+const seedCompletedArchiveBundle = async (
+  projectPath: string
+): Promise<{ epicId: string; featureId: string; taskId: string }> => {
+  const epic = await createTicket(projectPath, {
+    title: "Archive bundle epic",
+    ticketType: "epic",
+    priority: "medium",
+    labels: [],
+    status: RELAY_COMPLETED_STATUS,
+    markdown: "# Archive bundle epic\n"
+  });
+  const feature = await createSubticket({
+    projectPath,
+    epicId: epic.frontMatter.id,
+    ticket: {
+      title: "Archive bundle feature",
+      priority: "medium",
+      labels: [],
+      markdown: "# Archive bundle feature\n"
+    }
+  });
+  await moveTicket({ projectPath, ticketId: feature.frontMatter.id, targetStatus: RELAY_COMPLETED_STATUS });
+  const task = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "Archive bundle task", priority: "medium" }
+  });
+  await moveTicket({ projectPath, ticketId: task.frontMatter.id, targetStatus: RELAY_COMPLETED_STATUS });
+  return { epicId: epic.frontMatter.id, featureId: feature.frontMatter.id, taskId: task.frontMatter.id };
 };
 
 const validDraftJson = (title: string): string =>
@@ -3272,6 +3439,57 @@ test("codex runs preserve the selected project context after a cross-project swi
   await assert.rejects(access(path.join(firstProject, ".relay", "runs", firstTicket.frontMatter.id, "run_project_scope.jsonl")));
 });
 
+test("git-backed implementation runs create and use isolated ticket worktrees", async (t: TestContext) => {
+  const projectPath = await createProject();
+  await initializeGitProject(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Isolated worktree task",
+    priority: "medium",
+    labels: [],
+    markdown: "# Isolated worktree task\n"
+  });
+  const { runEventSink, events } = createFakeRunEventSink();
+  let capturedWorkingDirectory = "";
+  const dependencies: CodexRunDependencies = {
+    runEventSink,
+    createRunId: () => "run_isolated_worktree",
+    createCodexClient: () =>
+      ({
+        startThread: (options: { workingDirectory?: string }) => {
+          capturedWorkingDirectory = options.workingDirectory ?? "";
+          return {
+            id: "thread_isolated_worktree",
+            runStreamed: async () => ({
+              events: (async function*() {
+                yield { type: "thread.started", thread_id: "thread_isolated_worktree" };
+                yield { type: "turn.completed", usage: { total_tokens: 1 } };
+              })()
+            })
+          };
+        },
+        resumeThread: () => {
+          throw new Error("resumeThread should not be used for a fresh run.");
+        }
+      }) as CodexRunDependencies["createCodexClient"] extends () => infer Client ? Client : never
+  };
+
+  await startCodexRun({ projectPath, ticketId: ticket.frontMatter.id }, dependencies);
+  await waitFor(() => events.some((event) => event.type === "run.completed"), "isolated worktree run completion");
+
+  assert.notEqual(capturedWorkingDirectory, projectPath);
+  assert.match(path.basename(capturedWorkingDirectory), new RegExp(`^${path.basename(projectPath)}-${ticket.frontMatter.id}$`));
+  const worktreeList = (await promisify(execFile)("git", ["worktree", "list"], { cwd: projectPath })).stdout;
+  assert.match(worktreeList, new RegExp(capturedWorkingDirectory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  t.after(async () => {
+    try {
+      await promisify(execFile)("git", ["worktree", "remove", capturedWorkingDirectory], { cwd: projectPath });
+    } catch {
+      // Best effort cleanup for the sibling worktree created by this test.
+    }
+  });
+});
+
 test("codex implementation runs pass local Markdown images as structured SDK input", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
@@ -5358,6 +5576,64 @@ test("transitionTicketStatus allows feature and epic review and completed moves 
   );
 });
 
+test("moveTicket suppresses container reconciliation during bulk accept of review tasks", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Bulk accept feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Bulk accept feature\n"
+  });
+  const firstTask = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "First review task", priority: "medium" }
+  });
+  const secondTask = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "Second review task", priority: "medium" }
+  });
+
+  for (const task of [firstTask, secondTask]) {
+    await transitionTicketStatus(projectPath, task.frontMatter.id, "review", {
+      actor: "user",
+      source: "manual_board"
+    });
+  }
+  await transitionTicketStatus(projectPath, feature.frontMatter.id, "review", {
+    actor: "user",
+    source: "manual_board"
+  });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "review");
+
+  await moveTicket({
+    projectPath,
+    ticketId: firstTask.frontMatter.id,
+    targetStatus: RELAY_COMPLETED_STATUS,
+    suppressContainerReconciliation: true
+  });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "review");
+
+  await moveTicket({
+    projectPath,
+    ticketId: secondTask.frontMatter.id,
+    targetStatus: RELAY_COMPLETED_STATUS,
+    suppressContainerReconciliation: true
+  });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "review");
+
+  await moveTicket({
+    projectPath,
+    ticketId: feature.frontMatter.id,
+    targetStatus: RELAY_COMPLETED_STATUS
+  });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, RELAY_COMPLETED_STATUS);
+  assert.equal((await readTicket(projectPath, firstTask.frontMatter.id)).frontMatter.status, RELAY_COMPLETED_STATUS);
+  assert.equal((await readTicket(projectPath, secondTask.frontMatter.id)).frontMatter.status, RELAY_COMPLETED_STATUS);
+});
+
 test("moveTicket promotes feature to review when last linked task completes and demotes on reopen", async () => {
   const projectPath = await createProject();
   const feature = await createTicket(projectPath, {
@@ -5388,4 +5664,231 @@ test("moveTicket promotes feature to review when last linked task completes and 
 
   await moveTicket({ projectPath, ticketId: secondTask.frontMatter.id, targetStatus: "todo" });
   assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "todo");
+});
+
+const flushArchiveQueue = async (
+  projectPath: string,
+  ticketIds: readonly string[],
+  dependencies: TicketUpdateDependencies,
+  timeoutMs = 15_000
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await reconcileSchedulableReadyTickets(projectPath, dependencies);
+    await drainProjectSchedulerForProject(projectPath);
+    const board = await readBoard(projectPath);
+    const pending = ticketIds.filter((ticketId) => {
+      const summary = board.tickets.find((ticket) => ticket.id === ticketId);
+      return summary?.status !== RELAY_ARCHIVE_STATUS;
+    });
+    if (pending.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Archive queue did not finish before timeout.");
+};
+
+const waitForArchivedStatuses = async (
+  projectPath: string,
+  ticketIds: readonly string[],
+  timeoutMs = 5_000
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const board = await readBoard(projectPath);
+    const pending = ticketIds.filter((ticketId) => {
+      const summary = board.tickets.find((ticket) => ticket.id === ticketId);
+      return summary?.status !== RELAY_ARCHIVE_STATUS;
+    });
+    if (pending.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Archive queue did not settle before timeout.");
+};
+
+test("archiveTicketBundle queues completed tickets on Ready with the archive-queue label", async () => {
+  const projectPath = await createProjectWithAgentConcurrency(1);
+  const { taskId } = await seedCompletedArchiveBundle(projectPath);
+  const { dependencies, archivedOrder, events } = createArchiveBundleDependencies([taskId]);
+  await archiveTicketBundle(projectPath, [taskId], dependencies);
+  const record = await readTicket(projectPath, taskId);
+  assert.equal(record.frontMatter.status, RELAY_READY_STATUS);
+  assert.equal(record.frontMatter.labels.includes(PENDING_ARCHIVE_LABEL), true);
+  await flushArchiveQueue(projectPath, [taskId], dependencies);
+  assert.deepEqual(archivedOrder, [taskId]);
+  assert.equal((await readTicket(projectPath, taskId)).frontMatter.status, RELAY_ARCHIVE_STATUS);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "ticket.status_changed" &&
+        event.ticketId === taskId &&
+        event.toStatus === RELAY_ARCHIVE_STATUS
+    )
+  );
+  assert.ok(events.some((event) => event.type === "run.completed" && event.ticketId === taskId));
+});
+
+test("archiveTicketBundle drains a completed hierarchy through the ready queue", async () => {
+  const projectPath = await createProjectWithAgentConcurrency(1);
+  const { epicId, featureId, taskId } = await seedCompletedArchiveBundle(projectPath);
+  const boardBeforeArchive = await readBoard(projectPath);
+  const sortedBundleIds = sortArchiveBundleIds([epicId, featureId, taskId], boardBeforeArchive.tickets);
+  const { dependencies, archivedOrder } = createArchiveBundleDependencies(sortedBundleIds);
+  await archiveTicketBundle(projectPath, sortedBundleIds, dependencies);
+  await flushArchiveQueue(projectPath, sortedBundleIds, dependencies);
+  assert.deepEqual(archivedOrder, sortedBundleIds);
+  for (const archivedId of sortedBundleIds) {
+    assert.equal((await readTicket(projectPath, archivedId)).frontMatter.status, RELAY_ARCHIVE_STATUS);
+  }
+});
+
+test("archiveTicketBundle wakes the scheduler to continue draining queued archive work", async () => {
+  const projectPath = await createProjectWithAgentConcurrency(1);
+  const { epicId, featureId, taskId } = await seedCompletedArchiveBundle(projectPath);
+  const boardBeforeArchive = await readBoard(projectPath);
+  const sortedBundleIds = sortArchiveBundleIds([epicId, featureId, taskId], boardBeforeArchive.tickets);
+  const { dependencies, archivedOrder } = createArchiveBundleDependencies(sortedBundleIds);
+  await archiveTicketBundle(projectPath, sortedBundleIds, dependencies);
+
+  await reconcileSchedulableReadyTickets(projectPath, dependencies);
+  await drainProjectSchedulerForProject(projectPath);
+  await waitForArchivedStatuses(projectPath, sortedBundleIds);
+
+  assert.deepEqual(archivedOrder, sortedBundleIds);
+  for (const archivedId of sortedBundleIds) {
+    const archived = await readTicket(projectPath, archivedId);
+    assert.equal(archived.frontMatter.status, RELAY_ARCHIVE_STATUS);
+    assert.equal(archived.frontMatter.runStatus, "idle");
+    assert.equal(archived.frontMatter.lastRunId, null);
+  }
+});
+
+test("reconcileSchedulableReadyTickets clears stale queued state from archived tickets", async () => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Stale archived ticket",
+    priority: "low",
+    labels: [PENDING_ARCHIVE_LABEL],
+    status: RELAY_ARCHIVE_STATUS,
+    markdown: "# Stale archived ticket\n"
+  });
+  await writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      status: RELAY_ARCHIVE_STATUS,
+      labels: [PENDING_ARCHIVE_LABEL],
+      runStatus: "queued",
+      lastRunId: "run_stale_archive",
+      lastRunStartedAt: "2026-05-25T00:00:00.000Z"
+    }
+  });
+
+  await reconcileSchedulableReadyTickets(projectPath);
+
+  const normalized = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.equal(normalized.frontMatter.status, RELAY_ARCHIVE_STATUS);
+  assert.equal(normalized.frontMatter.runStatus, "idle");
+  assert.equal(normalized.frontMatter.lastRunId, null);
+  assert.equal(normalized.frontMatter.lastRunStartedAt, null);
+  assert.equal(normalized.frontMatter.labels.includes(PENDING_ARCHIVE_LABEL), false);
+});
+
+test("POST /api/tickets/archive archives a completed bundle bottom-up and returns TicketArchiveResult", async (t) => {
+  const projectPath = await createProject();
+  const { epicId, featureId, taskId } = await seedCompletedArchiveBundle(projectPath);
+  const boardBeforeArchive = await readBoard(projectPath);
+  const sortedBundleIds = sortArchiveBundleIds([epicId, featureId, taskId], boardBeforeArchive.tickets);
+  const { dependencies, archivedOrder } = createArchiveBundleDependencies(sortedBundleIds);
+  const api = await startTestArchiveApi(t, [createArchiveTicketRoute(dependencies)]);
+  if (!api) return;
+
+  try {
+    const response = await fetch(`${api.baseUrl}/api/tickets/archive`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${api.token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        projectPath,
+        ticketIds: [epicId, taskId, featureId]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const result = (await response.json()) as {
+      ticket: { frontMatter: { id: string; status: string; runStatus: string; labels: string[] } };
+      board: {
+        columns: Array<{ id: string }>;
+        tickets: Array<{ id: string; status: string; runStatus: string; labels: string[] }>;
+      };
+    };
+
+    assert.equal(result.ticket.frontMatter.id, epicId);
+    assert.equal(result.ticket.frontMatter.status, RELAY_READY_STATUS);
+    assert.equal(result.ticket.frontMatter.runStatus, "queued");
+
+    for (const queuedId of sortedBundleIds) {
+      const summary = result.board.tickets.find((ticket) => ticket.id === queuedId);
+      assert.equal(summary?.status, RELAY_READY_STATUS, `${queuedId} should move to Ready when queued for archive`);
+      assert.equal(summary?.runStatus, "queued");
+      const record = await readTicket(projectPath, queuedId);
+      assert.equal(record.frontMatter.labels.includes(PENDING_ARCHIVE_LABEL), true);
+    }
+
+    await flushArchiveQueue(projectPath, sortedBundleIds, dependencies);
+
+    assert.deepEqual(archivedOrder, sortedBundleIds);
+    assert.deepEqual(sortedBundleIds, [taskId, featureId, epicId]);
+
+    const boardAfterArchive = await readBoard(projectPath);
+    const visibleColumnIds = new Set(boardVisibleColumns(boardAfterArchive.columns).map((column) => column.id));
+    for (const archivedId of sortedBundleIds) {
+      const summary = boardAfterArchive.tickets.find((ticket) => ticket.id === archivedId);
+      assert.equal(summary?.status, RELAY_ARCHIVE_STATUS);
+      assert.equal(visibleColumnIds.has(RELAY_ARCHIVE_STATUS), false);
+      assert.equal((await readTicket(projectPath, archivedId)).frontMatter.status, RELAY_ARCHIVE_STATUS);
+    }
+  } finally {
+    await api.close();
+  }
+});
+
+test("POST /api/tickets/archive rejects non-completed tickets before archiving", async (t) => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Todo archive guard",
+    priority: "low",
+    labels: [],
+    markdown: "# Todo archive guard\n",
+    status: "todo"
+  });
+  const archiveRoute = ticketRoutes.find(
+    (entry) => entry.endpoint.path === ticketEndpoints.archive.path && entry.endpoint.method === "POST"
+  );
+  assert.ok(archiveRoute);
+
+  const api = await startTestArchiveApi(t, [archiveRoute]);
+  if (!api) return;
+
+  try {
+    const response = await fetch(`${api.baseUrl}/api/tickets/archive`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${api.token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        projectPath,
+        ticketIds: [ticket.frontMatter.id]
+      })
+    });
+
+    assert.equal(response.status, 500);
+    const body = (await response.json()) as { error: { message: string } };
+    assert.match(body.error.message, /Only completed tickets can be archived/);
+    assert.equal((await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.status, "todo");
+  } finally {
+    await api.close();
+  }
 });

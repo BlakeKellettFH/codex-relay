@@ -70,15 +70,16 @@ export const ticketRoutes = [
   ),
   route(ticketEndpoints.archive, (input) =>
     Effect.gen(function*() {
+      const dependencies = { runEventSink: httpRunEventSink() };
       const bundleIds = input.ticketIds?.filter((ticketId) => ticketId.trim().length > 0) ?? [];
       if (bundleIds.length > 0) {
-        return yield* TicketWorkflows.archiveTicketBundle(input.projectPath, bundleIds);
+        return yield* TicketWorkflows.archiveTicketBundle(input.projectPath, bundleIds, dependencies);
       }
       const ticketId = input.ticketId?.trim();
       if (!ticketId) {
         return yield* Effect.fail(new Error("Provide ticketId or ticketIds to archive."));
       }
-      return yield* TicketWorkflows.archiveTicket(input.projectPath, ticketId);
+      return yield* TicketWorkflows.archiveTicket(input.projectPath, ticketId, dependencies);
     })
   ),
   route(ticketEndpoints.clarifications, ({ projectPath, ticketId }) =>

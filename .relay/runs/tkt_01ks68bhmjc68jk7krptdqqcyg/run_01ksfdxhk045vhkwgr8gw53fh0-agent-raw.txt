@@ -1,0 +1,17 @@
+{
+  "title": "Review column board layout for containers",
+  "priority": "medium",
+  "labels": ["board", "ui", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/lib/boardColumnLayout.ts",
+    "src/renderer/src/lib/boardReview.ts",
+    "tests/board-column-layout.test.ts"
+  ],
+  "patch": {
+    "summary": "Review column now shows features and epics in review as container-only groups when child work is completed, without pulling completed or not_doing tasks into those groups. Todo and Ready columns stay task-driven.",
+    "fullMarkdown": "# Review column board layout for containers\n\n## Requirements\n\n- When `columnId === review`, include features and epics with `status === review`.\n- Emit container-only groups: `feature-group` with empty `tasks` and `featureInColumn: true`; `epic-group` with empty `featureGroups` when the epic is in review alone.\n- When a container is in review, omit `completed` and `not_doing` tasks from its Review group.\n- Extend `boardColumnLayout.ts` using helpers from `boardReview.ts`; cover Review cases in `board-column-layout.test.ts`.\n\n## Acceptance Criteria\n\n- Feature in review with all tasks completed → one Review group, no nested task cards.\n- Epic in review with all features completed → epic header in Review, no child task rows.\n- Todo and Ready columns unchanged (task-driven only, no container-only regression).\n\n## Outcome\n\n- `boardReview.ts`: `isReviewBoardColumn`, `isReviewStatusContainer`, `reviewStatusContainers`, `tasksForReviewContainerGroup`.\n- `boardColumnLayout.ts`: Review column merges review-status containers; standalone container groups when not already represented; suppress duplicate feature cards when parent epic is also in review.\n- Tests added in `tests/board-column-layout.test.ts` for the three cases above.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

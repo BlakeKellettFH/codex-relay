@@ -1,0 +1,12 @@
+{
+  "title": "Archive completed tickets with lean agent summaries",
+  "priority": "medium",
+  "labels": ["board", "tickets", "archive", "relay:archive-queue"],
+  "authoringState": "ready",
+  "patch": {
+    "summary": "Completed tickets archive through agent lean rewrite and POST /api/tickets/archive, with tiered summarization, bottom-up bundle ordering, and board/detail controls for tasks and containers.",
+    "fullMarkdown": "# Archive completed tickets with lean agent summaries\n\n## Context\n\nRelay exposed a hidden terminal archive lane and move-only container archiving without rewriting ticket bodies or refreshing card excerpts. Completed standalone tasks had no archive affordance.\n\n## Requirements\n\n- Only tickets in `completed` may archive; reject other statuses with a clear error\n- `ticket.update` with `purpose: archive` requires `patch.fullMarkdown` and `patch.summary`; persist lean body, set `frontMatter.summary`, then transition to `archive`\n- Tiered rewrite: epic soft trim, feature drops Implementation Notes/Test Plan, task drops Context/Goal\n- Bundle archive summarizes bottom-up (tasks → features → epic) and aborts on first failure\n- Board cards, detail, and containers call `POST /api/tickets/archive`; archive runs must not create clarifications\n\n## Acceptance Criteria\n\n- Completed tasks show Archive on board cards and detail; successful archive removes tickets from visible columns\n- Archived markdown is materially shorter; tasks keep lean Requirements and Acceptance Criteria only\n- Feature/epic bundles process children first; all reach `archive` with updated summaries or none move on failure\n- Board card excerpts reflect `frontMatter.summary` after archive\n\n## Delivered\n\n- Codex `archive` purpose with tiered prompts, completed-only guards, and summary + status transition in `startTicketUpdateRun`\n- `archiveTicket` / `archiveTicketBundle`, `sortArchiveBundleIds`, HTTP route, workflows, and `useArchiveTicketMutation`\n- `showTaskArchive` / `taskCanArchive` on completed-column cards; container gating unchanged; renderer uses POST instead of client polling\n- Coverage in `ticket-update`, `board-archive`, `board-archive-button`, and `backend` archive route tests",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

@@ -1,0 +1,13 @@
+{
+  "title": "SPEC layered review documentation",
+  "priority": "low",
+  "labels": ["docs", "spec", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": ["SPEC.md"],
+  "patch": {
+    "summary": "Updated SPEC.md §5.5.1 and §6.2 to document layered feature/epic Review gates, container-only Review cards, and non-cascading Accept/Reject.",
+    "fullMarkdown": "# SPEC layered review documentation\n\n## Requirements\n\n- Document feature Review gate (all linked tasks terminal) and epic gate (all linked features completed with descendant tasks terminal).\n- Document that container Accept/Reject moves only that container and does not cascade.\n- Clarify the board shows review-status containers in Review even without in-column tasks.\n\n## Acceptance Criteria\n\n- SPEC §5.5.1 describes layered Review and points to container-only Review board cards.\n- SPEC no longer implies containers can never use `review` or `completed` statuses.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

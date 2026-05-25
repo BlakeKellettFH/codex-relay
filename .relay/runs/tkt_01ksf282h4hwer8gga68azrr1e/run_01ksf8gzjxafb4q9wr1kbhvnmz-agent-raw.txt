@@ -1,0 +1,17 @@
+{
+  "title": "Suppress reconciliation during bulk accept moves",
+  "priority": "medium",
+  "labels": ["backend", "storage", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/shared/schemas/ticket.ts",
+    "src/storage/filesystem.ts",
+    "tests/backend.test.ts"
+  ],
+  "patch": {
+    "summary": "Added optional suppressContainerReconciliation on task moves so sequential bulk-accept completes skip parent container demotion until the batch finishes; covered by backend integration test.",
+    "fullMarkdown": "# Suppress reconciliation during bulk accept moves\n\n## Requirements\n\n- Optional `suppressContainerReconciliation` on `ticketMoveInputSchema`.\n- When true on a task move, skip `maybePromoteOrDemoteContainers` after `transitionTicketStatus`.\n- Default behavior unchanged when the flag is omitted.\n\n## Acceptance Criteria\n\n- Sequential accept of two review tasks, then the review feature, leaves the feature in `completed` (not demoted to `todo` mid-batch).\n- `tests/backend.test.ts` covers the bulk-accept path with suppression.\n\n## Outcome\n\n- `ticketMoveInputSchema` extended in `src/shared/schemas/ticket.ts`.\n- `moveTicket` in `src/storage/filesystem.ts` guards reconciliation when the flag is set on task moves.\n- Integration test: feature and two tasks in `review`, suppressed task completes, then feature complete.\n\n## Follow-up\n\n- UI accept-bundle loop should pass `suppressContainerReconciliation: true` on task moves (sibling ticket).",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

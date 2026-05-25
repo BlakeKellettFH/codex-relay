@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "ticketId": "tkt_01ksf1h58s4jebdadpbe89mqg8",
+  "questions": [
+    {
+      "id": "clar_01ksf1zy5z1kqbv8q4n0rbrrjp",
+      "ticketId": "tkt_01ksf1h58s4jebdadpbe89mqg8",
+      "question": "Should the parent Todo feature tkt_01ks6810f8qgk82fbeh7wfbqga be moved to Completed when this ships, or left for a manual board cleanup?",
+      "answerType": "text",
+      "answer": "No only when all tasks are compelted, should we be able to complete the parent feature or epic, not if there still stuff in todo or processsing or ready etc",
+      "createdAt": "2026-05-25T07:53:34.143Z",
+      "updatedAt": "2026-05-25T07:55:22.669Z",
+      "answeredAt": "2026-05-25T07:55:22.669Z",
+      "createdBy": "codex",
+      "source": "draft_generation",
+      "runId": "run_01ksf1h57wkdpq0jd2tnaz2vn3",
+      "codexThreadId": "draft_run_01ksf1h57wkdpq0jd2tnaz2vn3"
+    }
+  ]
+}

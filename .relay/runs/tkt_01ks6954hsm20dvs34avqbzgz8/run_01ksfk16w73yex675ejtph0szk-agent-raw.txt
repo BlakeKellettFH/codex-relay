@@ -1,0 +1,17 @@
+{
+  "title": "Add `.relay/context/` storage path and project bootstrap",
+  "priority": "medium",
+  "labels": ["storage", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/storage/paths.ts",
+    "src/storage/filesystem.ts",
+    "SPEC.md"
+  ],
+  "patch": {
+    "summary": "Added `contextPath`, first-init bootstrap of `.relay/context/` with README, and SPEC §5.2 docs. Init is idempotent; pre-existing projects still need a later backfill slice.",
+    "fullMarkdown": "# Add `.relay/context/` storage path and project bootstrap\n\n## Requirements\n\n- `contextPath` in `src/storage/paths.ts` joins `.relay/context` under the relay root.\n- `initializeProject` creates `context/` and writes `README.md` on first init only (README is not agent-injected).\n- SPEC §5.2 documents `context/` as OPTIONAL, reserved for agent instructions.\n\n## Acceptance Criteria\n\n- Fresh init creates `.relay/context/` and `README.md`.\n- Re-init does not recreate context or overwrite README.\n- SPEC layout and rules include `context/`.\n\n## Outcome\n\n- `contextPath` added; `initializeProject` mkdirs context and writes README when the directory did not exist before first init.\n- SPEC §5.2 diagram and bullets updated.\n- Older projects with existing `project.json` still skip init early; context backfill deferred to parent feature.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

@@ -481,7 +481,8 @@ export const ticketMoveInputSchema = passthroughStruct({
   ticketId: Schema.String,
   targetStatus: Schema.String,
   beforeTicketId: Schema.optional(Schema.NullOr(Schema.String)),
-  afterTicketId: Schema.optional(Schema.NullOr(Schema.String))
+  afterTicketId: Schema.optional(Schema.NullOr(Schema.String)),
+  suppressContainerReconciliation: Schema.optional(Schema.Boolean)
 });
 export type TicketMoveInput = SchemaType<typeof ticketMoveInputSchema>;
 

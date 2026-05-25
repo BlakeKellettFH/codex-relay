@@ -14,6 +14,7 @@ const entryPoints = [
   path.join(testsDir, "agent-run-debug.test.ts"),
   path.join(testsDir, "board-archive-button.test.tsx"),
   path.join(testsDir, "board-archive.test.ts"),
+  path.join(testsDir, "board-archiving-display.test.ts"),
   path.join(testsDir, "board-column-layout.test.ts"),
   path.join(testsDir, "board-column-display.test.ts"),
   path.join(testsDir, "board-drag-drop.test.tsx"),

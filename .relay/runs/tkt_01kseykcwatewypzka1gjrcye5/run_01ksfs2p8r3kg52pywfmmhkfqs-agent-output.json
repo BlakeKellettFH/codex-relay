@@ -1,0 +1,21 @@
+{
+  "title": "Fix repository chat pre-hydration draft race",
+  "priority": "medium",
+  "labels": [
+    "repository-chat",
+    "bug",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "tests/repository-chat-hydration.test.ts",
+    "tests/run-tests.mjs"
+  ],
+  "patch": {
+    "summary": "Fixed repository chat hydration so typing while the query is pending no longer blocks server draft restore; edits after query success but before persist ready still skip server apply.",
+    "fullMarkdown": "# Fix repository chat pre-hydration draft race\n\n## Requirements\n\n- Stop using non-empty `draft` as a hydration skip condition.\n- Track intentional edits only after `repositoryChatQuery` succeeds and before persist is ready (`shouldMarkRepositoryChatUserEditedBeforeHydration`).\n- Run hydration once per `projectPath` on query success via `resolveRepositoryChatHydrationAction`.\n- Keep `projectPath` reset behavior (`applyEmptyRepositoryChatState`).\n\n## Acceptance Criteria\n\n- Early typing before query completes: server draft applies when the user had not intentionally edited.\n- Edit after query success before hydration completes: server values do not overwrite local draft.\n- Post-hydration draft typing and autosave behavior unchanged.\n\n## Outcome\n\n- `App.tsx`: `userEditedBeforeHydrationRef`, `handleDraftChange`, one-shot hydration effect without `draft` in deps.\n- `tests/repository-chat-hydration.test.ts`: early-typing vs intentional-edit cases; registered in `tests/run-tests.mjs`.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

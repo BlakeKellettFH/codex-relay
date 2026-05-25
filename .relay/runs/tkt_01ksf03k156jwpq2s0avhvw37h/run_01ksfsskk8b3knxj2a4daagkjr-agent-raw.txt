@@ -1,0 +1,22 @@
+{
+  "title": "Archive ticket HTTP API and bundle orchestration",
+  "priority": "medium",
+  "labels": ["api", "backend", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/lib/boardArchive.ts",
+    "src/services/codex/index.ts",
+    "src/shared/http/tickets.ts",
+    "src/http/resources/tickets.ts",
+    "src/workflows/tickets.ts",
+    "src/renderer/src/lib/relayApi.ts",
+    "src/renderer/src/lib/relayQueries.ts",
+    "tests/board-archive.test.ts"
+  ],
+  "patch": {
+    "summary": "Added POST archive API for single tickets and sorted bundles (tasks→features→epics), with Codex agent summarization, workflows, renderer mutations, and sortArchiveBundleIds tests.",
+    "fullMarkdown": "# Archive ticket HTTP API and bundle orchestration\n\n## Requirements\n\n- `archiveTicket(projectPath, ticketId)` runs archive update and returns ticket/board snapshot.\n- `archiveTicketBundle` sorts IDs tasks→features→epic, then archives sequentially.\n- `POST /api/tickets/archive` registered with shared schemas; `relayApi.tickets.archive` and `useArchiveTicketMutation` update caches.\n\n## Acceptance Criteria\n\n- Mid-sequence bundle failure leaves only earlier successful archives summarized; later IDs are not archived.\n- `sortArchiveBundleIds` unit tests pass in `tests/board-archive.test.ts`.\n\n## Delivered\n\n- Codex `archiveTicket` / `archiveTicketBundle` (120s timeout per ticket); workflows and HTTP route accept `ticketId` or `ticketIds`.\n- Renderer archive mutation with board/ticket cache updates for all archived IDs.\n- `sortArchiveBundleIds` already in `boardArchive.ts`; test added.\n\n## Follow-up\n\n- UI can switch from `useStartTicketUpdateMutation` to `useArchiveTicketMutation` (sibling ticket).\n- Integration tests for partial bundle failure need mocked agent providers.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

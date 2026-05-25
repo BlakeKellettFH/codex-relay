@@ -1,0 +1,19 @@
+{
+  "title": "Allow Ready placement for blocked tasks without auto-start",
+  "priority": "medium",
+  "labels": ["board", "scheduling", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/lib/boardColumnLayout.ts",
+    "src/renderer/src/lib/boardDragDrop.ts",
+    "src/renderer/src/App.tsx",
+    "tests/board-column-layout.test.ts",
+    "tests/board-drag-drop.test.tsx"
+  ],
+  "patch": {
+    "summary": "Split Ready placement from agent start: blocked dependents can sit in Ready without runs until blockers finish; preflight and start still require terminal blockers.",
+    "fullMarkdown": "# Allow Ready placement for blocked tasks without auto-start\n\n## Requirements\n\n- `isTaskReadyPlaceable` allows blocked agent-runnable tasks not in active run states.\n- `tasksEligibleForReadyQueue` and `tasksMovableToReady` use the placeable helper.\n- `queueTaskForReady` moves blocked tasks to Ready via `moveTicket` only; unblocked path unchanged.\n- `isTaskProcessable` and `preflightCodexRun` still reject active blockers.\n\n## Acceptance Criteria\n\n- Blocked todo appears in `tasksEligibleForReadyQueue` but not `isTaskProcessable`.\n- Drag blocked task to Ready leaves `runStatus` idle without `lastRunId`.\n- After blocker reaches Completed, dependent in Ready can preflight and queue successfully.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

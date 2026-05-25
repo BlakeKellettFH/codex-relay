@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ksf8fv87s1rma7cvpqq1qsr4",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks5hkmdy93w7efzw37437gav",
+  "runId": "run_01ksf8fv87s1rma7cvpqq1qsr4",
+  "subject": "ticket",
+  "action": "update",
+  "kind": "ticket.update",
+  "idempotencyKey": "ticket.update:/Users/blakekellett/repos/codex-relay:tkt_01ks5hkmdy93w7efzw37437gav:run_01ksf8fv87s1rma7cvpqq1qsr4",
+  "status": "cancelled",
+  "attempts": 1,
+  "createdAt": "2026-05-25T09:47:06.912Z",
+  "updatedAt": "2026-05-25T09:47:24.548Z",
+  "lastAppliedEventSequence": 6,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": null,
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks5hkmdy93w7efzw37437gav",
+    "request": "Archive this completed ticket with a lean summary for long-term storage.",
+    "purpose": "archive",
+    "runId": "run_01ksf8fv87s1rma7cvpqq1qsr4"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent",
+    "recovered": true,
+    "reason": "not_resumable",
+    "staleStatus": "stale"
+  },
+  "message": "Recovered non-resumable ticket work by cancelling it."
+}

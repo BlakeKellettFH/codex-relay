@@ -1,0 +1,12 @@
+{
+  "savedAt": "2026-05-25T14:52:43.971Z",
+  "kind": "ticket.update",
+  "providerId": "cursor",
+  "ticketId": "tkt_01ksf1rxv6tgkswvbmbf4kvef8",
+  "runId": "run_01ksfsskne3sx9z3bpggryz1ph",
+  "requestId": "run_01ksfsskne3sx9z3bpggryz1ph",
+  "phase": "success",
+  "validationError": null,
+  "rawBytes": 1857,
+  "rawTruncated": false
+}

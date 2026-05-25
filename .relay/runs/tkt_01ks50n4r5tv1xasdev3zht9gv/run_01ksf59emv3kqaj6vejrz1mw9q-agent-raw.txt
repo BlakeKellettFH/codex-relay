@@ -1,0 +1,23 @@
+{
+  "title": "Add Codex, Cursor, and Claude provider adapters for non-implementation actions",
+  "priority": "high",
+  "labels": ["backend", "routing", "providers"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/services/agents/index.ts",
+    "src/services/agents/providers.ts",
+    "src/services/agents/codexProvider.ts",
+    "src/services/agents/cursorProvider.ts",
+    "src/services/agents/claudeProvider.ts",
+    "src/services/codex/index.ts",
+    "tests/ticket-draft.test.ts",
+    "tests/ticket-update.test.ts",
+    "tests/backend.test.ts"
+  ],
+  "patch": {
+    "summary": "Shipped Codex, Cursor, and Claude provider adapters and routed draft, redraft, update, and repository-chat through the selected provider at work creation, persisting provider id per submission without regressing Codex.",
+    "fullMarkdown": "# Add Codex, Cursor, and Claude provider adapters for non-implementation actions\n\n## Requirements\n\n- Provider adapters for Codex, Cursor, and Claude return final JSON/text and a resumable session reference.\n- Cursor and Claude use documented print/json or stream-json modes; surface `status unknown` when headless auth cannot be verified.\n- Route draft intake, draft/redraft, ticket update, and repository chat through the selected provider when new work starts.\n- Persist provider id on new submissions so later provider changes do not affect in-flight work.\n- Keep Codex behavior on the same abstraction (additive migration, not per-call-site forks).\n\n## Acceptance Criteria\n\n- New draft, redraft, update, and repository-chat runs use the selected provider id at creation.\n- Structured JSON parsing succeeds in backend tests; failures surface actionable errors.\n- Provider changes affect only new work; submitted items retain their original provider id.\n- Codex adapter path remains supported with no regression in existing tests.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

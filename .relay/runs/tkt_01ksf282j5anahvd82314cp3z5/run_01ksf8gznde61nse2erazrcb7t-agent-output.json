@@ -1,0 +1,19 @@
+{
+  "title": "SPEC cascade accept documentation",
+  "priority": "low",
+  "labels": [
+    "docs",
+    "spec",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "SPEC.md"
+  ],
+  "patch": {
+    "summary": "Updated SPEC.md §5.5.1 so cascade accept eligibility, scope, and non-cascade reject/task behavior match boardAccept.ts and container review gates.",
+    "fullMarkdown": "# SPEC cascade accept documentation\n\n## Requirements\n\n- Replace §5.5.1 non-cascade Accept with cascade accept rules aligned to domain helpers.\n- Document eligibility (descendants in `review` or terminal) and scope (only `review` descendants move).\n- State reject stays non-cascade; task accept stays single-ticket.\n\n## Acceptance Criteria\n\n- SPEC §5.5.1 matches implemented cascade accept and reject behavior.\n\n## Outcome\n\n- SPEC.md §5.5.1 documents cascade accept eligibility, scope, and non-cascade reject/task accept.\n- Feature and epic review-gate bullets aligned with `featureReadyForReview` / `epicReadyForReview` (child `review` counts toward promotion).\n- Cross-checked against `boardAccept.ts`, `boardReview.ts`, and `getContainerTicketStatusNote` in App.tsx.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

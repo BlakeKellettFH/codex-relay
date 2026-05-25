@@ -1,0 +1,17 @@
+{
+  "title": "Smooth repository chat typing and reduce autosave churn",
+  "priority": "medium",
+  "labels": [
+    "repository-chat",
+    "ui",
+    "performance",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "patch": {
+    "summary": "Repository chat typing is smoother: autosave debounces at 1800ms with flush on close/send/clear, the assistant transcript no longer re-renders on draft keystrokes, pre-hydration draft restore is fixed, and autosave PUTs no longer spam INFO logs.",
+    "fullMarkdown": "# Smooth repository chat typing and reduce autosave churn\n\n## Context\n\nRepository chat autosave and panel-local updates caused visible transcript flicker and frequent INFO logs for `PUT /api/projects/repository-chat` while typing. Persistence to `.relay/repository-chat.json` was kept; the goal was a smoother composer without removing autosave.\n\n## Requirements\n\n- Keep autosave to `.relay/repository-chat.json`.\n- Debounce typing saves (~1500–2000ms) and flush pending state on panel close, send, and clear.\n- Draft keystrokes must not re-render the assistant transcript when messages are unchanged.\n- Fix the pre-hydration race so typing before GET completes does not block server draft restore.\n- Reduce dev log noise from autosave without affecting other API request logging.\n- No board refetch or RelayApp-wide rerender regression while typing.\n\n## Acceptance Criteria\n\n- Continuous typing triggers at most one PUT per ~1.5–2s idle window, plus flush on close/send/clear.\n- Assistant transcript does not flicker or re-scroll on draft keystrokes when messages are unchanged.\n- Typing before initial load still restores the persisted server draft when appropriate.\n- Closing chat without waiting for debounce persists the latest draft and messages.\n- Board and ticket views do not refetch or rerender due to repository chat autosave.\n- Dev console no longer spams INFO lines for each autosave PUT.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

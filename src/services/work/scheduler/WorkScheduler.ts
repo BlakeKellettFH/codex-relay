@@ -18,6 +18,12 @@ export type WorkQueuedImplementationIntent = {
   readonly dependencies: unknown;
 };
 
+export type WorkQueuedArchiveIntent = {
+  readonly projectPath: string;
+  readonly ticketId: string;
+  readonly dependencies: unknown;
+};
+
 export type WorkStartingRun = {
   readonly projectPath: string;
   readonly ticketId: string;
@@ -39,6 +45,7 @@ type SchedulerState = {
   readonly activeImplementationRuns: Map<string, WorkActiveRun>;
   readonly activeDraftRuns: Map<string, WorkActiveRun>;
   readonly queuedImplementationIntents: Map<string, WorkQueuedImplementationIntent>;
+  readonly queuedArchiveIntents: Map<string, WorkQueuedArchiveIntent>;
   readonly startingRuns: Map<string, WorkStartingRun>;
   readonly projectSchedulers: Map<string, ProjectSchedulerState>;
   readonly activeTicketUpdateRuns: Map<string, WorkActiveRun>;
@@ -48,8 +55,11 @@ type SchedulerState = {
 export type WorkSchedulerService = {
   readonly activeRunIdForTicket: (projectPath: string, ticketId: string) => SchedulerEffect<string | null>;
   readonly enqueueImplementation: (workId: string, intent: WorkQueuedImplementationIntent) => SchedulerEffect<void>;
+  readonly enqueueArchive: (workId: string, intent: WorkQueuedArchiveIntent) => SchedulerEffect<void>;
   readonly getQueuedImplementation: (workId: string) => SchedulerEffect<WorkQueuedImplementationIntent | null>;
+  readonly getQueuedArchive: (workId: string) => SchedulerEffect<WorkQueuedArchiveIntent | null>;
   readonly removeQueuedImplementation: (workId: string) => SchedulerEffect<WorkQueuedImplementationIntent | null>;
+  readonly removeQueuedArchive: (workId: string) => SchedulerEffect<WorkQueuedArchiveIntent | null>;
   readonly firstQueuedImplementation: (
     projectPath: string,
     preferredWorkId?: string | null
@@ -61,6 +71,8 @@ export type WorkSchedulerService = {
   readonly registerImplementationActive: (workId: string, activeRun: WorkActiveRun) => SchedulerEffect<void>;
   readonly completeImplementation: (workId: string) => SchedulerEffect<void>;
   readonly activeImplementationRunCount: (projectPath: string) => SchedulerEffect<number>;
+  readonly activeTicketUpdateRunCount: (projectPath: string) => SchedulerEffect<number>;
+  readonly isTicketUpdateActiveOrStarting: (workId: string) => SchedulerEffect<boolean>;
   readonly registerDraft: (workId: string, activeRun: WorkActiveRun) => SchedulerEffect<void>;
   readonly getDraft: (workId: string) => SchedulerEffect<WorkActiveRun | null>;
   readonly completeDraft: (workId: string) => SchedulerEffect<void>;
@@ -87,6 +99,7 @@ const emptyState = (): SchedulerState => ({
   activeImplementationRuns: new Map(),
   activeDraftRuns: new Map(),
   queuedImplementationIntents: new Map(),
+  queuedArchiveIntents: new Map(),
   startingRuns: new Map(),
   projectSchedulers: new Map(),
   activeTicketUpdateRuns: new Map(),
@@ -164,6 +177,28 @@ const makeWorkScheduler = Effect.gen(function*() {
       return [existing, { ...state, queuedImplementationIntents }];
     });
 
+  const enqueueArchive: WorkSchedulerService["enqueueArchive"] = (workId, intent) =>
+    Ref.update(stateRef, (state) => {
+      const queuedArchiveIntents = new Map(state.queuedArchiveIntents);
+      queuedArchiveIntents.set(workId, {
+        ...intent,
+        projectPath: path.resolve(intent.projectPath)
+      });
+      return { ...state, queuedArchiveIntents };
+    });
+
+  const getQueuedArchive: WorkSchedulerService["getQueuedArchive"] = (workId) =>
+    Effect.map(Ref.get(stateRef), (state) => state.queuedArchiveIntents.get(workId) ?? null);
+
+  const removeQueuedArchive: WorkSchedulerService["removeQueuedArchive"] = (workId) =>
+    Ref.modify(stateRef, (state) => {
+      const existing = state.queuedArchiveIntents.get(workId) ?? null;
+      if (!existing) return [null, state];
+      const queuedArchiveIntents = new Map(state.queuedArchiveIntents);
+      queuedArchiveIntents.delete(workId);
+      return [existing, { ...state, queuedArchiveIntents }];
+    });
+
   const firstQueuedImplementation: WorkSchedulerService["firstQueuedImplementation"] = (projectPathInput, preferredWorkId) =>
     Effect.map(Ref.get(stateRef), (state) => {
       const projectPath = path.resolve(projectPathInput);
@@ -221,6 +256,19 @@ const makeWorkScheduler = Effect.gen(function*() {
       activeImplementationRuns.delete(workId);
       startingRuns.delete(workId);
       return { ...state, activeImplementationRuns, startingRuns };
+    });
+
+  const isTicketUpdateActiveOrStarting: WorkSchedulerService["isTicketUpdateActiveOrStarting"] = (workId) =>
+    Effect.map(Ref.get(stateRef), (state) => state.activeTicketUpdateRuns.has(workId));
+
+  const activeTicketUpdateRunCount: WorkSchedulerService["activeTicketUpdateRunCount"] = (projectPathInput) =>
+    Effect.map(Ref.get(stateRef), (state) => {
+      const projectPath = path.resolve(projectPathInput);
+      let count = 0;
+      for (const run of state.activeTicketUpdateRuns.values()) {
+        if (run.projectPath === projectPath) count += 1;
+      }
+      return count;
     });
 
   const activeImplementationRunCount: WorkSchedulerService["activeImplementationRunCount"] = (projectPathInput) =>
@@ -335,8 +383,11 @@ const makeWorkScheduler = Effect.gen(function*() {
   return {
     activeRunIdForTicket,
     enqueueImplementation,
+    enqueueArchive,
     getQueuedImplementation,
+    getQueuedArchive,
     removeQueuedImplementation,
+    removeQueuedArchive,
     firstQueuedImplementation,
     markImplementationStarting,
     getStartingImplementation,
@@ -345,6 +396,8 @@ const makeWorkScheduler = Effect.gen(function*() {
     registerImplementationActive,
     completeImplementation,
     activeImplementationRunCount,
+    activeTicketUpdateRunCount,
+    isTicketUpdateActiveOrStarting,
     registerDraft,
     getDraft,
     completeDraft,

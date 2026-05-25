@@ -122,6 +122,7 @@ import {
   type AgentProviderResolverDependencies
 } from "../agents/providers";
 import { captureRunGitBaseline, revertRunGitChanges } from "../git/GitRunBaseline";
+import { ensureImplementationWorkspace, readImplementationWorkspacePath } from "../git/agentWorktree";
 import { resolveAvailableCodexCli, type CodexCliResolution } from "./cli";
 import { getCodexStatus } from "./status";
 import {
@@ -149,13 +150,22 @@ import {
   ticketMarkdownFromFeatureStubDraft,
   ticketMarkdownFromLeanTaskDraft,
   ticketMarkdownFromSubticketDraft,
+  moveTicket,
   transitionTicketStatus,
   writeTicket
 } from "../../storage";
 import { slashPath } from "../../storage/paths";
 import { formatProjectContextPromptSection } from "../project-context";
 import { appendCursorTicketDraftPromptGuidance } from "../provider-prompts/cursor";
-import { ARCHIVE_TICKET_UPDATE_REQUEST, sortArchiveBundleIds } from "@renderer/lib/boardArchive";
+import {
+  ARCHIVE_TICKET_UPDATE_REQUEST,
+  PENDING_ARCHIVE_LABEL,
+  sortArchiveBundleIds,
+  ticketEligibleForArchiveRun,
+  ticketHasPendingArchiveLabel,
+  withPendingArchiveLabel,
+  withoutPendingArchiveLabel
+} from "@domain/boardArchive";
 
 export { getCodexStatus } from "./status";
 
@@ -284,6 +294,42 @@ const removeQueuedImplementationRun = async (runId: string): Promise<QueuedRunIn
   return intent ? ({ ...intent, dependencies: intent.dependencies as CodexRunDependencies } satisfies QueuedRunIntent) : null;
 };
 
+type QueuedArchiveIntent = {
+  readonly projectPath: string;
+  readonly ticketId: string;
+  readonly dependencies: CodexRunDependencies;
+};
+
+const enqueueArchiveRun = (runId: string, intent: QueuedArchiveIntent): Promise<void> =>
+  registry(
+    WorkScheduler.use((runRegistry) =>
+      runRegistry.enqueueArchive(runId, {
+        projectPath: intent.projectPath,
+        ticketId: intent.ticketId,
+        dependencies: intent.dependencies
+      })
+    )
+  );
+
+const getQueuedArchiveRun = async (runId: string): Promise<QueuedArchiveIntent | null> => {
+  const intent = await registry(WorkScheduler.use((runRegistry) => runRegistry.getQueuedArchive(runId)));
+  return intent ? ({ ...intent, dependencies: intent.dependencies as CodexRunDependencies } satisfies QueuedArchiveIntent) : null;
+};
+
+const removeQueuedArchiveRun = async (runId: string): Promise<QueuedArchiveIntent | null> => {
+  const intent = await registry(WorkScheduler.use((runRegistry) => runRegistry.removeQueuedArchive(runId)));
+  return intent ? ({ ...intent, dependencies: intent.dependencies as CodexRunDependencies } satisfies QueuedArchiveIntent) : null;
+};
+
+const isTicketUpdateActiveOrStarting = (runId: string): Promise<boolean> =>
+  registry(WorkScheduler.use((runRegistry) => runRegistry.isTicketUpdateActiveOrStarting(runId)));
+
+const activeScheduledRunCountForProject = async (projectPath: string): Promise<number> => {
+  const implementationCount = await activeImplementationRunCountForProject(projectPath);
+  const updateCount = await registry(WorkScheduler.use((runRegistry) => runRegistry.activeTicketUpdateRunCount(projectPath)));
+  return implementationCount + updateCount;
+};
+
 const getStartingImplementationRun = (runId: string): Promise<{ attemptId?: string; leaseToken?: string } | null> =>
   registry(WorkScheduler.use((runRegistry) => runRegistry.getStartingImplementation(runId)));
 
@@ -388,35 +434,251 @@ export const wakeRecoveredWork = async (reports: readonly WorkRecoveryReport[]):
   }
 };
 
+const beginArchiveTicketProcessing = async (
+  projectPath: string,
+  ticketId: string,
+  runId: string,
+  runEventSink: TicketUpdateDependencies["runEventSink"],
+  previousStatus: string
+): Promise<TicketRecord> => {
+  const ticket = await readTicket(projectPath, ticketId);
+  const threadId = ticket.frontMatter.codexThreadId ?? `pending_${runId}`;
+
+  const config = await readProjectConfig(projectPath);
+  const inProgressStatus = config.columns.some((column) => column.id === RELAY_IN_PROGRESS_STATUS)
+    ? RELAY_IN_PROGRESS_STATUS
+    : null;
+  const isContainer = ticket.frontMatter.ticketType === "epic" || ticket.frontMatter.ticketType === "feature";
+  const runStartedAt = nowIso();
+
+  let processing: TicketRecord;
+  if (!isContainer && inProgressStatus && previousStatus === RELAY_READY_STATUS) {
+    const transitioned = await transitionTicketStatus(projectPath, ticketId, inProgressStatus, {
+      actor: "codex",
+      source: "archive_processing",
+      runId
+    });
+    processing = await writeTicket(projectPath, {
+      ...transitioned,
+      frontMatter: {
+        ...transitioned.frontMatter,
+        authoringState: "ready",
+        runStatus: "running",
+        lastRunId: runId,
+        lastRunStartedAt: runStartedAt
+      }
+    });
+  } else {
+    processing = await writeTicket(projectPath, {
+      ...ticket,
+      frontMatter: {
+        ...ticket.frontMatter,
+        authoringState: "ready",
+        runStatus: "running",
+        lastRunId: runId,
+        lastRunStartedAt: runStartedAt
+      }
+    });
+  }
+
+  if (processing.frontMatter.status !== ticket.frontMatter.status) {
+    await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, threadId, {
+      type: "ticket.status_changed",
+      fromStatus: ticket.frontMatter.status,
+      toStatus: processing.frontMatter.status,
+      actor: "codex",
+      source: "archive_processing",
+      timestamp: nowIso()
+    });
+  }
+
+  if (processing.frontMatter.runStatus === "running" && ticket.frontMatter.runStatus !== "running") {
+    await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, threadId, {
+      type: "run.started",
+      runId,
+      threadId,
+      timestamp: nowIso()
+    });
+  }
+
+  await logInfo("codex:archive", "archive processing started", {
+    projectPath,
+    ticketId,
+    runId,
+    ticketType: processing.frontMatter.ticketType,
+    status: processing.frontMatter.status,
+    runStatus: processing.frontMatter.runStatus
+  });
+
+  return processing;
+};
+
+const clearPendingArchiveLabel = async (projectPath: string, ticketId: string): Promise<void> => {
+  try {
+    const ticket = await readTicket(projectPath, ticketId);
+    if (!ticket.frontMatter.labels.includes(PENDING_ARCHIVE_LABEL)) return;
+    await writeTicket(projectPath, {
+      ...ticket,
+      frontMatter: {
+        ...ticket.frontMatter,
+        labels: withoutPendingArchiveLabel(ticket.frontMatter.labels)
+      }
+    });
+  } catch {
+    // Ticket may already be archived and removed from board reads.
+  }
+};
+
+const normalizeArchivedTicketRunState = async (projectPath: string, ticketId: string): Promise<void> => {
+  const ticket = await readTicket(projectPath, ticketId);
+  await writeTicket(projectPath, {
+    ...ticket,
+    frontMatter: {
+      ...ticket.frontMatter,
+      labels: withoutPendingArchiveLabel(ticket.frontMatter.labels),
+      runStatus: "idle",
+      lastRunId: null,
+      lastRunStartedAt: null
+    }
+  });
+};
+
+const restoreArchiveTicketAfterFailure = async (
+  projectPath: string,
+  ticketId: string,
+  runId: string
+): Promise<void> => {
+  await removeQueuedArchiveRun(runId);
+  try {
+    const ticket = await readTicket(projectPath, ticketId);
+    const restored =
+      ticket.frontMatter.status === RELAY_ARCHIVE_STATUS || ticket.frontMatter.status === RELAY_COMPLETED_STATUS
+        ? ticket
+        : await transitionTicketStatus(projectPath, ticketId, RELAY_COMPLETED_STATUS, {
+            actor: "codex",
+            source: "archive_processing",
+            runId
+          });
+    await writeTicket(projectPath, {
+      ...restored,
+      frontMatter: {
+        ...restored.frontMatter,
+        labels: withoutPendingArchiveLabel(restored.frontMatter.labels),
+        runStatus: "idle",
+        lastRunId: null,
+        lastRunStartedAt: null
+      }
+    });
+  } catch (error) {
+    await logWarn("codex:archive", "failed to restore archive ticket after failure", {
+      projectPath,
+      ticketId,
+      runId,
+      error: errorMessage(error, "Archive restore failed.")
+    });
+  }
+  wakeProjectSchedulerSoon(projectPath);
+};
+
+const finalizeQueuedArchiveIntent = async (
+  projectPath: string,
+  ticketId: string,
+  runId: string
+): Promise<void> => {
+  await removeQueuedArchiveRun(runId);
+  await clearPendingArchiveLabel(projectPath, ticketId);
+  try {
+    const ticket = await readTicket(projectPath, ticketId);
+    if (ticket.frontMatter.runStatus === "idle" && !ticket.frontMatter.lastRunId) return;
+    await normalizeArchivedTicketRunState(projectPath, ticketId);
+  } catch {
+    // Ticket may already be archived and removed from board reads.
+  }
+  wakeProjectSchedulerSoon(projectPath);
+};
+
+const startQueuedArchiveNow = async (intent: QueuedArchiveIntent, runId: string): Promise<void> => {
+  try {
+    await startTicketUpdateRun(
+      {
+        projectPath: intent.projectPath,
+        ticketId: intent.ticketId,
+        request: ARCHIVE_TICKET_UPDATE_REQUEST,
+        purpose: archivePurpose
+      },
+      {
+        ...intent.dependencies,
+        createRunId: () => runId
+      }
+    );
+  } catch (error) {
+    await removeQueuedArchiveRun(runId);
+    await logError("codex:archive", "queued archive run failed", error, {
+      projectPath: intent.projectPath,
+      ticketId: intent.ticketId,
+      runId
+    });
+  }
+};
+
+export const drainProjectSchedulerForProject = async (projectPath: string): Promise<void> => {
+  const resolvedProjectPath = await resolveBackendPath(projectPath);
+  await ensureProjectSchedulerLoop(resolvedProjectPath);
+  await registry(WorkScheduler.use((runRegistry) => runRegistry.wakeProjectScheduler(resolvedProjectPath)));
+  await drainProjectScheduler(resolvedProjectPath);
+};
+
 const drainProjectScheduler = async (projectPath: string): Promise<void> => {
   const config = await readProjectConfig(projectPath);
-  const implementationWorkerConcurrency = Math.max(1, config.settings.agentConcurrency);
-  while ((await activeImplementationRunCountForProject(projectPath)) < implementationWorkerConcurrency) {
-    let next: Awaited<ReturnType<typeof listQueuedReadyTickets>>[number] | undefined;
+  const workerConcurrency = Math.max(1, config.settings.agentConcurrency);
+  while ((await activeScheduledRunCountForProject(projectPath)) < workerConcurrency) {
+    let nextTicket: Awaited<ReturnType<typeof listQueuedReadyTickets>>[number] | undefined;
+    let nextArchiveIntent: QueuedArchiveIntent | null = null;
+    let nextImplementationIntent: QueuedRunIntent | null = null;
+
     for (const ticket of await listQueuedReadyTickets(projectPath)) {
       const runId = ticket.lastRunId;
-      if (!runId || (await implementationActiveOrStarting(runId))) continue;
+      if (!runId) continue;
+
+      const archiveIntent = await getQueuedArchiveRun(runId);
+      if (archiveIntent) {
+        if (await isTicketUpdateActiveOrStarting(runId)) continue;
+        nextTicket = ticket;
+        nextArchiveIntent = archiveIntent;
+        nextImplementationIntent = null;
+        break;
+      }
+
+      if (await implementationActiveOrStarting(runId)) continue;
       const plannedPaths = normalizePlannedScope(ticket.plannedFiles, projectPath);
       const lockConflicts = await pathLockConflictsFor(projectPath, ticket.id, plannedPaths);
       if (lockConflicts.length > 0) continue;
-      next = ticket;
+      nextTicket = ticket;
+      nextArchiveIntent = null;
+      nextImplementationIntent =
+        (await getQueuedImplementationRun(runId)) ??
+        ({
+          input: { projectPath, ticketId: ticket.id },
+          resume: Boolean(ticket.codexThreadId),
+          dependencies: {}
+        } satisfies QueuedRunIntent);
       break;
     }
-    if (!next?.lastRunId) return;
 
-    const runId = next.lastRunId;
-    const intent =
-      (await getQueuedImplementationRun(runId)) ??
-      ({
-        input: { projectPath, ticketId: next.id },
-        resume: Boolean(next.codexThreadId),
-        dependencies: {}
-      } satisfies QueuedRunIntent);
-    await enqueueImplementationRun(runId, intent);
+    if (!nextTicket?.lastRunId) return;
+    const runId = nextTicket.lastRunId;
+
+    if (nextArchiveIntent) {
+      await startQueuedArchiveNow(nextArchiveIntent, runId);
+      continue;
+    }
+
+    if (!nextImplementationIntent) return;
+    await enqueueImplementationRun(runId, nextImplementationIntent);
     const claim = await claimImplementationWork(projectPath, runId);
     if (!claim) return;
-    void startQueuedRunNow(intent.input, intent.resume, runId, intent.dependencies).catch((error) =>
-      logError("codex:run", "queued run failed outside stream", error, { projectPath, ticketId: next.id, runId })
+    void startQueuedRunNow(nextImplementationIntent.input, nextImplementationIntent.resume, runId, nextImplementationIntent.dependencies).catch(
+      (error) => logError("codex:run", "queued run failed outside stream", error, { projectPath, ticketId: nextTicket.id, runId })
     );
   }
 };
@@ -503,11 +765,12 @@ const ticketEffortToModelReasoningEffort = (effort: TicketEffort): NonNullable<T
 
 const sharedThreadOptionsForProjectContext = (
   projectPath: string,
+  workingDirectory: string,
   { config, git }: Awaited<ReturnType<typeof projectThreadOptionsContext>>,
   ticketEffort?: TicketEffort
 ): ThreadOptions => {
   return {
-    workingDirectory: projectPath,
+    workingDirectory,
     model: config.settings.defaultModel ?? undefined,
     modelReasoningEffort: ticketEffort
       ? ticketEffortToModelReasoningEffort(ticketEffort)
@@ -520,15 +783,19 @@ const sharedThreadOptionsForProjectContext = (
 };
 
 const boundedThreadOptionsForProject = async (projectPath: string, ticketEffort?: TicketEffort): Promise<ThreadOptions> => ({
-  ...sharedThreadOptionsForProjectContext(projectPath, await projectThreadOptionsContext(projectPath), ticketEffort),
+  ...sharedThreadOptionsForProjectContext(projectPath, projectPath, await projectThreadOptionsContext(projectPath), ticketEffort),
   networkAccessEnabled: false,
   webSearchMode: "disabled"
 });
 
-const implementationThreadOptionsForProject = async (projectPath: string, ticketEffort?: TicketEffort): Promise<ThreadOptions> => {
+const implementationThreadOptionsForProject = async (
+  projectPath: string,
+  workingDirectory: string,
+  ticketEffort?: TicketEffort
+): Promise<ThreadOptions> => {
   const context = await projectThreadOptionsContext(projectPath);
   return {
-    ...sharedThreadOptionsForProjectContext(projectPath, context, ticketEffort),
+    ...sharedThreadOptionsForProjectContext(projectPath, workingDirectory, context, ticketEffort),
     networkAccessEnabled: context.config.settings.codexNetworkAccessEnabled,
     webSearchMode: context.config.settings.codexWebSearchMode
   };
@@ -836,7 +1103,7 @@ const agentStructuredRunArtifactContext = (
 
 const structuredAgentThreadOptionsForProject = async (request: StructuredAgentRequest): Promise<ThreadOptions> => {
   const context = await projectThreadOptionsContext(request.projectPath);
-  const base = sharedThreadOptionsForProjectContext(request.projectPath, context, request.effort);
+  const base = sharedThreadOptionsForProjectContext(request.projectPath, request.projectPath, context, request.effort);
   const webSearchMode = request.webSearchMode ?? context.config.settings.codexWebSearchMode;
   const networkAccessEnabled = request.networkAccessEnabled ?? context.config.settings.codexNetworkAccessEnabled;
 
@@ -861,7 +1128,16 @@ const createCodexStructuredAgentProvider = (
   dependencies: Pick<TicketDraftDependencies, "createCodexClient">
 ): AgentProvider =>
   createCodexAgentProvider({
-    createClient: async () => (dependencies.createCodexClient?.() as unknown as CodexProviderClient | undefined) ?? (await createCodex()),
+    createClient: async () => {
+      const maker = dependencies.createCodexClient;
+      if (typeof maker === "function") {
+        const produced = (maker as () => TicketDraftCodexClient)();
+        if (produced && typeof produced === "object" && "startThread" in produced) {
+          return produced as unknown as CodexProviderClient;
+        }
+      }
+      return await createCodex();
+    },
     structuredThreadOptionsForRequest: structuredAgentThreadOptionsForProject,
     textThreadOptionsForRequest: async (request) =>
       request.kind === "repository.chat"
@@ -919,7 +1195,7 @@ const resolveRuntimeAgentProvider = async (dependencies: RuntimeAgentProviderDep
     dependencies.createCodexClient
   ) {
     return createCodexStructuredAgentProvider({
-      createCodexClient: (() => (dependencies.createCodexClient as (() => TicketDraftCodexClient) | undefined)?.()) as TicketDraftDependencies["createCodexClient"]
+      createCodexClient: dependencies.createCodexClient as TicketDraftDependencies["createCodexClient"]
     });
   }
   return resolveAgentProviderForNewWork({
@@ -929,7 +1205,7 @@ const resolveRuntimeAgentProvider = async (dependencies: RuntimeAgentProviderDep
     createAgentProvider:
       dependencies.createAgentProvider ??
       defaultAgentProviderFactory({
-        createCodexClient: (() => (dependencies.createCodexClient as (() => TicketDraftCodexClient) | undefined)?.()) as TicketDraftDependencies["createCodexClient"]
+        createCodexClient: dependencies.createCodexClient as TicketDraftDependencies["createCodexClient"]
       })
   });
 };
@@ -3956,17 +4232,38 @@ const startTicketUpdateRunPromise = async (
   let currentThreadId = `pending_${runId}`;
   let provider: AgentProvider;
   let prompt = "";
+  let clarifications: ClarificationQuestion[] = [];
+  let projectContextSection = "";
+  let projectName = "";
+  let archiveTicketForPrompt: TicketRecord | null = null;
   try {
     const config = await readProjectConfig(projectPath);
+    projectName = config.name;
     const ticket = await readTicket(projectPath, ticketId);
-    if (purpose === archivePurpose && ticket.frontMatter.status !== RELAY_COMPLETED_STATUS) {
+    if (purpose === archivePurpose && !ticketEligibleForArchiveRun(ticket.frontMatter)) {
       throw new Error("Only completed tickets can be archived.");
     }
-    const clarifications = await readClarificationQuestions(projectPath, ticketId);
+    archiveTicketForPrompt = ticket;
+    if (
+      purpose === archivePurpose &&
+      ticket.frontMatter.status === RELAY_READY_STATUS &&
+      ticketHasPendingArchiveLabel(ticket.frontMatter)
+    ) {
+      archiveTicketForPrompt = await beginArchiveTicketProcessing(
+        projectPath,
+        ticketId,
+        runId,
+        runEventSink,
+        ticket.frontMatter.status
+      );
+    }
+    clarifications = await readClarificationQuestions(projectPath, ticketId);
     provider = await resolveRuntimeAgentProvider(dependencies);
     await submitTicketUpdateWork({ ...input, projectPath, request }, { runId });
-    const projectContextSection = await resolveProjectContextPromptSection(projectPath);
-    prompt = buildTicketUpdatePrompt(ticket, clarifications, request, config.name, purpose, projectContextSection);
+    projectContextSection = await resolveProjectContextPromptSection(projectPath);
+    if (purpose !== archivePurpose) {
+      prompt = buildTicketUpdatePrompt(ticket, clarifications, request, projectName, purpose, projectContextSection);
+    }
     const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", {
       message: "Ticket update agent started.",
       metadata: { providerId: provider.providerId }
@@ -3977,6 +4274,9 @@ const startTicketUpdateRunPromise = async (
     });
   } catch (error) {
     await completeTicketUpdateRun(runId);
+    if (purpose === archivePurpose) {
+      await restoreArchiveTicketAfterFailure(projectPath, ticketId, runId);
+    }
     await markWorkRunStatusSafely(projectPath, runId, abortController.signal.aborted ? "cancelled" : "failed", {
       error,
       message: errorMessage(error, "Ticket update failed before streaming started.")
@@ -3996,10 +4296,25 @@ const startTicketUpdateRunPromise = async (
         message,
         error: { message, finalStatus }
       });
+      if (purpose === archivePurpose) {
+        await restoreArchiveTicketAfterFailure(projectPath, ticketId, runId);
+      }
     };
 
     void (async () => {
       try {
+        if (purpose === archivePurpose) {
+          const ticketForPrompt = archiveTicketForPrompt ?? (await readTicket(projectPath, ticketId));
+          prompt = buildTicketUpdatePrompt(
+            ticketForPrompt,
+            clarifications,
+            request,
+            projectName,
+            purpose,
+            projectContextSection
+          );
+        }
+
         await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
           type: "run.started",
           runId,
@@ -4065,7 +4380,7 @@ const startTicketUpdateRunPromise = async (
             throw new Error("Scope recovery updates cannot create new clarification questions.");
           }
           if (isArchive) {
-            if (latest.frontMatter.status !== RELAY_COMPLETED_STATUS) {
+            if (!ticketEligibleForArchiveRun(latest.frontMatter)) {
               throw new Error("Only completed tickets can be archived.");
             }
             if (update.clarificationQuestions.length > 0) {
@@ -4081,13 +4396,13 @@ const startTicketUpdateRunPromise = async (
                 ...latest.frontMatter,
                 title: update.title,
                 priority: update.priority,
-                labels: update.labels,
+                labels: latest.frontMatter.labels,
                 summary: update.patch.summary,
                 authoringState: update.authoringState,
                 plannedFiles: update.plannedFiles ?? latest.frontMatter.plannedFiles
               }
             });
-            const archived =
+            const archivedRecord =
               summarized.frontMatter.status === RELAY_ARCHIVE_STATUS
                 ? summarized
                 : await transitionTicketStatus(projectPath, ticketId, RELAY_ARCHIVE_STATUS, {
@@ -4095,6 +4410,25 @@ const startTicketUpdateRunPromise = async (
                     source: "manual_ticket_edit",
                     runId
                   });
+            const archived = await writeTicket(projectPath, {
+              ...archivedRecord,
+              frontMatter: {
+                ...archivedRecord.frontMatter,
+                runStatus: "idle",
+                lastRunId: null,
+                lastRunStartedAt: null
+              }
+            });
+            if (archived.frontMatter.status !== latest.frontMatter.status) {
+              await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+                type: "ticket.status_changed",
+                fromStatus: latest.frontMatter.status,
+                toStatus: archived.frontMatter.status,
+                actor: "codex",
+                source: "archive_processing",
+                timestamp: nowIso()
+              });
+            }
             await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
               type: "run.completed",
               finalResponse: `Ticket archived. ${update.patch.summary}`,
@@ -4112,6 +4446,7 @@ const startTicketUpdateRunPromise = async (
               result: { ticketId, clarificationQuestionCount: 0, purpose },
               message: "Ticket archive completed."
             });
+            await finalizeQueuedArchiveIntent(projectPath, ticketId, runId);
             return;
           }
 
@@ -4293,25 +4628,69 @@ const readTicketArchiveSnapshot = async (projectPath: string, ticketId: string):
   board: await readBoard(projectPath)
 });
 
+const queueTicketForArchive = async (
+  projectPath: string,
+  ticketId: string,
+  dependencies: TicketUpdateDependencies = {},
+  options: { readonly wakeScheduler?: boolean } = {}
+): Promise<TicketArchiveResult> => {
+  const resolvedProjectPath = await resolveBackendPath(projectPath);
+  await assertArchiveStatusConfigured(resolvedProjectPath);
+  const ticket = await readTicket(resolvedProjectPath, ticketId);
+  if (ticket.frontMatter.status !== RELAY_COMPLETED_STATUS) {
+    throw new Error("Only completed tickets can be archived.");
+  }
+
+  const runId = dependencies.createRunId?.() ?? newId("run");
+  await enqueueArchiveRun(runId, {
+    projectPath: resolvedProjectPath,
+    ticketId,
+    dependencies: {
+      ...(dependencies as CodexRunDependencies),
+      createCodexClient: dependencies.createCodexClient
+        ? () => dependencies.createCodexClient!()
+        : undefined
+    }
+  });
+  const queued =
+    ticket.frontMatter.status === RELAY_READY_STATUS
+      ? await setTicketQueued(resolvedProjectPath, ticketId, runId)
+      : await transitionTicketStatus(resolvedProjectPath, ticketId, RELAY_READY_STATUS, {
+          actor: "user",
+          source: "archive_queue",
+          runId
+        }).then((transitioned) =>
+          writeTicket(resolvedProjectPath, {
+            ...transitioned,
+            frontMatter: {
+              ...transitioned.frontMatter,
+              authoringState: "ready",
+              runStatus: "queued",
+              lastRunId: runId
+            }
+          })
+        );
+  const labeled = await writeTicket(resolvedProjectPath, {
+    ...queued,
+    frontMatter: {
+      ...queued.frontMatter,
+      labels: withPendingArchiveLabel(queued.frontMatter.labels)
+    }
+  });
+  if (options.wakeScheduler !== false) {
+    wakeProjectSchedulerSoon(resolvedProjectPath);
+  }
+  return {
+    ticket: labeled,
+    board: await readBoard(resolvedProjectPath)
+  };
+};
+
 export const archiveTicket = async (
   projectPath: string,
   ticketId: string,
   dependencies: TicketUpdateDependencies = {}
-): Promise<TicketArchiveResult> => {
-  const resolvedProjectPath = await resolveBackendPath(projectPath);
-  await assertArchiveStatusConfigured(resolvedProjectPath);
-  await startTicketUpdateRun(
-    {
-      projectPath: resolvedProjectPath,
-      ticketId,
-      request: ARCHIVE_TICKET_UPDATE_REQUEST,
-      purpose: archivePurpose
-    },
-    dependencies
-  );
-  await waitForTicketArchived(resolvedProjectPath, ticketId);
-  return readTicketArchiveSnapshot(resolvedProjectPath, ticketId);
-};
+): Promise<TicketArchiveResult> => queueTicketForArchive(projectPath, ticketId, dependencies);
 
 export const archiveTicketBundle = async (
   projectPath: string,
@@ -4326,10 +4705,14 @@ export const archiveTicketBundle = async (
   const sortedIds = sortArchiveBundleIds(uniqueIds, board.tickets);
   let lastResult: TicketArchiveResult | null = null;
   for (const ticketId of sortedIds) {
-    lastResult = await archiveTicket(resolvedProjectPath, ticketId, dependencies);
+    lastResult = await queueTicketForArchive(resolvedProjectPath, ticketId, dependencies, { wakeScheduler: false });
   }
   if (!lastResult) throw new Error("Provide at least one ticket id to archive.");
-  return lastResult;
+  wakeProjectSchedulerSoon(resolvedProjectPath);
+  return {
+    ticket: lastResult.ticket,
+    board: await readBoard(resolvedProjectPath)
+  };
 };
 
 const subagentExecutionGuidance = `Subagent guidance:
@@ -4656,6 +5039,12 @@ export const approveScopeClarificationRedraft = async (
   );
 };
 
+const reconcileArchiveQueueState = async (projectPath: string, ticketId: string): Promise<TicketRecord> => {
+  const ticket = await readTicket(projectPath, ticketId);
+  wakeProjectSchedulerSoon(projectPath);
+  return ticket;
+};
+
 export const reconcileSchedulableReadyTickets = async (
   projectPathInput: string,
   dependencies: CodexRunDependencies = {}
@@ -4664,7 +5053,38 @@ export const reconcileSchedulableReadyTickets = async (
   const board = await readBoard(projectPath);
 
   for (const ticket of board.tickets) {
-    if (ticket.ticketType !== "task" || ticket.status !== RELAY_READY_STATUS) continue;
+    if (ticket.status !== RELAY_ARCHIVE_STATUS || ticket.runStatus === "idle") continue;
+    if (ticket.lastRunId && ((await getQueuedArchiveRun(ticket.lastRunId)) || (await isTicketUpdateActiveOrStarting(ticket.lastRunId)))) {
+      continue;
+    }
+    try {
+      await normalizeArchivedTicketRunState(projectPath, ticket.id);
+    } catch (error) {
+      await logWarn("codex:scheduler", "failed to normalize archived ticket run state", {
+        projectPath,
+        ticketId: ticket.id,
+        error: errorMessage(error, "Archive normalization failed.")
+      });
+    }
+  }
+
+  for (const ticket of board.tickets) {
+    if (ticket.status !== RELAY_READY_STATUS) continue;
+
+    if (ticket.runStatus === "queued" && ticket.lastRunId && (await getQueuedArchiveRun(ticket.lastRunId))) {
+      try {
+        await reconcileArchiveQueueState(projectPath, ticket.id);
+      } catch (error) {
+        await logWarn("codex:scheduler", "failed to reconcile queued archive ticket", {
+          projectPath,
+          ticketId: ticket.id,
+          error: errorMessage(error, "Reconcile failed.")
+        });
+      }
+      continue;
+    }
+
+    if (ticket.ticketType !== "task") continue;
 
     if (ticket.runStatus === "queued" && ticket.lastRunId) {
       try {
@@ -5020,7 +5440,8 @@ const deferRunForLockedPath = async ({
   filePath,
   conflict,
   runEventSink,
-  abortController
+  abortController,
+  workspacePath
 }: {
   projectPath: string;
   ticketId: string;
@@ -5030,9 +5451,10 @@ const deferRunForLockedPath = async ({
   conflict: PathLockConflict;
   runEventSink?: RendererRunEventSink;
   abortController: AbortController;
+  workspacePath: string;
 }): Promise<void> => {
   abortController.abort();
-  const revert = await revertRunGitChanges(projectPath, ticketId, runId);
+  const revert = await revertRunGitChanges(projectPath, ticketId, runId, workspacePath);
   await appendPlannedFileToTicket(projectPath, ticketId, filePath);
   await releasePathLocksForRun(projectPath, ticketId, runId);
 
@@ -5160,6 +5582,7 @@ const startQueuedRunNow = async (
   }
   let config: Awaited<ReturnType<typeof readProjectConfig>>;
   let ticket: Awaited<ReturnType<typeof readTicket>>;
+  let workspacePath = projectPath;
   let existingThreadId: string | null;
   let thread: CodexRunThread;
   let executionInput: CodexRunInput;
@@ -5170,6 +5593,7 @@ const startQueuedRunNow = async (
   try {
     config = await readProjectConfig(projectPath);
     ticket = await readTicket(projectPath, ticketId);
+    workspacePath = (await ensureImplementationWorkspace(projectPath, ticketId, ticket.frontMatter.title)).workspacePath;
     const clarifications = await readClarificationQuestions(projectPath, ticketId);
     plannedScope = normalizedPlannedScopeForTicket(ticket, projectPath);
     const lockAcquire = await tryAcquirePathLocks(projectPath, ticketId, runId, plannedScope);
@@ -5178,7 +5602,7 @@ const startQueuedRunNow = async (
         lockAcquire.conflicts.map((conflict) => `\`${conflict.path}\` is locked by task ${conflict.holderTicketId}`).join(" ")
       );
     }
-    const options = await implementationThreadOptionsForProject(projectPath, ticket.frontMatter.effort);
+    const options = await implementationThreadOptionsForProject(projectPath, workspacePath, ticket.frontMatter.effort);
     existingThreadId = resume && !freshThread ? ticket.frontMatter.codexThreadId : null;
     executionInput = await buildExecutionInput(projectPath, ticket.markdown, clarifications, plannedScope);
     status = config.columns.some((column) => column.id === RELAY_IN_PROGRESS_STATUS) ? RELAY_IN_PROGRESS_STATUS : ticket.frontMatter.status;
@@ -5233,10 +5657,11 @@ const startQueuedRunNow = async (
     if (abortController.signal.aborted) {
       throw new Error("Agent run was cancelled before streaming started.");
     }
-    await captureRunGitBaseline(projectPath, ticketId, runId, runStartedAt);
+    await captureRunGitBaseline(projectPath, ticketId, runId, runStartedAt, workspacePath);
     await markWorkRunStatusSafely(projectPath, runId, "running", {
       message: "Codex implementation run started.",
       metadata: {
+        workspacePath,
         providerSessionRef: {
           providerId: "codex",
           externalId: currentThreadId,
@@ -5394,7 +5819,8 @@ const startQueuedRunNow = async (
                       filePath: outOfScopePath,
                       conflict: conflicts[0],
                       runEventSink,
-                      abortController
+                      abortController,
+                      workspacePath
                     });
                     resolveOnce(currentThreadId);
                     return;
@@ -5410,7 +5836,8 @@ const startQueuedRunNow = async (
                       filePath: outOfScopePath,
                       conflict: acquired.conflicts[0],
                       runEventSink,
-                      abortController
+                      abortController,
+                      workspacePath
                     });
                     resolveOnce(currentThreadId);
                     return;
@@ -5576,9 +6003,11 @@ const startQueuedProviderRunNow = async (
   const runEventSink = dependencies.runEventSink;
   let currentThreadId = `pending_${runId}`;
   const abortController = new AbortController();
+  let workspacePath = projectPath;
   try {
     const config = await readProjectConfig(projectPath);
     const ticket = await readTicket(projectPath, ticketId);
+    workspacePath = (await ensureImplementationWorkspace(projectPath, ticketId, ticket.frontMatter.title)).workspacePath;
     const clarifications = await readClarificationQuestions(projectPath, ticketId);
     const plannedScope = normalizedPlannedScopeForTicket(ticket, projectPath);
     const lockAcquire = await tryAcquirePathLocks(projectPath, ticketId, runId, plannedScope);
@@ -5612,10 +6041,11 @@ const startQueuedProviderRunNow = async (
     if (abortController.signal.aborted) {
       throw new Error("Agent run was cancelled before execution started.");
     }
-    await captureRunGitBaseline(projectPath, ticketId, runId, runStartedAt);
+    await captureRunGitBaseline(projectPath, ticketId, runId, runStartedAt, workspacePath);
     await markWorkRunStatusSafely(projectPath, runId, "running", {
       message: `${provider.providerId} implementation run started.`,
       metadata: {
+        workspacePath,
         providerId: provider.providerId,
         ...(providerSessionRef ? { providerSessionRef } : {})
       }
@@ -5676,7 +6106,7 @@ const startQueuedProviderRunNow = async (
     };
 
     const plannedScopeSet = new Set(plannedScope);
-    const handleProviderRelayEvent = async (relayEvent: RendererRunEvent): Promise<"continue" | "deferred"> => {
+    const handleProviderRelayEvent = async (relayEvent: RelayCodexEvent): Promise<"continue" | "deferred"> => {
       await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, relayEvent);
       if (relayEvent.type !== "file.change") return "continue";
       const normalizedPath = normalizeScopedRepoPath(relayEvent.path, projectPath);
@@ -5700,7 +6130,8 @@ const startQueuedProviderRunNow = async (
             filePath: outOfScopePath,
             conflict: conflicts[0],
             runEventSink,
-            abortController
+            abortController,
+            workspacePath
           });
           return "deferred";
         }
@@ -5715,7 +6146,8 @@ const startQueuedProviderRunNow = async (
             filePath: outOfScopePath,
             conflict: acquired.conflicts[0],
             runEventSink,
-            abortController
+            abortController,
+            workspacePath
           });
           return "deferred";
         }
@@ -5740,7 +6172,7 @@ const startQueuedProviderRunNow = async (
     const projectContextSection = await resolveProjectContextPromptSection(projectPath);
     const request = {
       kind: "ticket.implementation",
-      projectPath,
+      projectPath: workspacePath,
       prompt: buildExecutionPrompt(ticket.markdown, clarifications, plannedScope, projectContextSection),
       mode: "write",
       effort: ticket.frontMatter.effort,
@@ -5963,6 +6395,9 @@ export const reconcileTicketQueueState = async (
   const ticket = await readTicket(resolvedProjectPath, ticketId);
 
   if (ticket.frontMatter.runStatus === "queued" && ticket.frontMatter.lastRunId) {
+    if (await getQueuedArchiveRun(ticket.frontMatter.lastRunId)) {
+      return reconcileArchiveQueueState(resolvedProjectPath, ticketId);
+    }
     if (ticket.frontMatter.status === RELAY_READY_STATUS || ticket.frontMatter.status === RELAY_IN_PROGRESS_STATUS) {
       const resume = ticket.frontMatter.status === RELAY_IN_PROGRESS_STATUS;
       if (!(await getQueuedImplementationRun(ticket.frontMatter.lastRunId))) {
@@ -6053,7 +6488,8 @@ const maybeRevertRunGitChanges = async ({
   revertChanges
 }: CancelRunTarget): Promise<string | null> => {
   if (!revertChanges || !projectPath || !ticketId) return null;
-  const result = await revertRunGitChanges(projectPath, ticketId, runId);
+  const workspacePath = await readImplementationWorkspacePath(projectPath, ticketId);
+  const result = await revertRunGitChanges(projectPath, ticketId, runId, workspacePath);
   return result.message;
 };
 

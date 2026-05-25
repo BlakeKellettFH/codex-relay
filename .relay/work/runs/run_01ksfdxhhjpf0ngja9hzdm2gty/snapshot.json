@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ksfdxhhjpf0ngja9hzdm2gty",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks68bhm73d3x1ax33ft3a1fh",
+  "runId": "run_01ksfdxhhjpf0ngja9hzdm2gty",
+  "subject": "ticket",
+  "action": "update",
+  "kind": "ticket.update",
+  "idempotencyKey": "ticket.update:/Users/blakekellett/repos/codex-relay:tkt_01ks68bhm73d3x1ax33ft3a1fh:run_01ksfdxhhjpf0ngja9hzdm2gty",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-25T11:21:58.830Z",
+  "updatedAt": "2026-05-25T11:23:35.752Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ksfdxhv9j6xvkfkk3gx4n0rd",
+    "leaseToken": "lease_01ksfdxhv93ndwekpk2ngsj7vm",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-25T11:21:58.889Z",
+    "heartbeatAt": "2026-05-25T11:21:58.891Z",
+    "startedAt": "2026-05-25T11:21:58.891Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks68bhm73d3x1ax33ft3a1fh",
+    "request": "Archive this completed ticket with a lean summary for long-term storage.",
+    "purpose": "archive",
+    "runId": "run_01ksfdxhhjpf0ngja9hzdm2gty"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket archive completed.",
+  "result": {
+    "ticketId": "tkt_01ks68bhm73d3x1ax33ft3a1fh",
+    "clarificationQuestionCount": 0,
+    "purpose": "archive"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "title": "Add POST /api/tickets/archive backend integration test",
+  "priority": "medium",
+  "labels": [
+    "api",
+    "backend",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "tests/backend.test.ts",
+    "src/http/resources/tickets.ts",
+    "src/workflows/tickets.ts"
+  ],
+  "patch": {
+    "summary": "Added backend integration tests for POST /api/tickets/archive covering successful multi-id bundle archival (200, sort order, archive status, board visibility) and rejection of non-completed tickets.",
+    "fullMarkdown": "# Add POST /api/tickets/archive backend integration test\n\n## Requirements\n\n- Cover `POST /api/tickets/archive` with a multi-id bundle; expect `200` and `TicketArchiveResult` shape.\n- Assert archived tickets reach `archive` status; reject non-completed tickets with an error.\n\n## Acceptance Criteria\n\n- New `backend.test.ts` cases pass in CI with existing ticket mutation tests.\n- Bundle archives in tasks → features → epics order per `sortArchiveBundleIds`.\n- Archived tickets are excluded from visible board columns.\n\n## Outcome\n\n- **Bundle archive** — Seeds completed epic/feature/task hierarchy, posts unsorted `ticketIds`, mocks archive agent completion, asserts `200` `{ ticket, board }`, epic last in `archivedOrder`, all `archive` status, ids absent from visible columns.\n- **Non-completed** — Posts a todo ticket via production route; expects failure with “Only completed tickets can be archived”; status unchanged.\n- **Scope** — Changes limited to `tests/backend.test.ts` (helpers: archive Codex mock, test route, `startTestArchiveApi`, `seedCompletedArchiveBundle`).\n- **Verify** — Run `npm test` or `node tests/run-tests.mjs`; success path uses test route mirroring production for mockability.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

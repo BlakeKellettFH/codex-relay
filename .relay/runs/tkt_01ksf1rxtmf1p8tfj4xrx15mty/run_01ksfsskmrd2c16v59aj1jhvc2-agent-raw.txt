@@ -1,0 +1,17 @@
+{
+  "title": "Route renderer archive flows through POST /api/tickets/archive",
+  "priority": "medium",
+  "labels": ["ui", "api", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/lib/relayQueries.ts",
+    "src/renderer/src/lib/relayApi.ts"
+  ],
+  "patch": {
+    "summary": "Board and ticket-detail archive actions now call `useArchiveTicketMutation` (`POST /api/tickets/archive`) instead of client-side `startTicketUpdate` polling in `App.tsx`.",
+    "fullMarkdown": "# Route renderer archive flows through POST /api/tickets/archive\n\n## Requirements\n\n- BoardView archive handlers call `useArchiveTicketMutation` with `projectPath` and sorted bundle `ticketIds`\n- Ticket detail Archive uses the same mutation with `detailArchiveTarget.bundleIds`\n- Remove client archive polling helpers (`waitForTicketArchived`, `archiveTicketIdsWithAgent`) once the mutation owns completion\n\n## Acceptance Criteria\n\n- No direct `startTicketUpdate` archive calls remain in `App.tsx` archive handlers\n- Successful bundle archive refreshes the board and shows existing success toasts\n- Archive errors surface via mutation `catch` with prior toast messaging\n\n## Done\n\n- `App.tsx`: board `archiveBundle` / epic / feature and detail Archive wired to `mutateAsync`; per-container busy state and toasts preserved\n- Removed `waitForTicketArchived`, `archiveTicketIdsWithAgent`, and related archive poll constants/imports\n- `relayApi.tickets.archive` / `useArchiveTicketMutation` unchanged (already present)\n",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

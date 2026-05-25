@@ -1,0 +1,18 @@
+{
+  "title": "Review gates and container status transitions",
+  "priority": "medium",
+  "labels": ["backend", "review", "relay:archive-queue"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/lib/boardReview.ts",
+    "src/storage/filesystem.ts",
+    "tests/board-review.test.ts",
+    "tests/backend.test.ts"
+  ],
+  "patch": {
+    "summary": "Added board review gates and container promotion: features auto-enter review when all linked tasks are terminal and demote on reopen; epic/feature status transitions are limited to review, completed, or archive, with reconciliation after task moves.",
+    "fullMarkdown": "# Review gates and container status transitions\n\n## Requirements\n\n- `boardReview.ts`: terminal task detection, linked task/feature collectors, review gate predicates, and `maybePromoteOrDemoteContainers`.\n- Epic and feature `transitionTicketStatus` limited to `review`, `completed`, or `archive`.\n- After task changes via `moveTicket`, run promotion/demotion for parent feature and epic ancestors.\n\n## Acceptance Criteria\n\n- Last task under a feature moving to `completed` sets the feature `status` to `review` in storage.\n- Moving a completed task back to `todo` demotes a feature in `review` to `todo`.\n- `transitionTicketStatus` rejects feature→`todo`; allows feature→`review` and `completed`.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

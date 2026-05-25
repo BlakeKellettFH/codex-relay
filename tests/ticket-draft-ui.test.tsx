@@ -20,6 +20,7 @@ import {
   FloatingTicketComposer,
   getTicketDetailExecutionActionState,
   getContainerTicketStatusNote,
+  getReviewAcceptEnabled,
   getTicketReviewActionState,
   getFloatingComposerDraftInput,
   getScopeRecoveryClarificationActionQuestionIds,
@@ -772,31 +773,79 @@ test("tooltip wrapper exposes hover label via data-tooltip", () => {
 });
 
 test("ticket review action state shows accept and reject for tasks, features, and epics in review", () => {
+  const reviewTask = ticketSummary({
+    id: "task_review",
+    title: "Review",
+    ticketType: "task",
+    status: "review"
+  });
+  const feature = ticketSummary({
+    id: "feat_1",
+    title: "Auth",
+    ticketType: "feature",
+    status: "review"
+  });
+  const featureTask = ticketSummary({
+    id: "task_under_feat",
+    title: "Under feature",
+    ticketType: "task",
+    status: "review",
+    parentFeatureId: "feat_1"
+  });
+  const epic = ticketSummary({
+    id: "epic_1",
+    title: "Platform",
+    ticketType: "epic",
+    status: "review"
+  });
+  const epicFeature = ticketSummary({
+    id: "feat_under_epic",
+    title: "Auth",
+    ticketType: "feature",
+    status: "review",
+    parentEpicId: "epic_1"
+  });
+  const epicTask = ticketSummary({
+    id: "task_under_epic",
+    title: "Task",
+    ticketType: "task",
+    status: "completed",
+    parentFeatureId: "feat_under_epic",
+    parentEpicId: "epic_1"
+  });
+  const boardTickets = [reviewTask, feature, featureTask, epic, epicFeature, epicTask];
+
   assert.deepEqual(
     getTicketReviewActionState({
       ticketType: "task",
       status: "review",
-      columns: DEFAULT_COLUMNS
+      columns: DEFAULT_COLUMNS,
+      allTickets: boardTickets,
+      ticketId: "task_review"
     }),
-    { showAcceptReject: true }
+    { showAcceptReject: true, acceptEnabled: true }
   );
 
   assert.deepEqual(
     getTicketReviewActionState({
       ticketType: "feature",
       status: "review",
-      columns: DEFAULT_COLUMNS
+      columns: DEFAULT_COLUMNS,
+      allTickets: boardTickets,
+      ticketId: "feat_1"
     }),
-    { showAcceptReject: true }
+    { showAcceptReject: true, acceptEnabled: true }
   );
 
   assert.deepEqual(
     getTicketReviewActionState({
       ticketType: "epic",
       status: "review",
-      columns: DEFAULT_COLUMNS
+      columns: DEFAULT_COLUMNS,
+      allTickets: boardTickets,
+      ticketId: "epic_1"
     }),
-    { showAcceptReject: true }
+    { showAcceptReject: true, acceptEnabled: true }
   );
 
   assert.deepEqual(
@@ -805,7 +854,7 @@ test("ticket review action state shows accept and reject for tasks, features, an
       status: "in_progress",
       columns: DEFAULT_COLUMNS
     }),
-    { showAcceptReject: false }
+    { showAcceptReject: false, acceptEnabled: false }
   );
 
   assert.deepEqual(
@@ -814,8 +863,88 @@ test("ticket review action state shows accept and reject for tasks, features, an
       status: "todo",
       columns: DEFAULT_COLUMNS
     }),
-    { showAcceptReject: false }
+    { showAcceptReject: false, acceptEnabled: false }
   );
+});
+
+test("ticket review action state hides accept and reject for completed containers", () => {
+  const feature = ticketSummary({
+    id: "feat_1",
+    title: "Auth",
+    ticketType: "feature",
+    status: "completed"
+  });
+  const reviewTask = ticketSummary({
+    id: "task_review",
+    title: "Review",
+    ticketType: "task",
+    status: "completed",
+    parentFeatureId: "feat_1"
+  });
+
+  assert.deepEqual(
+    getTicketReviewActionState({
+      ticketType: "feature",
+      status: "completed",
+      columns: DEFAULT_COLUMNS,
+      allTickets: [feature, reviewTask],
+      ticketId: "feat_1"
+    }),
+    { showAcceptReject: false, acceptEnabled: false }
+  );
+});
+
+test("ticket review action state shows accept for a todo feature when linked tasks are ready", () => {
+  const feature = ticketSummary({
+    id: "feat_1",
+    title: "Auth",
+    ticketType: "feature",
+    status: "todo"
+  });
+  const reviewTask = ticketSummary({
+    id: "task_review",
+    title: "Review",
+    ticketType: "task",
+    status: "review",
+    parentFeatureId: "feat_1"
+  });
+
+  assert.deepEqual(
+    getTicketReviewActionState({
+      ticketType: "feature",
+      status: "todo",
+      columns: DEFAULT_COLUMNS,
+      allTickets: [feature, reviewTask],
+      ticketId: "feat_1"
+    }),
+    { showAcceptReject: true, acceptEnabled: true }
+  );
+});
+
+test("getReviewAcceptEnabled blocks feature accept when a linked task is in progress", () => {
+  const feature = ticketSummary({
+    id: "feat_1",
+    title: "Auth",
+    ticketType: "feature",
+    status: "review"
+  });
+  const reviewTask = ticketSummary({
+    id: "task_review",
+    title: "Review",
+    ticketType: "task",
+    status: "review",
+    parentFeatureId: "feat_1"
+  });
+  const openTask = ticketSummary({
+    id: "task_open",
+    title: "Open",
+    ticketType: "task",
+    status: "in_progress",
+    parentFeatureId: "feat_1"
+  });
+
+  assert.equal(getReviewAcceptEnabled(feature, [feature, reviewTask], DEFAULT_COLUMNS), true);
+  assert.equal(getReviewAcceptEnabled(feature, [feature, reviewTask, openTask], DEFAULT_COLUMNS), false);
 });
 
 test("container ticket status note uses review guidance when in review", () => {
@@ -823,12 +952,14 @@ test("container ticket status note uses review guidance when in review", () => {
     getContainerTicketStatusNote("feature", "review"),
     /This feature is in Review/
   );
-  assert.match(getContainerTicketStatusNote("feature", "review"), /moves only this feature to Completed/);
+  assert.match(getContainerTicketStatusNote("feature", "review"), /Accept moves this feature and every linked task in Review/);
+  assert.match(getContainerTicketStatusNote("feature", "review"), /Reject moves only this feature to Completed/);
   assert.match(
     getContainerTicketStatusNote("epic", "review"),
     /This epic is in Review/
   );
-  assert.match(getContainerTicketStatusNote("epic", "review"), /child features and tasks stay as they are/);
+  assert.match(getContainerTicketStatusNote("epic", "review"), /Accept moves this epic and every linked feature or task still in Review/);
+  assert.match(getContainerTicketStatusNote("epic", "review"), /Reject moves only this epic to Completed/);
   assert.match(getContainerTicketStatusNote("feature", "todo"), /Features follow child task columns/);
   assert.match(getContainerTicketStatusNote("epic", "todo"), /Epics follow child task columns/);
 });

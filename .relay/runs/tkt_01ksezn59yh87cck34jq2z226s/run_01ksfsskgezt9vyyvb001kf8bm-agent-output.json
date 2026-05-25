@@ -1,0 +1,20 @@
+{
+  "title": "Materialize lean-task blockedByTitles when applying feature trees",
+  "priority": "medium",
+  "labels": [
+    "storage",
+    "drafting"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/shared/leanTaskDependencies.ts",
+    "src/storage/filesystem.ts",
+    "tests/backend.test.ts"
+  ],
+  "patch": {
+    "summary": "Lean-task blockedByTitles from hierarchy drafts are resolved to blockedByIds on feature_tree, epic_tree, extend_epic, and extend_feature applies via a shared resolver and two-pass sibling creation.",
+    "fullMarkdown": "# Materialize lean-task blockedByTitles when applying feature trees\n\n## Requirements\n\n- Shared resolver maps lean-task titles to created ticket IDs; warns on cycles, self-deps, and unknown titles.\n- `feature_tree`, `epic_tree`, `extend_epic`, and `extend_feature` use two-pass sibling creation and patch `blockedByIds`.\n- Task-under-feature creation uses resolved `blockedByIds` or a post-create patch helper.\n\n## Acceptance Criteria\n\n- `feature_tree` apply with B `blockedByTitles` [\"A\"] sets B `blockedByIds` to A's id.\n- Circular A↔B titles log warnings and do not write invalid blocker links.\n\n## Delivered\n\n- `src/shared/leanTaskDependencies.ts` — case-insensitive title→id resolution, cycle/unknown/self-dep warnings; first-created wins on duplicate titles.\n- `src/storage/filesystem.ts` — `createLeanTasksUnderFeatureWithDependencies` wired into hierarchy apply paths.\n- `tests/backend.test.ts` — linear chain, cycle, and missing-title hierarchy apply cases.\n\n## Out of scope\n\n- `applyTicketDraftToTicket` lean-task paths still do not resolve `blockedByTitles`.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

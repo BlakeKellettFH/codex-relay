@@ -1,0 +1,19 @@
+{
+  "title": "Accept and reject UI for container review",
+  "priority": "medium",
+  "labels": [
+    "ui",
+    "review"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "tests/ticket-draft-ui.test.tsx"
+  ],
+  "patch": {
+    "summary": "Features and epics in Review now show Accept/Reject like tasks, with review-specific status copy; moves affect only the opened container via existing moveTicketTo.",
+    "fullMarkdown": "# Accept and reject UI for container review\n\n## Requirements\n\n- `getTicketReviewActionState` enables Accept/Reject for `feature` and `epic` when `status === review` and a Completed column exists.\n- Containers in `review` show review-specific status guidance instead of the generic follow-child-columns note; actions use existing `moveTicketTo`.\n- Accept/reject must not trigger parent promotion loops.\n\n## Acceptance Criteria\n\n- Feature in `review` shows Accept and Reject.\n- Accept on a feature in `review` moves only that feature to `completed`; child tasks stay `completed`.\n- Epic in `review` behaves the same; accepting a parent feature does not auto-accept the epic.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

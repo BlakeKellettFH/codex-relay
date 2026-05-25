@@ -1,0 +1,25 @@
+{
+  "title": "Cascade accept for feature and epic review",
+  "priority": "medium",
+  "labels": ["board", "review", "hierarchy", "ux"],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/domain/boardAccept.ts",
+    "src/domain/boardReview.ts",
+    "src/renderer/src/lib/boardAccept.ts",
+    "src/renderer/src/App.tsx",
+    "src/shared/schemas/ticket.ts",
+    "src/storage/filesystem.ts",
+    "SPEC.md",
+    "tests/board-accept.test.ts",
+    "tests/board-review.test.ts",
+    "tests/ticket-draft-ui.test.tsx",
+    "tests/backend.test.ts"
+  ],
+  "patch": {
+    "summary": "Cascade Accept on features and epics in Review completes every linked descendant still in review (tasks before features before epics), with eligibility gates and suppressed container reconciliation during bundle moves. Reject and task-only accept stay unchanged; SPEC §5.5.1 updated.",
+    "fullMarkdown": "# Cascade accept for feature and epic review\n\n## Context\n\nExtends layered review (tkt_01ks6810): Accept on a feature or epic in Review completes every linked descendant still in `review`, then the container. Reject stays single-ticket. Accept is disabled while any descendant remains in active workflow columns.\n\n## Requirements\n\n- Feature accept: move linked tasks in `review` to `completed`, then the feature; leave terminal children unchanged.\n- Epic accept: move linked features and tasks in `review` to `completed`, then the epic.\n- Enable Accept only when the container is in `review` and every descendant is `review` or terminal; active descendants disable Accept with explanatory copy.\n- Reject on feature/epic moves only the opened container.\n- Task accept remains single-ticket (no parent cascade).\n- Promotion gates align with bulk-accept eligibility (child `review` counts as ready).\n\n## Acceptance Criteria\n\n- Feature in Review with all tasks review-or-terminal: Accept completes review tasks, then the feature.\n- Epic in Review with features review-or-completed and tasks review-or-terminal: Accept completes nested review items, then the epic.\n- Descendants in `todo`, `ready`, or `in_progress` disable Accept with clear copy.\n- Reject moves only the container; children unchanged.\n- Task accept moves only the opened task.\n- SPEC §5.5.1 documents cascade accept; supersedes non-cascade criteria on tkt_01ks6810.\n",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

@@ -1,0 +1,24 @@
+{
+  "title": "Accept bundle and promotion-gate domain helpers",
+  "priority": "medium",
+  "labels": [
+    "backend",
+    "review",
+    "relay:archive-queue"
+  ],
+  "authoringState": "ready",
+  "plannedFiles": [
+    "src/domain/boardAccept.ts",
+    "src/domain/boardReview.ts",
+    "src/renderer/src/lib/boardAccept.ts",
+    "src/renderer/src/lib/boardReview.ts",
+    "tests/board-accept.test.ts",
+    "tests/board-review.test.ts"
+  ],
+  "patch": {
+    "summary": "Added pure domain helpers for cascade accept bundles, eligibility, and sort order; updated feature/epic promotion gates so child tickets in `review` satisfy readiness checks.",
+    "fullMarkdown": "# Accept bundle and promotion-gate domain helpers\n\n## Requirements\n\n- Accept bundle builders and `sortAcceptBundleIds` (tasks → features → epics).\n- Eligibility: linked tasks `review` or terminal; epics also require features `review` or `completed`.\n- Bundles: only `status === review` children plus container id last.\n- `featureReadyForReview` / `epicReadyForReview` treat child `review` as satisfying gates.\n\n## Acceptance Criteria\n\n- `tests/board-accept.test.ts`: feature/epic bundles, eligibility, sort order.\n- `tests/board-review.test.ts`: promotion cases with all-`review` children.\n\n## Delivered\n\n- `src/domain/boardAccept.ts` — eligibility, bundles, `sortAcceptBundleIds`.\n- `src/domain/boardReview.ts` — promotion gates aligned with review-or-terminal / review-or-completed children.\n- `src/renderer/src/lib/boardAccept.ts` — re-exports.\n- `tests/board-accept.test.ts` added; `tests/board-review.test.ts` updated.\n- `src/renderer/src/lib/boardReview.ts` unchanged (re-exports already cover domain updates).",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

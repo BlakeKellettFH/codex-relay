@@ -34,6 +34,7 @@ export function HierarchyBoardGroupTrigger({
   dragListeners,
   isDragging = false,
   activeChildTask = false,
+  activeChildSpinnerLabel,
   showArchive = false,
   archiveBusy = false,
   onArchive
@@ -41,6 +42,7 @@ export function HierarchyBoardGroupTrigger({
   triggerClassName: string;
   marker?: HierarchyVisual;
   activeChildTask?: boolean;
+  activeChildSpinnerLabel?: string;
   title: string;
   meta: string;
   labels: string[];
@@ -103,7 +105,11 @@ export function HierarchyBoardGroupTrigger({
               dragListeners={dragListeners}
             />
           )}
-          {activeChildTask && <HierarchyBoardGroupActiveSpinner label={hierarchyGroupActiveChildLabel(title)} />}
+          {activeChildTask && (
+            <HierarchyBoardGroupActiveSpinner
+              label={activeChildSpinnerLabel ?? hierarchyGroupActiveChildLabel(title)}
+            />
+          )}
           {showArchive && onArchive && (
             <BoardArchiveButton label={`Archive ${title} and child tickets`} onArchive={onArchive} busy={archiveBusy} />
           )}

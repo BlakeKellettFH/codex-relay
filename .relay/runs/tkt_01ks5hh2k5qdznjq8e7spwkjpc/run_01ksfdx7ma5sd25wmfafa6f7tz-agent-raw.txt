@@ -1,0 +1,12 @@
+{
+  "title": "Prepend TEMP banner to main README",
+  "priority": "low",
+  "labels": ["docs", "readme"],
+  "authoringState": "ready",
+  "patch": {
+    "summary": "Documentation-only feature: prepend literal TEMP as line 1 of root README.md, with a blank line before the unchanged # Relay heading. Delivered through the child task; no runtime or board changes.",
+    "fullMarkdown": "# Prepend TEMP banner to main README\n\n## Context\n\nUser-requested scratch marker on the project landing doc: prepend literal `TEMP` to repository-root `README.md`, then a blank line, then the existing `# Relay` heading and body unchanged.\n\n## Requirements\n\n- First line of `README.md` is exactly `TEMP` (no leading whitespace or markdown prefix).\n- One blank line between `TEMP` and `# Relay`; all content from `# Relay` onward unchanged.\n- Edit only `README.md`; no application source, tests, or `.relay/` artifacts.\n\n## Acceptance Criteria\n\n- `README.md` line 1 is `TEMP`, line 2 is blank, line 3 is `# Relay` with the rest of the file unchanged.\n- Only `README.md` was modified for this feature.\n- Child task completed the implementation.",
+    "appendMarkdown": null
+  },
+  "clarificationQuestions": []
+}

@@ -134,19 +134,20 @@ const captureBaselineEffect = (
   projectPath: string,
   ticketId: string,
   runId: string,
-  capturedAt: string
+  capturedAt: string,
+  gitProjectPath: string
 ): Effect.Effect<RunGitBaseline | null, unknown, GitRunnerServices> =>
   Effect.gen(function*() {
-    const isGit = yield* fromPromise(() => isGitRepository(projectPath));
+    const isGit = yield* fromPromise(() => isGitRepository(gitProjectPath));
     if (!isGit) return null;
 
-    yield* verifyGitRepository(projectPath);
-    const head = yield* GitCli.use((git) => git.exec(projectPath, ["rev-parse", "HEAD"]));
+    yield* verifyGitRepository(gitProjectPath);
+    const head = yield* GitCli.use((git) => git.exec(gitProjectPath, ["rev-parse", "HEAD"]));
     const commitSha = head.stdout.trim();
     if (!commitSha) return null;
 
     const statusResult = yield* GitCli.use((git) =>
-      git.exec(projectPath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+      git.exec(gitProjectPath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
     );
     const status = parsePorcelainStatus(statusResult.stdout);
     const baseline: RunGitBaseline = {
@@ -203,7 +204,8 @@ const summarizeResult = (restored: number, deleted: number, skipped: number): st
 const revertBaselineEffect = (
   projectPath: string,
   ticketId: string,
-  runId: string
+  runId: string,
+  gitProjectPath: string
 ): Effect.Effect<RevertRunGitChangesResult, unknown, GitRunnerServices> =>
   Effect.gen(function*() {
     const baseline = yield* readBaselineEffect(projectPath, ticketId, runId);
@@ -211,10 +213,10 @@ const revertBaselineEffect = (
       return { reverted: false, message: "No run change log was recorded for this run." };
     }
 
-    yield* verifyGitRepository(projectPath);
+    yield* verifyGitRepository(gitProjectPath);
 
     const pathService = yield* Path.Path;
-    const projectRoot = pathService.resolve(projectPath);
+    const projectRoot = pathService.resolve(gitProjectPath);
     const baselineDirty = new Set(baseline.changedPathsAtStart.map(slashPath));
     const events = yield* fromPromise(() => readRunEvents(projectPath, ticketId, runId));
 
@@ -246,7 +248,7 @@ const revertBaselineEffect = (
       }
 
       const kind = typeof event.kind === "string" ? event.kind.trim().toLowerCase() : "";
-      const existsAtHead = yield* trackedAtHead(projectPath, normalizedPath);
+      const existsAtHead = yield* trackedAtHead(gitProjectPath, normalizedPath);
 
       if (existsAtHead) {
         restoreCandidates.add(normalizedPath);
@@ -264,7 +266,7 @@ const revertBaselineEffect = (
 
     let restored = 0;
     for (const relativePath of restoreCandidates) {
-      yield* restoreTrackedPath(projectPath, relativePath);
+      yield* restoreTrackedPath(gitProjectPath, relativePath);
       restored += 1;
     }
 
@@ -315,8 +317,10 @@ export const captureRunGitBaseline = (
   projectPath: string,
   ticketId: string,
   runId: string,
-  capturedAt = new Date().toISOString()
-): Promise<RunGitBaseline | null> => runGitBaselineEffect(captureBaselineEffect(projectPath, ticketId, runId, capturedAt));
+  capturedAt = new Date().toISOString(),
+  gitProjectPath = projectPath
+): Promise<RunGitBaseline | null> =>
+  runGitBaselineEffect(captureBaselineEffect(projectPath, ticketId, runId, capturedAt, gitProjectPath));
 
 export const readRunGitBaseline = (
   projectPath: string,
@@ -327,5 +331,7 @@ export const readRunGitBaseline = (
 export const revertRunGitChanges = (
   projectPath: string,
   ticketId: string,
-  runId: string
-): Promise<RevertRunGitChangesResult> => runGitBaselineEffect(revertBaselineEffect(projectPath, ticketId, runId));
+  runId: string,
+  gitProjectPath = projectPath
+): Promise<RevertRunGitChangesResult> =>
+  runGitBaselineEffect(revertBaselineEffect(projectPath, ticketId, runId, gitProjectPath));

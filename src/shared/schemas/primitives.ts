@@ -66,6 +66,8 @@ export const relayEventSourceSchema = Schema.Literals([
   "manual_ticket_edit",
   "draft_generation",
   "agent_execution",
+  "archive_queue",
+  "archive_processing",
   "clarification_ui",
   "system_reconciliation"
 ]);

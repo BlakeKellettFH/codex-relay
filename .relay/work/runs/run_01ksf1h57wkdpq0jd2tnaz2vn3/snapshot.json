@@ -8,11 +8,11 @@
   "action": "draft",
   "kind": "ticket.draft",
   "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ksf1h58s4jebdadpbe89mqg8:run_01ksf1h57wkdpq0jd2tnaz2vn3",
-  "status": "running",
+  "status": "blocked",
   "attempts": 1,
   "createdAt": "2026-05-25T07:45:29.889Z",
-  "updatedAt": "2026-05-25T07:45:29.900Z",
-  "lastAppliedEventSequence": 4,
+  "updatedAt": "2026-05-25T14:36:44.277Z",
+  "lastAppliedEventSequence": 10,
   "executor": "agent",
   "providerId": "codex",
   "requiredCapabilities": [
@@ -42,7 +42,9 @@
   },
   "metadata": {
     "providerId": "cursor",
-    "executor": "agent"
+    "executor": "agent",
+    "clarificationQuestionCount": 1,
+    "recovered": true
   },
-  "message": "Ticket draft generation started."
+  "message": "Recovered incomplete work on boot."
 }
