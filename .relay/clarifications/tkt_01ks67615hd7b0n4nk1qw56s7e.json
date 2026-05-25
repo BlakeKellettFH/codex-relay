@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "ticketId": "tkt_01ks67615hd7b0n4nk1qw56s7e",
+  "questions": [
+    {
+      "id": "clar_01ks67bxg1z974ns0hy6p63gsd",
+      "ticketId": "tkt_01ks67615hd7b0n4nk1qw56s7e",
+      "question": "Should Relay v1 let users create and delete context markdown files from the UI, or only browse and edit files they add on disk?\n\nWhy it matters: Splits the epic into a browse/edit-only slice versus a fuller CRUD feature with filesystem APIs, validation, and sidebar actions.\nRecommended answer: Browse and edit only in v1: list `.relay/context/*.md`, open modal with Preview/Edit, save via Relay APIs; users add or remove files through Finder/terminal until a follow-up slice adds in-app create/delete.",
+      "answerType": "text",
+      "answer": null,
+      "createdAt": "2026-05-21T21:34:19.649Z",
+      "updatedAt": "2026-05-21T21:34:19.649Z",
+      "answeredAt": null,
+      "createdBy": "codex",
+      "source": "draft_generation",
+      "runId": "run_01ks676155vcq7j9rme41fwvwp",
+      "codexThreadId": "draft_run_01ks676155vcq7j9rme41fwvwp"
+    }
+  ]
+}

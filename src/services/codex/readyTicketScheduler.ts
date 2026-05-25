@@ -1,5 +1,5 @@
 import { Effect, Path } from "effect";
-import { RegistryStore } from "../registry/index";
+import { readRegistry } from "../registry/index";
 import { runBackendEffect } from "../../runtime";
 import { logWarn } from "../../runtime/Logging";
 import { reconcileSchedulableReadyTickets, reconcileTicketQueueState } from "./index";
@@ -60,7 +60,7 @@ export const stopReadyTicketAutomation = (projectPathInput: string): void => {
 };
 
 export const startReadyTicketAutomationForAllProjects = async (): Promise<void> => {
-  const registry = await runBackendEffect(RegistryStore.use((store) => store.read()));
+  const registry = await readRegistry();
   for (const project of registry.projects) {
     await startReadyTicketAutomation(project.path);
   }

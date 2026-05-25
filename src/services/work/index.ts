@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect";
 import type { AgentTicketUpdateInput, CreateDraftInput, StartRunInput, TicketRedraftInput } from "@shared/schemas";
-import { RegistryStore, RegistryStoreLive } from "../registry";
+import { RegistryStore, RegistryStoreLive } from "../registry/store";
 import type { BackendIoServices, BackendServicesBase } from "../../runtime";
 import { runBackendEffect } from "../../runtime";
 import { WorkEngine, WorkEngineLive, workStatusFromLegacyStatus, type WorkRecoveryReport } from "./engine";
@@ -71,23 +71,29 @@ export const submitTicketUpdateWork = (
 
 export const submitTicketImplementationWork = (
   input: StartRunInput,
-  options: { readonly runId: string; readonly resume: boolean }
+  options: { readonly runId: string; readonly resume: boolean; readonly providerId?: string | null }
 ): Promise<WorkHandle> =>
   runWork(TicketWorkService.use((service) => service.submitImplementation(input, options)));
 
 export const claimImplementationWork = async (
   projectPath: string,
-  workId?: string | null
+  workId?: string | null,
+  options: {
+    readonly providerId?: string | null;
+    readonly providerSessionRef?: import("./domain").ProviderSessionRef | null;
+  } = {}
 ): Promise<import("./domain").WorkClaim | null> =>
   runWork(
-    WorkEngine.use((engine) =>
-      engine.claimNext({
+    Effect.gen(function*() {
+      const engine = yield* WorkEngine;
+      const snapshot = workId ? yield* engine.findByRunId(projectPath, workId) : null;
+      return yield* engine.claimNext({
         projectPath,
         workId,
         executor: "agent",
-        providerId: "codex"
-      })
-    )
+        providerId: options.providerId ?? snapshot?.providerId ?? "codex"
+      });
+    })
   );
 
 export const claimWorkRun = (
@@ -199,7 +205,8 @@ export const markWorkRunStatus = (
           projectPath: snapshot.projectPath,
           workId: snapshot.workId,
           executor: "agent",
-          providerId: typeof options.metadata?.providerId === "string" ? options.metadata.providerId : "codex",
+          providerId:
+            typeof options.metadata?.providerId === "string" ? options.metadata.providerId : snapshot.providerId ?? "codex",
           providerSessionRef
         });
         if (!claim) return snapshot;
@@ -250,6 +257,9 @@ export const markWorkRunStatus = (
       });
     })
   );
+
+export const readWorkRunSnapshot = (projectPath: string, runId: string): Promise<WorkRunSnapshot | null> =>
+  runWork(WorkEngine.use((engine) => engine.findByRunId(projectPath, runId)));
 
 export const recoverWorkFromRegistry = (): Promise<WorkRecoveryReport[]> =>
   runWork(WorkEngine.use((engine) => engine.recoverAll()));

@@ -4,7 +4,7 @@ import type { ProjectEditorId, ProjectOpenInEditorInput, ProjectOpenInEditorResu
 import { ElectronDialog, ElectronShell } from "../platform";
 import { BackendClock } from "../platform";
 import { Git } from "../services/git";
-import { RegistryStore } from "../services/registry";
+import { RegistryStore } from "../services/registry/store";
 import { Storage } from "../storage";
 
 type SpawnedEditorProcess = {

@@ -1,3 +1,4 @@
+export * from "./agents";
 export * from "./audit";
 export * from "./board";
 export * from "./clarification";
@@ -7,4 +8,5 @@ export * from "./git";
 export * from "./primitives";
 export * from "./project";
 export * from "./registry";
+export * from "./repositoryChat";
 export * from "./ticket";

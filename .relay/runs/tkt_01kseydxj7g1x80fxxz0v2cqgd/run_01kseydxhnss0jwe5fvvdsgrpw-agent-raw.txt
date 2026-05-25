@@ -1,0 +1,197 @@
+{
+  "draftState": "ready",
+  "blockingClarificationQuestions": [],
+  "ticketType": "feature",
+  "title": "Smooth repository chat typing and reduce autosave churn",
+  "summary": "Repository chat should feel responsive while typing: fewer debounced PUTs and log noise, and the assistant transcript should not re-render on every keystroke. Autosave to `.relay/repository-chat.json` stays, with longer debounce and explicit flush on close/send/clear.\n- Longer debounced persist plus flush on panel close and send/clear\n- Memoized transcript vs composer so draft updates stay local\n- Safer first-load hydration when typing starts before GET completes\nValidate with focused renderer tests and manual typing in a project with a long assistant answer.",
+  "priority": "medium",
+  "labels": ["repository-chat", "ui", "performance"],
+  "context": "User reported chat typing causes visible panel rerenders and frequent INFO logs for PUT /api/projects/repository-chat. Intake confirmed autosave and panel-local rerenders are mostly by design; goal is smoother UX without removing persistence. Related streaming UX work (tkt_01ks7dand93t0q183ks5eja51x) is completed and separate.",
+  "researchFindings": [
+    "src/renderer/src/App.tsx:309 defines REPOSITORY_CHAT_PERSIST_DEBOUNCE_MS = 400; persist useEffect (2731-2750) debounces saveRepositoryChatMutation.mutate to PUT /api/projects/repository-chat.",
+    "useSaveRepositoryChatMutation (src/renderer/src/lib/relayQueries.ts:502-505) has no onSuccess cache invalidation; board refetch is not the cause of typing churn.",
+    "RepositoryChatPanelContent (App.tsx:2348-2609) renders transcript MarkdownBlock list and draft Textarea in one function; draft prop changes re-render all assistant MarkdownBlock instances.",
+    "MarkdownBlock (src/renderer/src/components/MarkdownBlock.tsx:439) is not memoized; parseMarkdownBlocks runs on each parent render.",
+    "Hydration useEffect (App.tsx:2702-2729) depends on draft/messages/threadId; line 2705 skips server hydration when draft.trim() before query success, risking lost persisted draft on fast typing.",
+    "Panel unmount on closeRepositoryChat (App.tsx:6054-6065) clears debounce timeout but does not flush pending signature; closing chat can drop last unsaved draft.",
+    "Backend: projectEndpoints.saveRepositoryChat -> FileSystemStorage.saveRepositoryChat writes .relay/repository-chat.json (src/http/resources/projects.ts, src/storage/filesystem.ts, tests/repository-chat-store.test.ts).",
+    "requestLoggingMiddleware (src/http/middleware/requestLogging.ts) logs every request at INFO, making autosave PUTs very visible in dev logs."
+  ],
+  "requirements": [
+    "Keep autosave to .relay/repository-chat.json; do not remove PUT persistence.",
+    "Increase typing debounce to ~1500-2000ms and flush pending state on panel close, send, and clear so drafts are not lost.",
+    "Typing in the composer must not re-render the assistant transcript/MarkdownBlock list when messages are unchanged.",
+    "Fix pre-hydration race so typing before GET /api/projects/repository-chat completes does not permanently skip server draft restore.",
+    "Reduce dev log noise from autosave without hiding other API request logging.",
+    "No board refetch or RelayApp-wide rerender regression while typing in repository chat."
+  ],
+  "implementationPlan": [
+    "Extract repository chat persist helpers (signature, debounce constant, flush via refs) from RepositoryChatPanel into a small renderer module; raise debounce to 1800ms.",
+    "Wire flush on panel unmount, submit (after clearing draft), clearChat, and wrapped onClose before parent hides the panel.",
+    "Hold saveRepositoryChat mutate in a ref so persist effect deps do not churn on mutation status transitions.",
+    "Split RepositoryChatPanelContent into memoized transcript and composer subtrees; transcript props exclude draft.",
+    "Refactor hydration into a one-shot effect on query success/projectPath with a userEditedBeforeHydrationRef guard instead of draft-in-deps skip logic.",
+    "Downgrade or skip INFO logging for PUT /api/projects/repository-chat in requestLoggingMiddleware."
+  ],
+  "testPlan": [
+    "Add tests/repository-chat-persist.test.ts for signature equality and flush scheduling behavior.",
+    "Add tests/repository-chat-hydration.test.ts (or renderer test) asserting server draft applies when user typed before query success.",
+    "Extend tests/ticket-draft-ui.test.tsx to confirm RepositoryChatPanelContent still renders transcript/composer markup.",
+    "Add request-logging test asserting repository-chat PUT is not logged at INFO.",
+    "Run node tests/run-tests.mjs and manually type in repository chat with a long assistant answer; confirm smoother textarea and fewer PUT/log lines."
+  ],
+  "acceptanceCriteria": [
+    "During continuous typing, PUT /api/projects/repository-chat fires at most about once per 1.5-2s idle window, plus one flush on close/send/clear.",
+    "Assistant transcript does not visibly flicker or re-scroll on each draft keystroke when messages are unchanged.",
+    "Opening chat after typing before initial load still restores persisted draft from server when local state was empty.",
+    "Closing chat without waiting for debounce still persists the latest draft/messages.",
+    "Board and ticket views do not refetch or rerender due to repository chat autosave.",
+    "Dev console no longer spams INFO lines for each autosave PUT."
+  ],
+  "clarificationQuestions": [],
+  "assumptions": [
+    "1800ms debounce is acceptable default within the 1500-2000ms range from intake.",
+    "React.memo on a new transcript subcomponent is acceptable; no project-wide memo convention exists yet.",
+    "Autosave PUT logging can move to debug or be omitted at INFO without a user-facing log-level setting."
+  ],
+  "implementationNotes": [
+    "RepositoryChatPanel is conditionally mounted in RelayApp (App.tsx:6054-6065); unmount cleanup is the right flush hook when panel closes.",
+    "saveRepositoryChatMutation status is not used in JSX today, but mutation object identity in effect deps may still cause extra effect runs—stabilize with refs.",
+    "Completed feature tkt_01ks7dand93t0q183ks5eja51x covers streaming/thinking only; do not regress streaming handlers in RepositoryChatPanel."
+  ],
+  "plannedFiles": [
+    "src/renderer/src/App.tsx",
+    "src/renderer/src/lib/repositoryChatPersist.ts",
+    "src/renderer/src/components/RepositoryChatTranscript.tsx",
+    "src/renderer/src/components/RepositoryChatComposer.tsx",
+    "src/http/middleware/requestLogging.ts",
+    "tests/repository-chat-persist.test.ts",
+    "tests/repository-chat-hydration.test.ts",
+    "tests/ticket-draft-ui.test.tsx",
+    "tests/request-logging.test.ts",
+    "tests/run-tests.mjs"
+  ],
+  "subtickets": [],
+  "featureStubs": [],
+  "leanTasks": [
+    {
+      "title": "Tune repository chat autosave debounce and flush",
+      "summary": "Make autosave less chatty while keeping drafts durable. Debounce moves to ~1.8s with explicit flush when the user leaves the panel or finishes an action.\n- Export persist helper with signature dedupe\n- Flush on unmount, send, clear, and close\n- Stabilize mutate ref to avoid extra effect churn",
+      "priority": "medium",
+      "labels": ["repository-chat", "persistence"],
+      "context": "First slice: reduce PUT frequency without losing draft data on fast panel close.",
+      "goal": "Less frequent autosave PUTs with reliable flush on important lifecycle events.",
+      "requirements": [
+        "Set REPOSITORY_CHAT_PERSIST_DEBOUNCE_MS to 1800 (exported from persist helper module).",
+        "Implement flushRepositoryChatPersist using refs for latest projectPath/threadId/messages/draft.",
+        "Call flush on panel unmount, submit, clearChat, and onClose wrapper before parent hides panel.",
+        "Keep signature dedupe via repositoryChatStoreSignature so unchanged state does not PUT."
+      ],
+      "acceptanceCriteria": [
+        "Typing continuously produces at most one PUT per ~1.8s idle window.",
+        "Closing panel or sending message persists latest draft even if debounce timer has not fired.",
+        "Persist effect does not re-subscribe on save mutation status changes."
+      ],
+      "implementationPlan": [
+        "Create src/renderer/src/lib/repositoryChatPersist.ts with signature, debounce constant, and flush/save helpers.",
+        "Refactor RepositoryChatPanel persist useEffect to use helpers and mutate ref.",
+        "Add flush calls in submit, clearChat, onClose wrapper, and unmount cleanup.",
+        "Add tests/repository-chat-persist.test.ts and register in tests/run-tests.mjs."
+      ],
+      "assumptions": ["1800ms debounce is the default target."],
+      "plannedFiles": [
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/lib/repositoryChatPersist.ts",
+        "tests/repository-chat-persist.test.ts",
+        "tests/run-tests.mjs"
+      ]
+    },
+    {
+      "title": "Isolate repository chat transcript from draft re-renders",
+      "summary": "Stop draft keystrokes from re-rendering assistant Markdown answers. Split the panel into memoized transcript and composer subtrees.\n- New RepositoryChatTranscript (memo)\n- New RepositoryChatComposer for textarea/options\n- RepositoryChatPanelContent wires both",
+      "priority": "medium",
+      "labels": ["repository-chat", "ui"],
+      "context": "Addresses perceived page rerender: transcript MarkdownBlock reparses on every draft change today.",
+      "goal": "Draft typing updates only the composer subtree.",
+      "requirements": [
+        "Extract transcript rendering (messages, pending/thinking/error) into React.memo component without draft prop.",
+        "Extract composer form (textarea, options, actions) into separate component that receives draft and onDraftChange.",
+        "Keep existing RepositoryChatPanelContent export API stable for tests in tests/ticket-draft-ui.test.tsx."
+      ],
+      "acceptanceCriteria": [
+        "Changing draft alone does not change transcript component props when messages/pending/error are unchanged.",
+        "Existing ticket-draft-ui repository chat markup tests still pass.",
+        "Manual typing with long assistant answer does not flicker transcript or reset scroll."
+      ],
+      "implementationPlan": [
+        "Add RepositoryChatTranscript.tsx with memoized message map and MarkdownBlock rendering.",
+        "Add RepositoryChatComposer.tsx for textarea and footer controls.",
+        "Slim RepositoryChatPanelContent in App.tsx to compose the two children.",
+        "Update/extend tests/ticket-draft-ui.test.tsx if import paths change."
+      ],
+      "assumptions": ["React.memo is acceptable as first renderer memo usage in this area."],
+      "plannedFiles": [
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/components/RepositoryChatTranscript.tsx",
+        "src/renderer/src/components/RepositoryChatComposer.tsx",
+        "tests/ticket-draft-ui.test.tsx"
+      ]
+    },
+    {
+      "title": "Fix repository chat pre-hydration draft race",
+      "summary": "Ensure server-backed draft still loads if the user types before the initial repository-chat query finishes. Replace draft-dependent hydration skip with explicit edit tracking.\n- One-shot hydration on query success\n- userEditedBeforeHydrationRef guard\n- Tests for early-typing scenario",
+      "priority": "medium",
+      "labels": ["repository-chat", "bug"],
+      "context": "Hydration effect at App.tsx:2705 treats non-empty draft as reason to skip loading store from server.",
+      "goal": "Server draft restores correctly unless the user has intentionally edited local state.",
+      "requirements": [
+        "Remove draft from hydration effect dependency-driven skip logic.",
+        "Track first local edit before hydration completes; only skip server apply when that ref is true.",
+        "Preserve existing projectPath reset behavior (applyEmptyRepositoryChatState on path change)."
+      ],
+      "acceptanceCriteria": [
+        "Simulated test: query resolves after local draft typed from empty initial state still applies server draft when user had not edited.",
+        "After intentional edit before hydration, server values do not overwrite local draft.",
+        "Post-hydration draft typing behavior unchanged."
+      ],
+      "implementationPlan": [
+        "Add userEditedBeforeHydrationRef set in onDraftChange before repositoryChatPersistReadyRef is true.",
+        "Split hydration into effect that runs once per projectPath when repositoryChatQuery.isSuccess.",
+        "Add tests/repository-chat-hydration.test.ts covering early-typing vs intentional edit cases.",
+        "Register test in tests/run-tests.mjs."
+      ],
+      "assumptions": ["Server draft should win over empty local state when user has not edited yet."],
+      "plannedFiles": [
+        "src/renderer/src/App.tsx",
+        "tests/repository-chat-hydration.test.ts",
+        "tests/run-tests.mjs"
+      ]
+    },
+    {
+      "title": "Quiet repository chat autosave HTTP logs",
+      "summary": "Stop autosave PUTs from flooding dev INFO logs while keeping request logging for other routes.\n- Adjust requestLoggingMiddleware for repository-chat PUT\n- Unit test log level/path filtering",
+      "priority": "low",
+      "labels": ["repository-chat", "logging"],
+      "context": "requestLoggingMiddleware logs every API call at INFO; autosave PUTs are high frequency during typing pauses.",
+      "goal": "Autosave PUTs are not logged at INFO in normal dev runs.",
+      "requirements": [
+        "PUT /api/projects/repository-chat should not emit INFO [http] API request lines during autosave.",
+        "Other methods/paths continue to log at INFO unchanged."
+      ],
+      "acceptanceCriteria": [
+        "Test proves repository-chat PUT is skipped or downgraded.",
+        "Manual typing still shows reduced [http] PUT noise compared to before."
+      ],
+      "implementationPlan": [
+        "Update requestLoggingMiddleware to return early or log at debug for PUT pathname /api/projects/repository-chat.",
+        "Add tests/request-logging.test.ts and register in tests/run-tests.mjs."
+      ],
+      "assumptions": ["Debug-level logging for this path is sufficient; no UI toggle needed."],
+      "plannedFiles": [
+        "src/http/middleware/requestLogging.ts",
+        "tests/request-logging.test.ts",
+        "tests/run-tests.mjs"
+      ]
+    }
+  ]
+}

@@ -7,6 +7,12 @@ import {
   RELAY_TODO_STATUS
 } from "@shared/schemas";
 import type { RelayColumn, TicketSummary } from "@shared/schemas";
+import {
+  isReviewBoardColumn,
+  isReviewStatusContainer,
+  reviewStatusContainers,
+  tasksForReviewContainerGroup
+} from "./boardReview";
 
 export type FeatureBoardGroupItem = {
   feature: TicketSummary;
@@ -76,6 +82,12 @@ export const ticketsForBoardColumn = (columnId: string, allTickets: TicketSummar
     included.set(draftTicket.id, draftTicket);
   }
 
+  if (isReviewBoardColumn(columnId)) {
+    for (const container of reviewStatusContainers(allTickets)) {
+      included.set(container.id, container);
+    }
+  }
+
   return [...included.values()];
 };
 
@@ -94,13 +106,21 @@ export const countColumnTicketsForDisplay = (columnId: string, allTickets: Ticke
 export const organizeColumnBoardItems = (columnId: string, allTickets: TicketSummary[]): ColumnBoardItem[] => {
   const byId = ticketById(allTickets);
   const columnTasks = tasksInColumn(columnId, allTickets);
+  const reviewContainersById = isReviewBoardColumn(columnId)
+    ? new Map(reviewStatusContainers(allTickets).map((container) => [container.id, container]))
+    : null;
   const tasksByFeature = new Map<string, TicketSummary[]>();
   const standaloneTasks: TicketSummary[] = [];
 
   for (const task of columnTasks) {
     if (task.parentFeatureId && featureParentInBoard(task.parentFeatureId, byId)) {
+      const feature = featureParentInBoard(task.parentFeatureId, byId);
+      const tasks = feature
+        ? tasksForReviewContainerGroup(feature, [task])
+        : [task];
+      if (tasks.length === 0) continue;
       const existing = tasksByFeature.get(task.parentFeatureId) ?? [];
-      existing.push(task);
+      existing.push(...tasks);
       tasksByFeature.set(task.parentFeatureId, existing);
       continue;
     }
@@ -123,8 +143,10 @@ export const organizeColumnBoardItems = (columnId: string, allTickets: TicketSum
     }
     const group: FeatureBoardGroupItem = {
       feature,
-      tasks,
-      featureInColumn: feature.status === columnId
+      tasks: tasksForReviewContainerGroup(feature, tasks),
+      featureInColumn: isReviewBoardColumn(columnId)
+        ? isReviewStatusContainer(feature)
+        : feature.status === columnId
     };
     const epicId = feature.parentEpicId;
     const epic = epicId ? epicParentInBoard(epicId, byId) : undefined;
@@ -143,6 +165,8 @@ export const organizeColumnBoardItems = (columnId: string, allTickets: TicketSum
   topLevelFeatureGroups.sort((left, right) => left.feature.position - right.feature.position);
 
   const items: ColumnBoardItem[] = [];
+  const representedFeatureIds = new Set<string>();
+  const representedEpicIds = new Set<string>();
 
   for (const [epicId, featureGroups] of featureGroupsByEpic) {
     const epic = epicParentInBoard(epicId, byId);
@@ -150,10 +174,13 @@ export const organizeColumnBoardItems = (columnId: string, allTickets: TicketSum
       topLevelFeatureGroups.push(...featureGroups);
       continue;
     }
+    representedEpicIds.add(epic.id);
+    for (const group of featureGroups) representedFeatureIds.add(group.feature.id);
     items.push({ kind: "epic-group", epic, featureGroups });
   }
 
   for (const group of topLevelFeatureGroups) {
+    representedFeatureIds.add(group.feature.id);
     items.push({
       kind: "feature-group",
       feature: group.feature,
@@ -169,6 +196,25 @@ export const organizeColumnBoardItems = (columnId: string, allTickets: TicketSum
   const draftTickets = draftTicketsInColumn(columnId, allTickets).sort((left, right) => left.position - right.position);
   for (const draftTicket of draftTickets) {
     items.push({ kind: "ticket", ticket: draftTicket });
+  }
+
+  if (reviewContainersById) {
+    for (const container of reviewContainersById.values()) {
+      if (container.ticketType === "epic") {
+        if (representedEpicIds.has(container.id)) continue;
+        items.push({ kind: "epic-group", epic: container, featureGroups: [] });
+        continue;
+      }
+      if (representedFeatureIds.has(container.id)) continue;
+      const parentEpicId = container.parentEpicId;
+      if (parentEpicId && reviewContainersById.get(parentEpicId)?.ticketType === "epic") continue;
+      items.push({
+        kind: "feature-group",
+        feature: container,
+        tasks: [],
+        featureInColumn: true
+      });
+    }
   }
 
   return items.sort((left, right) => itemSortPosition(left) - itemSortPosition(right));
@@ -216,13 +262,28 @@ export const isTaskRetryable = (
   return !blockers.isBlocked;
 };
 
+const taskHasActiveAgentRunStatus = (task: TicketSummary): boolean =>
+  task.runStatus === "running" ||
+  task.runStatus === "queued" ||
+  task.runStatus === "drafting" ||
+  task.runStatus === "paused";
+
+export const isTaskReadyPlaceable = (
+  task: TicketSummary,
+  columns: RelayColumn[],
+  _allTickets: TicketSummary[]
+): boolean => {
+  if (task.ticketType !== "task" || !isTaskAgentRunnable(task, columns)) return false;
+  if (taskHasActiveAgentRunStatus(task)) return false;
+  return true;
+};
+
 export const isTaskProcessable = (
   task: TicketSummary,
   columns: RelayColumn[],
   allTickets: TicketSummary[]
 ): boolean => {
-  if (task.ticketType !== "task" || !isTaskAgentRunnable(task, columns)) return false;
-  if (task.runStatus === "running" || task.runStatus === "queued" || task.runStatus === "drafting" || task.runStatus === "paused") return false;
+  if (!isTaskReadyPlaceable(task, columns, allTickets)) return false;
   const blockers = resolveTicketBlockers(task, allTickets, columns);
   return !blockers.isBlocked;
 };
@@ -231,7 +292,7 @@ export const tasksMovableToReady = (
   tasks: TicketSummary[],
   columns: RelayColumn[],
   allTickets: TicketSummary[]
-): TicketSummary[] => tasks.filter((task) => isTaskProcessable(task, columns, allTickets));
+): TicketSummary[] => tasks.filter((task) => isTaskReadyPlaceable(task, columns, allTickets));
 
 export const epicTasksMovableToReady = (
   featureGroups: FeatureBoardGroupItem[],

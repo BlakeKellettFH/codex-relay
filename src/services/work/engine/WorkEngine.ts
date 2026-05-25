@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Path } from "effect";
 import { ulid } from "ulid";
-import { RegistryStore } from "../../registry";
+import { RegistryStore } from "../../registry/store";
 import { BackendClock } from "../../../platform";
 import type { BackendIoServices, BackendServicesBase } from "../../../runtime";
 import { isTicketNotFoundError, readTicket, writeTicket } from "../../../storage";

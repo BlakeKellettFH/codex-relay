@@ -1,0 +1,29 @@
+{
+  "scope": "product_feature",
+  "planKind": "extend_feature",
+  "confidence": 0.92,
+  "estimatedTouchPoints": 6,
+  "rationale": "The request extends the existing layered container review work (tkt_01ks6810f8qgk82fbeh7wfbqga): Accept/Reject UI for features and epics in Review is already wired, but accept only moves the opened ticket and copy explicitly says children stay unchanged. The user wants the opposite—bulk Accept that completes all linked tasks (including those still in Review) plus the container, with a relaxed child gate (complete or in review) for when the feature is ready to accept. Reuse archive-style bundle ordering and linked-child helpers in boardReview/boardArchive rather than a new feature tree.",
+  "matchedEpicId": null,
+  "matchedFeatureId": "tkt_01ks6810f8qgk82fbeh7wfbqga",
+  "knownFacts": [
+    "Board feature tkt_01ks6810f8qgk82fbeh7wfbqga (Layered container review for epics and features) is still Todo while its four child tasks are Completed; intake should extend that feature and supersede its non-cascade acceptance criteria.",
+    "getTicketReviewActionState in App.tsx already shows Accept/Reject for task, feature, and epic when status is review; acceptReviewTicket only calls moveTicketTo(completed) for the selected ticket.",
+    "getContainerTicketStatusNote tells users Accept/Reject moves only the container and child tasks stay as they are—the opposite of the requested cascade behavior.",
+    "featureReadyForReview in src/domain/boardReview.ts promotes a feature to review only when every linked task is terminal (completed/not_doing/archive); it does not treat in-review tasks as satisfying the gate.",
+    "maybePromoteOrDemoteContainers in src/storage/boardReconciliation.ts runs after task moves and auto-promotes/demotes containers; bulk accept should not re-trigger unwanted demotion mid-batch.",
+    "Archive already bundles descendants bottom-up via archiveBundleForFeature/archiveBundleForEpic and sortArchiveBundleIds in boardArchive.ts—a similar accept bundle pattern is the natural implementation shape.",
+    "Default bulk-accept eligibility: every linked task under the feature is status review or terminal; tasks in ready/in_progress/in_review columns block the control. Default bulk-accept scope: all linked tasks in review move to completed, then the feature; for epics, include linked features in review plus all their tasks, then the epic.",
+    "Default reject behavior stays non-cascade (only the opened container moves to completed), matching current task reject semantics and the user’s accept-only wording.",
+    "Draft ticket tkt_01ksf1h58s4jebdadpbe89mqg8 duplicates this repository-chat request and should be folded into the parent feature extension."
+  ],
+  "relatedTicketIds": [
+    "tkt_01ks6810f8qgk82fbeh7wfbqga",
+    "tkt_01ks68bhm73d3x1ax33ft3a1fh",
+    "tkt_01ks68bhmjc68jk7krptdqqcyg",
+    "tkt_01ks68bhmy6as859qejv9d29kq",
+    "tkt_01ks68bhn5tqhnts1jq9fqz4sq",
+    "tkt_01ksf1h58s4jebdadpbe89mqg8"
+  ],
+  "questions": []
+}

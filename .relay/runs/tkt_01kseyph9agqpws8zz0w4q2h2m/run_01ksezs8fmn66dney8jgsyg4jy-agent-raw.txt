@@ -1,0 +1,169 @@
+{
+  "draftState": "ready",
+  "blockingClarificationQuestions": [],
+  "ticketType": "feature",
+  "title": "Archive completed tickets with lean agent summaries",
+  "summary": "Completed work can move to the hidden Archive lane with agent-rewritten lean markdown so long ticket bodies do not bloat project history.\n- Tiered summarization: epic soft, feature aggressive, task most aggressive (tasks drop Context/Goal)\n- Archive button on completed tasks plus existing container bundles\n- Summarize-then-move replaces status-only archiveBundle",
+  "priority": "medium",
+  "labels": ["board", "tickets", "archive"],
+  "context": "Relay already has a terminal `archive` column (hidden via `boardVisibleColumns`), epic/feature archive gating in `boardArchive.ts`, and move-only archiving in `App.tsx` `archiveBundle`. Archiving does not yet rewrite ticket markdown or refresh frontmatter `summary`. Completed standalone tasks have no archive affordance on board cards or detail.",
+  "researchFindings": [
+    "`RELAY_ARCHIVE_STATUS` and `boardVisibleColumns` in `src/shared/schemas/board.ts`; archive lane is terminal but not shown on the main board.",
+    "`src/renderer/src/lib/boardArchive.ts` exports `featureCanArchive`, `epicCanArchive`, `archiveBundleForFeature`, `archiveBundleForEpic`, `showFeatureArchive`, `showEpicArchive`; no task-level helpers.",
+    "`App.tsx` `archiveBundle` (lines ~2003–2028) loops `moveTicketMutation` to `archive` without body changes; `BoardTaskCardLeading` supports archive UI but `BoardTaskCard` does not pass `showArchive`/`onArchive`.",
+    "Ticket detail archive (`detailArchiveTarget`, ~4178–4202) covers completed epic/feature only; completed tasks return `null`.",
+    "`startTicketUpdateRun` in `src/services/codex/index.ts` uses structured `AgentTicketUpdate` (`agentTicketUpdateSchema` in `src/shared/schemas/ticket.ts`); purposes today are `default` and `scope_recovery`. Completion writes markdown via `applyAgentTicketPatch` but does not set `frontMatter.summary` or change status.",
+    "`moveTicket` → `transitionTicketStatus` in `src/storage/filesystem.ts` only updates status/position; container moves limited to review/completed/archive per guard at ~1757.",
+    "Ticket markdown templates in `ticketMarkdownFromDraft` / `ticketMarkdownFromLeanTaskDraft` use sections Context, Goal, Requirements, Acceptance Criteria, Implementation Plan, Test Plan, Codex Handoff.",
+    "`ticketPreviewSummary` in `src/shared/ticketSummary.ts` prefers `frontMatter.summary` then markdown excerpt for board cards.",
+    "Tests: `tests/board-archive.test.ts`, `tests/board-archive-button.test.tsx`, `tests/ticket-update.test.ts`; backend move guards in `tests/backend.test.ts`."
+  ],
+  "requirements": [
+    "Only tickets in `completed` status may be archived; reject archive for other statuses with a clear error.",
+    "Archiving runs an agent `ticket.update` with purpose `archive` that returns `patch.fullMarkdown` (required) and `patch.summary`; on success persist markdown, set `frontMatter.summary`, then `transitionTicketStatus` to `archive`.",
+    "Tiered lean rewrite: epic soft (keep short Context, trim verbose lists/notes); feature aggressive (drop Implementation Notes/Test Plan, shorten Context); task most aggressive (remove Context and Goal entirely; keep lean Requirements and Acceptance Criteria only).",
+    "Bundle archive (epic/feature) summarizes bottom-up—tasks, then features, then epic—sequentially; abort the bundle on first agent/persist failure without moving later tickets.",
+    "Completed task board cards and completed task detail show Archive and call the new summarize-then-archive API; replace container `archiveBundle` move-only flow with the same API.",
+    "Archive must not create clarification questions; archive runs are read-only agent mode like existing ticket updates."
+  ],
+  "implementationPlan": [
+    "Extend `agentTicketUpdateInputSchema` purpose union with `archive`; add `buildArchiveTicketUpdatePrompt(ticketType)` with tiered section rules and require `patch.fullMarkdown` + empty `clarificationQuestions`.",
+    "In `startTicketUpdateRun` completion branch for `purpose === 'archive'`: validate ticket is `completed`, require `fullMarkdown`, `writeTicket` with updated markdown and `frontMatter.summary` from `patch.summary`, then `transitionTicketStatus(..., RELAY_ARCHIVE_STATUS)`; skip clarification creation.",
+    "Add `archiveTicket` and `archiveTicketBundle` in codex service (optional `src/services/codex/archiveTicket.ts`), `sortArchiveBundleIds` in `boardArchive.ts`, POST `/api/tickets/archive` in `src/shared/http/tickets.ts` + `src/http/resources/tickets.ts`, and `useArchiveTicketMutation` in renderer API layer.",
+    "Wire UI: `showTaskArchive`/`taskCanArchive` helpers; pass `showArchive`/`onArchive` from completed-column `BoardTaskCard`; extend `detailArchiveTarget` for completed tasks; route `archiveBundle`/`archiveEpic`/`archiveFeature`/detail archive through new mutation with `archivingContainerIds` busy state.",
+    "Update SPEC.md container/archive note to document summarize-then-archive behavior."
+  ],
+  "testPlan": [
+    "`tests/ticket-update.test.ts`: archive purpose persists lean `fullMarkdown`, sets `frontMatter.summary`, moves status to `archive`, rejects non-completed tickets.",
+    "`tests/board-archive.test.ts`: `sortArchiveBundleIds` orders tasks before features before epics; `showTaskArchive` only on completed column + completed status.",
+    "`tests/backend.test.ts` or new archive route test: POST archive returns updated board; bundle stops on mocked agent failure.",
+    "Run `node tests/run-tests.mjs` (or targeted files above)."
+  ],
+  "acceptanceCriteria": [
+    "A completed task in the Completed column shows an Archive control; clicking it runs summarize-then-archive and the card disappears from visible board columns.",
+    "Archived ticket markdown is materially shorter; task archives have no Context/Goal sections; Requirements and Acceptance Criteria remain as lean bullets.",
+    "Archiving a feature or epic bundle processes child tasks first, then features, then the container; all end in `archive` with updated summaries, or none move if a step fails.",
+    "Board card excerpt reflects the new `frontMatter.summary` after archive."
+  ],
+  "clarificationQuestions": [],
+  "assumptions": [
+    "Archive is user-initiated only from `completed` status (not `not_doing` or `review`).",
+    "Agent summarization is asynchronous like existing ticket updates; UI shows busy/disabled state until the run completes.",
+    "Title, priority, and labels are preserved unless the archive prompt explicitly allows minor title tightening.",
+    "Existing epic/feature child-completion gating (`featureCanArchive` / `epicCanArchive`) remains unchanged before bundle archive starts."
+  ],
+  "implementationNotes": [
+    "Reuse `submitTicketUpdateWork` and provider `runStructured` with `kind: 'ticket.update'`; archive completion is the only place that changes status after rewrite.",
+    "After `writeTicket`, board excerpt refresh is automatic via `ticketPreviewSummary` once `frontMatter.summary` is set."
+  ],
+  "plannedFiles": [
+    "src/shared/schemas/ticket.ts",
+    "src/services/codex/index.ts",
+    "src/shared/http/tickets.ts",
+    "src/http/resources/tickets.ts",
+    "src/workflows/tickets.ts",
+    "src/renderer/src/lib/boardArchive.ts",
+    "src/renderer/src/lib/relayApi.ts",
+    "src/renderer/src/lib/relayQueries.ts",
+    "src/renderer/src/App.tsx",
+    "SPEC.md"
+  ],
+  "subtickets": [],
+  "featureStubs": [],
+  "leanTasks": [
+    {
+      "title": "Add archive purpose to ticket update agent flow",
+      "summary": "Extend structured ticket.update with an archive purpose that rewrites markdown and moves status.\n- Tiered prompts by ticketType\n- Persist summary frontmatter then transition to archive\n- Fail if ticket is not completed",
+      "priority": "medium",
+      "labels": ["backend", "codex"],
+      "context": "Foundation for all archive behavior; mirrors scope_recovery branching in startTicketUpdateRun.",
+      "goal": "Archive runs produce lean fullMarkdown and land tickets in the archive column.",
+      "requirements": [
+        "Add `archive` to agentTicketUpdateInput purpose schema.",
+        "Archive prompt enforces tiered section retention and requires patch.fullMarkdown.",
+        "Completion path writes ticket, sets summary, transitions to archive; no clarifications."
+      ],
+      "acceptanceCriteria": [
+        "ticket-update.test.ts covers successful archive rewrite and non-completed rejection.",
+        "Archive run emits run.completed without creating clarification records."
+      ],
+      "implementationPlan": [
+        "Add buildArchiveTicketUpdatePrompt and branch in buildTicketUpdatePrompt / startTicketUpdateRun completion.",
+        "Validate completed status before starting archive update.",
+        "Set frontMatter.summary from patch.summary when persisting archive result."
+      ],
+      "assumptions": [
+        "Archive agent output uses the existing AgentTicketUpdate schema."
+      ],
+      "plannedFiles": [
+        "src/shared/schemas/ticket.ts",
+        "src/services/codex/index.ts",
+        "tests/ticket-update.test.ts"
+      ]
+    },
+    {
+      "title": "Archive ticket HTTP API and bundle orchestration",
+      "summary": "Expose server-side summarize-then-archive for one ticket or a gated bundle.\n- Bottom-up bundle ordering helper\n- POST /api/tickets/archive endpoint\n- Fail closed on first bundle error",
+      "priority": "medium",
+      "labels": ["api", "backend"],
+      "context": "Renderer and board archive buttons will call this instead of move-only mutations.",
+      "goal": "Clients can archive one ticket or a container bundle with correct ordering.",
+      "requirements": [
+        "archiveTicket(projectPath, ticketId) runs archive update and returns ticket/board snapshot.",
+        "archiveTicketBundle sorts ids tasks→features→epic before sequential archiveTicket calls.",
+        "HTTP route registered and typed in shared/http + relayApi."
+      ],
+      "acceptanceCriteria": [
+        "Bundle with a failing mid-sequence archive leaves earlier tickets summarized only if already completed steps succeeded; later ids are not archived.",
+        "sortArchiveBundleIds unit tests pass in board-archive.test.ts."
+      ],
+      "implementationPlan": [
+        "Add sortArchiveBundleIds to boardArchive.ts using ticket summaries from readBoard.",
+        "Implement archiveTicket/archiveTicketBundle in codex service; wire TicketWorkflows + tickets route.",
+        "Add archive endpoint schema, relayApi.tickets.archive, useArchiveTicketMutation."
+      ],
+      "assumptions": [],
+      "plannedFiles": [
+        "src/renderer/src/lib/boardArchive.ts",
+        "src/services/codex/index.ts",
+        "src/shared/http/tickets.ts",
+        "src/http/resources/tickets.ts",
+        "src/workflows/tickets.ts",
+        "src/renderer/src/lib/relayApi.ts",
+        "src/renderer/src/lib/relayQueries.ts",
+        "tests/board-archive.test.ts"
+      ]
+    },
+    {
+      "title": "Wire archive UI for completed tasks and bundles",
+      "summary": "Surface Archive on completed work and route all archive actions through summarize-then-archive.\n- BoardTaskCard archive for completed tasks\n- Task detail archive control\n- Replace archiveBundle move-only loop",
+      "priority": "medium",
+      "labels": ["ui", "board"],
+      "context": "Completes the user-facing request for archive buttons on completed tickets.",
+      "goal": "All archive entry points use the new API and show appropriate busy/toast feedback.",
+      "requirements": [
+        "Completed-column task cards show BoardArchiveButton when status is completed.",
+        "Completed task detail shows Archive tooltip like containers.",
+        "archiveEpic/archiveFeature/archiveBundle/detail archive call archive mutation, not moveTicket alone."
+      ],
+      "acceptanceCriteria": [
+        "Completed task card archive removes ticket from visible columns after successful run.",
+        "Container archive still respects featureCanArchive/epicCanArchive gating with existing toast messages."
+      ],
+      "implementationPlan": [
+        "Add showTaskArchive/taskCanArchive helpers in boardArchive.ts.",
+        "Thread onArchiveTask and archiving state through BoardTaskCard and board column render in App.tsx.",
+        "Extend detailArchiveTarget for tasks; switch archiveBundle to archiveTicketBundle mutation."
+      ],
+      "assumptions": [
+        "Users wait on-page for archive runs; no background notification beyond existing run events/toasts."
+      ],
+      "plannedFiles": [
+        "src/renderer/src/lib/boardArchive.ts",
+        "src/renderer/src/App.tsx",
+        "src/renderer/src/components/BoardTaskCardLeading.tsx",
+        "tests/board-archive-button.test.tsx"
+      ]
+    }
+  ]
+}

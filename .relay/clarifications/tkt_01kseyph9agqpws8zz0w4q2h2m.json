@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "ticketId": "tkt_01kseyph9agqpws8zz0w4q2h2m",
+  "questions": [
+    {
+      "id": "clar_01ksez7hxy33p379hz5bvhcxa4",
+      "ticketId": "tkt_01kseyph9agqpws8zz0w4q2h2m",
+      "question": "Should archived tickets keep a one-line Context/Goal section, or may those sections be removed entirely on aggressive task archives?",
+      "answerType": "text",
+      "answer": "remove context on aggressive. it needs to be factual only and only important stuff thats useful for furture tickets.",
+      "createdAt": "2026-05-25T07:05:18.014Z",
+      "updatedAt": "2026-05-25T07:14:58.161Z",
+      "answeredAt": "2026-05-25T07:14:58.161Z",
+      "createdBy": "codex",
+      "source": "draft_generation",
+      "runId": "run_01kseyph8rh9bmacbwkct79gph",
+      "codexThreadId": "draft_run_01kseyph8rh9bmacbwkct79gph"
+    }
+  ]
+}

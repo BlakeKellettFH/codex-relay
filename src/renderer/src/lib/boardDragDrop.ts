@@ -6,7 +6,7 @@ import {
   RELAY_TODO_STATUS
 } from "@shared/schemas";
 import type { BoardSnapshot, CancelRunInput, CodexCancelRunResult, RelayColumn, TicketMoveInput, TicketSummary } from "@shared/schemas";
-import { isTaskProcessable } from "./boardColumnLayout";
+import { isTaskReadyPlaceable } from "./boardColumnLayout";
 
 export type BoardDragKind = "task" | "feature" | "epic";
 
@@ -127,7 +127,7 @@ export const tasksEligibleForReadyQueue = (
   tasks: TicketSummary[],
   columns: RelayColumn[],
   allTickets: TicketSummary[]
-): TicketSummary[] => tasks.filter((task) => isTaskProcessable(task, columns, allTickets));
+): TicketSummary[] => tasks.filter((task) => isTaskReadyPlaceable(task, columns, allTickets));
 
 export const taskHasActiveAgentWork = (ticket: TicketSummary): boolean =>
   Boolean(ticket.lastRunId) && ACTIVE_AGENT_RUN_STATUSES.has(ticket.runStatus);

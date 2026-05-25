@@ -4,7 +4,9 @@ import {
   gitMetadataSchema,
   projectOpenInEditorInputSchema,
   projectOpenInEditorResultSchema,
-  projectSummarySchema
+  projectSummarySchema,
+  repositoryChatSaveInputSchema,
+  repositoryChatStoreSchema
 } from "../schemas";
 import { arrayOf, defineEndpoint } from "./contract";
 import {
@@ -58,5 +60,23 @@ export const projectEndpoints = {
     path: "/api/projects/open-editor",
     request: { location: "body", schema: projectOpenInEditorInputSchema },
     response: projectOpenInEditorResultSchema
+  }),
+  readRepositoryChat: defineEndpoint({
+    method: "GET",
+    path: "/api/projects/repository-chat",
+    request: { location: "query", schema: projectPathRequestSchema },
+    response: repositoryChatStoreSchema
+  }),
+  saveRepositoryChat: defineEndpoint({
+    method: "PUT",
+    path: "/api/projects/repository-chat",
+    request: { location: "body", schema: repositoryChatSaveInputSchema },
+    response: repositoryChatStoreSchema
+  }),
+  clearRepositoryChat: defineEndpoint({
+    method: "DELETE",
+    path: "/api/projects/repository-chat",
+    request: { location: "query", schema: projectPathRequestSchema },
+    response: repositoryChatStoreSchema
   })
 } as const;

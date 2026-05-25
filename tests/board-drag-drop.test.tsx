@@ -217,7 +217,10 @@ test("tasksEligibleForReadyQueue and tasksForNotDoingDrop filter correctly", () 
   const notDoing = ticket({ id: "task_skip", title: "Skipped", ticketType: "task", status: "not_doing" });
   const allTickets = [movable, blocked, blocker, running, terminal, notDoing];
 
-  assert.deepEqual(tasksEligibleForReadyQueue([movable, blocked, running], columns, allTickets).map((entry) => entry.id), ["task_move"]);
+  assert.deepEqual(
+    tasksEligibleForReadyQueue([movable, blocked, running], columns, allTickets).map((entry) => entry.id).sort(),
+    ["task_block", "task_move"]
+  );
   assert.deepEqual(tasksForNotDoingDrop([movable, terminal, notDoing, running]).map((entry) => entry.id).sort(), [
     "task_move",
     "task_run"

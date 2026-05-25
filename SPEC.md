@@ -275,6 +275,9 @@ Relay MUST use this project-local layout:
     attachments/
       <ticket-id>/
         <file>
+    context/
+      README.md
+      <topic>.md
     backups/
       <timestamp>/
         project.json
@@ -287,6 +290,7 @@ Rules:
 - `.relay/tickets/` is REQUIRED.
 - `.relay/runs/` is REQUIRED.
 - `.relay/attachments/` is OPTIONAL in v1 but reserved.
+- `.relay/context/` is OPTIONAL but reserved for project-wide agent instructions; Relay creates the directory and a non-injected `README.md` on first project initialization; other top-level `.md` files in this folder MAY be loaded into agent prompts. Provider-specific prompt assets (for example `.relay/context/cursor/draft-ticket.md` for Cursor ticket drafting) MAY live in subfolders; they are loaded only for the matching agent provider and are not merged into general project context.
 - `.relay/backups/` is OPTIONAL and used before migrations or recovery operations.
 - Relay MUST create missing required directories during initialization.
 
@@ -478,9 +482,14 @@ Creation rules:
 - Saving a task whose `parentFeatureId` points at a deleted feature is allowed (stale parent links are ignored).
 - Deleting a **feature** removes all tasks under it; deleting an **epic** removes all linked features and their tasks (and any legacy tasks linked directly to the epic).
 - Tasks whose parent feature no longer exists still appear in their column as normal cards (not hidden inside a missing group).
-- **Board column visibility is task-driven**: a `task` appears in a column when its `status` matches that column. A `feature` or `epic` appears in a column only when at least one descendant `task` is in that column (container `status` is ignored for board placement).
+- **Board column visibility (tasks)**: a `task` appears in a column when its `status` matches that column.
+- **Board column visibility (containers)**: for columns other than **Review**, a `feature` or `epic` appears only when at least one linked descendant `task` is in that column. In **Review**, a `feature` or `epic` with `status: review` also appears as a **container-only** board card (feature group or epic header with no in-column child tasks) when it is awaiting acceptance—even if every linked task is already terminal in other columns. See §6.2.
 - On the board, epics render as lightweight headers above nested feature groups; features render as grouped containers around their in-column tasks. Sidebar swimlane counts count **tasks only** per column.
-- Epics and features are **containers**, not workflow cards: ticket detail MUST NOT offer a workflow Status control for them, and status transition APIs MUST reject moving `epic` / `feature` tickets between columns (move child tasks instead).
+- **Layered container review**: tasks continue through workflow columns independently; `feature` and `epic` tickets add a second review layer after child work finishes.
+  - **Feature Review gate**: when a feature has at least one linked task and every linked task (`subticketIds` plus `parentFeatureId` matches, same resolution as board child linking) is in a terminal column (`completed`, `not_doing`, `archive`, or any column with `terminal: true`), Relay MAY auto-promote that feature to `review` if its status is not already `review` or `completed`. Features with zero linked tasks MUST NOT auto-promote. If any linked task leaves a terminal status while the feature is in `review`, Relay demotes the feature to `todo`.
+  - **Epic Review gate**: when an epic has at least one linked feature and every linked feature is `completed` and every descendant task under the epic tree is terminal, Relay MAY auto-promote the epic to `review` if its status is not already `review` or `completed`. If a linked feature leaves `completed` while the epic is in `review`, Relay demotes the epic to `todo`.
+  - **Container accept/reject**: when a feature or epic is in `review`, ticket detail shows **Accept** and **Reject** like tasks. **Accept** and **Reject** move only the opened container to `completed`; they MUST NOT change sibling tasks, child tasks, or parent containers. Accepting a task does not accept its parent feature or epic.
+  - **Container status transitions**: epics and features are **containers**, not full workflow cards—ticket detail MUST NOT offer a generic workflow **Status** control for arbitrary column moves. Status transition APIs MUST allow epic/feature moves only among `review`, `completed`, and `archive`; moves to other columns (for example `todo`, `ready`, or `in_progress`) MUST be rejected with guidance to move child **tasks** instead. Auto-promotion and demotion run on task status changes (and feature completion for epic gates), not on container accept/reject.
 
 ### 5.6 Run Logs
 
@@ -560,6 +569,7 @@ When moving a card:
 - Relay MUST update `updatedAt`.
 - Relay SHOULD use midpoint positioning between adjacent cards.
 - Relay MUST compact positions if no midpoint is available.
+- The **Review** column MAY show container-only groups: an epic or feature header with `status: review` and no child tasks listed in that column when all linked tasks are already terminal elsewhere (typically `completed`). Terminal tasks are not duplicated inside Review groups solely because the parent container is awaiting review.
 
 ### 6.3 Column Behavior
 
@@ -798,6 +808,7 @@ The board card MUST display run state.
 
 #### Path locks (mulock)
 
+- Paths under `.relay/` (tickets, runs, attachments, locks, and other Relay metadata) are excluded from planned-scope enforcement and path locks; Codex may update them freely during implementation runs.
 - Relay MUST maintain a per-project path lock registry (`.relay/path-locks.json`) as the single source of truth for which task holds which file path.
 - Before an implementation run starts, Relay MUST acquire locks for all of that ticket's planned paths (exact file match only).
 - Another queued task MUST NOT start while any of its planned paths are locked by a different task; the scheduler skips it until locks are released.

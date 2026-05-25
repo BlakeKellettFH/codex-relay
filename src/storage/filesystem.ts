@@ -1,5 +1,6 @@
 import { Effect, FileSystem, Path } from "effect";
 import matter from "gray-matter";
+import { effectiveDraftPreferredTicketType } from "@shared/draftTicket";
 import { ticketPreviewSummary } from "@shared/ticketSummary";
 import {
   boardVisibleColumns,
@@ -9,6 +10,7 @@ import {
   RELAY_NEEDS_CLARIFICATION_STATUS,
   RELAY_READY_STATUS,
   RELAY_REVIEW_STATUS,
+  RELAY_COMPLETED_STATUS,
   RELAY_SCHEMA_VERSION,
   RELAY_TODO_STATUS,
   type BoardSnapshot,
@@ -46,15 +48,22 @@ import {
   type TicketRecord,
   type TicketSaveInput,
   type FinalTicketType,
+  type RepositoryChatStore,
   type TicketSummary,
   type TicketType
 } from "@shared/schemas";
 import { imageAttachmentExtension, isSupportedImageAttachment } from "@shared/attachments";
 import { uniqueTicketIds } from "@shared/blockers";
-import { clarificationStoreSchema, projectConfigSchema, ticketFrontMatterSchema } from "@shared/schemas";
+import {
+  buildLeanTaskTitleToIdMap,
+  normalizeLeanTaskTitle,
+  resolveLeanTaskBlockedByTitles
+} from "@shared/leanTaskDependencies";
+import { clarificationStoreSchema, projectConfigSchema, repositoryChatStoreSchema, ticketFrontMatterSchema } from "@shared/schemas";
 import { extractTicketChecklist } from "@shared/ticketMetadata";
 import { BackendClock } from "../platform";
 import { type BackendEffect, runBackendEffect } from "../runtime";
+import { logInfo, logWarn } from "../runtime/Logging";
 import { showElectronItemInFolder } from "../platform";
 import { isFileNotFoundError } from "../platform/PlatformError";
 import { parseSchema } from "../services/schemas";
@@ -67,7 +76,9 @@ import {
   backupsPath,
   clarificationStorePath,
   clarificationsPath,
+  contextPath,
   projectConfigPath,
+  repositoryChatPath,
   resolveProjectPath,
   runsPath,
   slashPath,
@@ -75,6 +86,19 @@ import {
   ticketsPath,
   trashPath
 } from "./paths";
+
+const CONTEXT_README_FILENAME = "README.md";
+
+const contextReadmeMarkdown = (): string => `# Project agent context
+
+Add markdown files in this folder (for example \`coding-standards.md\` or \`architecture.md\`).
+
+Relay agents read other top-level \`.md\` files here and include them in prompts. This \`README.md\` is documentation only and is **not** injected into agent runs.
+
+Use one topic per file so you can edit or remove context without merging large documents.
+
+For Cursor CLI ticket drafting, Relay also reads \`.relay/context/cursor/draft-ticket.md\` (provider-specific; not injected as general project context). Edit that file to customize the required JSON response example and rules.
+`;
 
 const defaultSettings = (): ProjectSettings => ({
   defaultModel: null,
@@ -88,7 +112,7 @@ const defaultSettings = (): ProjectSettings => ({
   codexNetworkAccessEnabled: false,
   codexWebSearchMode: "disabled",
   codexAdditionalDirectories: [],
-  agentConcurrency: 1
+  agentConcurrency: 3
 });
 
 const nowIso = (): string => new Date().toISOString();
@@ -194,6 +218,12 @@ export const initializeProject = async (projectPath: string): Promise<ProjectCon
         yield* fs.makeDirectory(clarificationsPath(path, resolved), { recursive: true });
         yield* fs.makeDirectory(attachmentsPath(path, resolved), { recursive: true });
         yield* fs.makeDirectory(backupsPath(path, resolved), { recursive: true });
+        const contextDirectory = contextPath(path, resolved);
+        const contextExisted = yield* fs.exists(contextDirectory);
+        yield* fs.makeDirectory(contextDirectory, { recursive: true });
+        if (!contextExisted) {
+          yield* fs.writeFileString(path.join(contextDirectory, CONTEXT_README_FILENAME), contextReadmeMarkdown());
+        }
       })
     )
   );
@@ -373,9 +403,18 @@ const authoringStateFromLegacyRunStatus = (frontMatter: TicketFrontMatter): Tick
   }
 };
 
+const normalizeDraftTargetType = (draftTargetType: FinalTicketType | null | undefined): FinalTicketType | null => {
+  if (draftTargetType == null) return null;
+  return effectiveDraftPreferredTicketType(draftTargetType) ?? null;
+};
+
 const normalizeFrontMatterForRead = (frontMatter: TicketFrontMatter): TicketFrontMatter => ({
   ...frontMatter,
   authoringState: authoringStateFromLegacyRunStatus(frontMatter),
+  draftTargetType:
+    frontMatter.ticketType === "draft_ticket"
+      ? normalizeDraftTargetType(frontMatter.draftTargetType)
+      : frontMatter.draftTargetType,
   plannedFiles: normalizePlannedFiles(frontMatter.plannedFiles),
   relatedTicketIds: uniqueTicketIds(frontMatter.relatedTicketIds ?? [])
 });
@@ -478,7 +517,7 @@ const normalizeFrontMatterRelationships = (frontMatter: TicketFrontMatter): Tick
     return {
       ...frontMatter,
       ticketType,
-      draftTargetType: frontMatter.draftTargetType ?? null,
+      draftTargetType: normalizeDraftTargetType(frontMatter.draftTargetType),
       parentEpicId: null,
       parentFeatureId: null,
       subticketIds: [],
@@ -894,15 +933,49 @@ const truncateTitle = (value: string, maxLength = 80): string => {
   return `${value.slice(0, maxLength - 3).trimEnd()}...`;
 };
 
-const pendingTicketDraftTitle = (idea: string, draftTargetType?: FinalTicketType): string => {
+const pendingTicketDraftTitle = (idea: string, draftTargetType?: FinalTicketType | null): string => {
   const normalized = normalizeDraftIdea(idea).replace(/^#+\s*/, "");
   const fallback =
     draftTargetType === "epic"
       ? "Untitled epic draft"
-      : draftTargetType === "feature"
-        ? "Untitled feature draft"
-        : "Untitled ticket draft";
+      : "Untitled feature draft";
   return `Draft: ${truncateTitle(normalized || fallback)}`;
+};
+
+const plannedFilesForTaskOnlyDraft = (draft: TicketDraft): string[] => {
+  const root = normalizePlannedFiles(draft.plannedFiles);
+  if (root.length > 0) return root;
+  for (const leanTask of draft.leanTasks) {
+    const fromLean = normalizePlannedFiles(leanTask.plannedFiles);
+    if (fromLean.length > 0) return fromLean;
+  }
+  return [];
+};
+
+const coerceTaskOnlyDraftToFeature = (draft: TicketDraft): TicketDraft => {
+  if (draft.ticketType !== "task") return draft;
+  const plannedFiles = plannedFilesForTaskOnlyDraft(draft);
+  return {
+    ...draft,
+    ticketType: "feature",
+    subtickets: [],
+    featureStubs: [],
+    leanTasks: [
+      {
+        title: draft.title,
+        summary: draft.summary,
+        priority: draft.priority,
+        labels: draft.labels,
+        context: draft.context,
+        goal: draft.context,
+        requirements: draft.requirements,
+        acceptanceCriteria: draft.acceptanceCriteria,
+        implementationPlan: draft.implementationPlan,
+        assumptions: draft.assumptions,
+        plannedFiles
+      }
+    ]
+  };
 };
 
 const ticketMarkdownFromPendingDraft = (title: string, idea: string): string => `# ${title}
@@ -1039,14 +1112,15 @@ export const createPendingTicketDraft = async (
   }
 
   const autoHierarchy = input.autoHierarchy === true;
-  const draftTargetType: FinalTicketType = autoHierarchy ? "task" : (input.preferredTicketType ?? "task");
+  const draftTargetType: FinalTicketType =
+    effectiveDraftPreferredTicketType(input.preferredTicketType) ?? "feature";
   const title = autoHierarchy
     ? `Draft: ${truncateTitle(normalizeDraftIdea(idea) || "Untitled")}`
     : pendingTicketDraftTitle(idea, draftTargetType);
   const placeholder = await createSingleTicket(projectPath, {
     title,
     priority: input.priority ?? "medium",
-    effort: input.effort,
+    effort: input.effort ?? "medium",
     labels: [],
     markdown: ticketMarkdownFromPendingDraft(title, idea),
     status: RELAY_TODO_STATUS,
@@ -1147,18 +1221,19 @@ export const applyTicketDraftToTicket = async (
   draft: TicketDraft,
   runId: string
 ): Promise<TicketRecord> => {
+  const normalizedDraft = coerceTaskOnlyDraftToFeature(draft);
   const existing = await readTicket(projectPath, ticketId);
   const updated = await writeTicket(projectPath, {
     ...existing,
-    markdown: ticketMarkdownFromDraft(draft),
+    markdown: ticketMarkdownFromDraft(normalizedDraft),
     frontMatter: {
       ...existing.frontMatter,
-      title: draft.title.trim(),
-      ticketType: draft.ticketType,
+      title: normalizedDraft.title.trim(),
+      ticketType: normalizedDraft.ticketType,
       draftTargetType: null,
-      priority: draft.priority,
-      labels: draft.labels.map((label) => label.trim()).filter(Boolean),
-      summary: draft.summary.trim(),
+      priority: normalizedDraft.priority,
+      labels: normalizedDraft.labels.map((label) => label.trim()).filter(Boolean),
+      summary: normalizedDraft.summary.trim(),
       parentEpicId: null,
       subticketIds: [],
       authoringState: "reviewing",
@@ -1167,18 +1242,18 @@ export const applyTicketDraftToTicket = async (
     }
   });
 
-  if (draft.ticketType === "epic") {
-    for (const featureStub of draft.featureStubs) {
+  if (normalizedDraft.ticketType === "epic") {
+    for (const featureStub of normalizedDraft.featureStubs) {
       await createEpicFeatureRecord(projectPath, updated.frontMatter.id, {
         title: featureStub.title,
         summary: featureStub.summary,
         priority: featureStub.priority,
         effort: updated.frontMatter.effort,
         labels: featureStub.labels,
-        markdown: ticketMarkdownFromFeatureStubDraft(featureStub, draft.title)
+        markdown: ticketMarkdownFromFeatureStubDraft(featureStub, normalizedDraft.title)
       });
     }
-    for (const subticket of draft.subtickets) {
+    for (const subticket of normalizedDraft.subtickets) {
       await createEpicFeatureRecord(projectPath, updated.frontMatter.id, {
         title: subticket.title,
         summary: subticket.summary,
@@ -1196,18 +1271,14 @@ export const applyTicketDraftToTicket = async (
             acceptanceCriteria: subticket.acceptanceCriteria,
             implementationNotes: subticket.implementationNotes ?? []
           },
-          draft.title
+          normalizedDraft.title
         )
       });
     }
   }
 
-  if (draft.ticketType === "task" && process.env.RELAY_TEST_RUN !== "1") {
-    throw new Error("Task-only drafts are not supported. Use feature planning with lean tasks or hierarchy drafting.");
-  }
-
-  if (draft.ticketType === "feature") {
-    for (const leanTask of draft.leanTasks) {
+  if (normalizedDraft.ticketType === "feature") {
+    for (const leanTask of normalizedDraft.leanTasks) {
       await createTaskUnderFeatureRecord(
         projectPath,
         updated.frontMatter.id,
@@ -1218,7 +1289,7 @@ export const applyTicketDraftToTicket = async (
           labels: leanTask.labels,
           plannedFiles: leanTask.plannedFiles
         },
-        ticketMarkdownFromLeanTaskDraft(leanTask, draft.title)
+        ticketMarkdownFromLeanTaskDraft(leanTask, normalizedDraft.title)
       );
     }
   }
@@ -1315,6 +1386,70 @@ const normalizeHierarchyDraftPlanForApply = (plan: HierarchyDraftPlan | LegacySt
   };
 };
 
+const patchTicketBlockedByIds = async (
+  projectPath: string,
+  ticketId: string,
+  blockedByIds: readonly string[]
+): Promise<TicketRecord> => {
+  const existing = await readTicket(projectPath, ticketId);
+  return writeTicket(projectPath, {
+    ...existing,
+    frontMatter: {
+      ...existing.frontMatter,
+      blockedByIds: uniqueTicketIds([...blockedByIds])
+    }
+  });
+};
+
+const logLeanTaskDependencyWarnings = async (
+  warnings: readonly string[],
+  context: { featureId: string; planKind: string }
+): Promise<void> => {
+  for (const warning of warnings) {
+    await logWarn("hierarchy:lean-task-deps", warning, context);
+  }
+};
+
+const createLeanTasksUnderFeatureWithDependencies = async (
+  projectPath: string,
+  featureId: string,
+  featureTitle: string,
+  leanTasks: readonly LeanTaskDraft[],
+  planKind: string
+): Promise<void> => {
+  const created: TicketRecord[] = [];
+  for (const leanTask of leanTasks) {
+    created.push(
+      await createTaskUnderFeatureRecord(
+        projectPath,
+        featureId,
+        {
+          title: leanTask.title,
+          summary: leanTask.summary,
+          priority: leanTask.priority,
+          labels: leanTask.labels,
+          plannedFiles: leanTask.plannedFiles
+        },
+        ticketMarkdownFromLeanTaskDraft(leanTask, featureTitle)
+      )
+    );
+  }
+
+  if (created.length === 0) return;
+
+  const titleToIdMap = buildLeanTaskTitleToIdMap(
+    created.map((record) => ({ title: record.frontMatter.title, id: record.frontMatter.id }))
+  );
+  const resolutions = resolveLeanTaskBlockedByTitles(leanTasks, titleToIdMap);
+  await logLeanTaskDependencyWarnings(resolutions.warnings, { featureId, planKind });
+
+  for (const record of created) {
+    const resolution = resolutions.byNormalizedTitle.get(normalizeLeanTaskTitle(record.frontMatter.title));
+    if (!resolution || resolution.blockedByIds.length === 0) continue;
+    await patchTicketBlockedByIds(projectPath, record.frontMatter.id, resolution.blockedByIds);
+  }
+};
+
 const applyFeatureTreePlan = async (
   projectPath: string,
   placeholderTicketId: string,
@@ -1324,20 +1459,13 @@ const applyFeatureTreePlan = async (
 ): Promise<string> => {
   const featureDraft = hierarchyRootAsTicketDraft(root, "feature");
   const feature = await applyDraftedTicketFrontMatter(projectPath, placeholderTicketId, featureDraft, runId, { finalizeDraft: false });
-  for (const leanTask of leanTasks) {
-    await createTaskUnderFeatureRecord(
-      projectPath,
-      feature.frontMatter.id,
-      {
-        title: leanTask.title,
-        summary: leanTask.summary,
-        priority: leanTask.priority,
-        labels: leanTask.labels,
-        plannedFiles: leanTask.plannedFiles
-      },
-      ticketMarkdownFromLeanTaskDraft(leanTask, feature.frontMatter.title)
-    );
-  }
+  await createLeanTasksUnderFeatureWithDependencies(
+    projectPath,
+    feature.frontMatter.id,
+    feature.frontMatter.title,
+    leanTasks,
+    "feature_tree"
+  );
   await finalizeDraftedHierarchyRoot(projectPath, feature.frontMatter.id, runId);
   return feature.frontMatter.id;
 };
@@ -1426,20 +1554,13 @@ export const applyHierarchyDraftPlan = async (
           labels: featurePlan.stub.labels,
           markdown: ticketMarkdownFromFeatureStubDraft(featurePlan.stub, epic.frontMatter.title)
         });
-        for (const leanTask of featurePlan.leanTasks) {
-          await createTaskUnderFeatureRecord(
-            projectPath,
-            featureRecord.frontMatter.id,
-            {
-              title: leanTask.title,
-              summary: leanTask.summary,
-              priority: leanTask.priority,
-              labels: leanTask.labels,
-              plannedFiles: leanTask.plannedFiles
-            },
-            ticketMarkdownFromLeanTaskDraft(leanTask, featureRecord.frontMatter.title)
-          );
-        }
+        await createLeanTasksUnderFeatureWithDependencies(
+          projectPath,
+          featureRecord.frontMatter.id,
+          featureRecord.frontMatter.title,
+          featurePlan.leanTasks,
+          "epic_tree"
+        );
       }
       await finalizeDraftedHierarchyRoot(projectPath, epic.frontMatter.id, runId);
       return epic.frontMatter.id;
@@ -1454,20 +1575,13 @@ export const applyHierarchyDraftPlan = async (
         finalizeDraft: false
       });
       await linkSubticket(projectPath, epicId, feature.frontMatter.id);
-      for (const leanTask of normalizedPlan.leanTasks) {
-        await createTaskUnderFeatureRecord(
-          projectPath,
-          feature.frontMatter.id,
-          {
-            title: leanTask.title,
-            summary: leanTask.summary,
-            priority: leanTask.priority,
-            labels: leanTask.labels,
-            plannedFiles: leanTask.plannedFiles
-          },
-          ticketMarkdownFromLeanTaskDraft(leanTask, feature.frontMatter.title)
-        );
-      }
+      await createLeanTasksUnderFeatureWithDependencies(
+        projectPath,
+        feature.frontMatter.id,
+        feature.frontMatter.title,
+        normalizedPlan.leanTasks,
+        "extend_epic"
+      );
       await finalizeDraftedHierarchyRoot(projectPath, feature.frontMatter.id, runId);
       return feature.frontMatter.id;
     }
@@ -1477,20 +1591,13 @@ export const applyHierarchyDraftPlan = async (
       const feature = await readTicket(projectPath, featureId);
       const leanTasks = normalizedPlan.extendFeature?.leanTasks ?? [];
       await deleteTicket(projectPath, placeholderTicketId);
-      for (const leanTask of leanTasks) {
-        await createTaskUnderFeatureRecord(
-          projectPath,
-          featureId,
-          {
-            title: leanTask.title,
-            summary: leanTask.summary,
-            priority: leanTask.priority,
-            labels: leanTask.labels,
-            plannedFiles: leanTask.plannedFiles
-          },
-          ticketMarkdownFromLeanTaskDraft(leanTask, feature.frontMatter.title)
-        );
-      }
+      await createLeanTasksUnderFeatureWithDependencies(
+        projectPath,
+        featureId,
+        feature.frontMatter.title,
+        leanTasks,
+        "extend_feature"
+      );
       return featureId;
     }
     default: {
@@ -1688,11 +1795,13 @@ export const transitionTicketStatus = async (
 
   const board = await readBoard(projectPath);
   const record = await readTicket(projectPath, ticketId);
-  if (
-    (record.frontMatter.ticketType === "epic" || record.frontMatter.ticketType === "feature") &&
-    targetStatus !== RELAY_ARCHIVE_STATUS
-  ) {
-    throw new Error("Epic and feature tickets cannot change workflow status. Move child tasks between columns instead.");
+  if (record.frontMatter.ticketType === "epic" || record.frontMatter.ticketType === "feature") {
+    const allowedContainerStatuses = new Set([RELAY_REVIEW_STATUS, RELAY_COMPLETED_STATUS, RELAY_ARCHIVE_STATUS]);
+    if (!allowedContainerStatuses.has(targetStatus)) {
+      throw new Error(
+        "Epic and feature tickets can only move to Review, Completed, or Archive. Move child tasks between columns instead."
+      );
+    }
   }
   const fromStatus = record.frontMatter.status;
   const position =
@@ -1860,12 +1969,16 @@ export const saveTicket = async (input: TicketSaveInput): Promise<TicketRecord> 
 };
 
 export const moveTicket = async (input: TicketMoveInput): Promise<BoardSnapshot> => {
-  await transitionTicketStatus(input.projectPath, input.ticketId, input.targetStatus, {
+  const updated = await transitionTicketStatus(input.projectPath, input.ticketId, input.targetStatus, {
     actor: "user",
     source: "manual_board",
     beforeTicketId: input.beforeTicketId,
     afterTicketId: input.afterTicketId
   });
+  if (updated.frontMatter.ticketType === "task") {
+    const { maybePromoteOrDemoteContainers } = await import("./boardReconciliation");
+    await maybePromoteOrDemoteContainers(input.projectPath, input.ticketId);
+  }
   return readBoard(input.projectPath);
 };
 
@@ -1898,6 +2011,42 @@ export const readClarificationQuestions = async (projectPath: string, ticketId: 
   const parsed = parseSchema(clarificationStoreSchema, JSON.parse(raw));
   return parsed.questions;
 };
+
+export const emptyRepositoryChatStore = (): RepositoryChatStore => ({
+  schemaVersion: RELAY_SCHEMA_VERSION,
+  threadId: null,
+  messages: [],
+  draft: ""
+});
+
+export const readRepositoryChat = async (projectPath: string): Promise<RepositoryChatStore> => {
+  const path = await backendPath();
+  const target = repositoryChatPath(path, projectPath);
+  const raw = await runBackendEffect(
+    FileSystem.FileSystem.use((fs) =>
+      fs.readFileString(target, "utf8").pipe(
+        Effect.catchIf(isFileNotFoundError, () => Effect.succeed(null as string | null))
+      )
+    )
+  );
+  if (raw === null) return emptyRepositoryChatStore();
+  return parseSchema(repositoryChatStoreSchema, JSON.parse(raw));
+};
+
+export const saveRepositoryChat = async (projectPath: string, store: RepositoryChatStore): Promise<RepositoryChatStore> => {
+  const path = await backendPath();
+  const normalized = parseSchema(repositoryChatStoreSchema, {
+    schemaVersion: RELAY_SCHEMA_VERSION,
+    threadId: store.threadId ?? null,
+    messages: store.messages,
+    draft: store.draft ?? ""
+  });
+  await atomicWriteJson(repositoryChatPath(path, projectPath), normalized);
+  return normalized;
+};
+
+export const clearRepositoryChat = async (projectPath: string): Promise<RepositoryChatStore> =>
+  saveRepositoryChat(projectPath, emptyRepositoryChatStore());
 
 export type ClarificationQuestionCreateOptions = {
   readonly actor: RelayActor;
@@ -1964,6 +2113,7 @@ export const answerClarificationQuestion = async (
 ): Promise<ClarificationQuestion> => {
   const trimmed = answer.trim();
   if (!trimmed) throw new Error("Clarification answer cannot be empty.");
+  await logInfo("ticket:clarification", "clarification answer saved", { projectPath, ticketId, questionId });
 
   const questions = await readClarificationQuestions(projectPath, ticketId);
   const target = questions.find((question) => question.id === questionId);

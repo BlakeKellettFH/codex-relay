@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks67ptte2vh95x952dw7cyg8",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks67pttttnw8czrv9x240pj5",
+  "runId": "run_01ks67ptte2vh95x952dw7cyg8",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks67pttttnw8czrv9x240pj5:run_01ks67ptte2vh95x952dw7cyg8",
+  "status": "blocked",
+  "attempts": 1,
+  "createdAt": "2026-05-21T21:40:17.382Z",
+  "updatedAt": "2026-05-25T07:22:41.280Z",
+  "lastAppliedEventSequence": 21,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks67ptve228kmqepncjttskv",
+    "leaseToken": "lease_01ks67ptvextsw4v4th5kypdb0",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-21T21:40:17.390Z",
+    "heartbeatAt": "2026-05-21T21:40:17.392Z",
+    "startedAt": "2026-05-21T21:40:17.391Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "i want to create .relay/context/ where we store aditional context for the agent such as coding rules, general context docs maybe what the project is about. and the agent should consider this as context also",
+    "priority": "medium",
+    "agentModel": "auto",
+    "preferredTicketType": "feature",
+    "draftScope": "product_feature",
+    "runIntake": true,
+    "runId": "run_01ks67ptte2vh95x952dw7cyg8",
+    "ticketId": "tkt_01ks67pttttnw8czrv9x240pj5"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent",
+    "clarificationQuestionCount": 1,
+    "recovered": true
+  },
+  "message": "Recovered incomplete work on boot."
+}

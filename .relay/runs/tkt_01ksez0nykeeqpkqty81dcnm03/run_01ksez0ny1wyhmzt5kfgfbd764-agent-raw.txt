@@ -1,0 +1,164 @@
+{
+  "draftState": "ready",
+  "blockingClarificationQuestions": [],
+  "ticketType": "feature",
+  "title": "Feature lean-task dependencies and Ready-wait behavior",
+  "summary": "Feature drafting can declare sibling task dependencies, materialize them as blockedByIds, and let dependents sit in Ready while upstream work is in Review without auto-starting.\n- Add blockedByTitles on leanTasks; resolve to blockedByIds when applying feature trees\n- Split Ready placement from agent start/scheduling (preflight still blocks)\n- Review/In Progress blockers stay active until terminal columns\nValidate with schema, hierarchy-apply, board-drag, and preflight tests.",
+  "priority": "medium",
+  "labels": ["board", "drafting", "dependencies"],
+  "context": "Users want feature drafts to encode which lean tasks depend on others. Dependents should queue in Ready but not run until blockers reach terminal columns (Completed, Not Doing, Archive). Review and In Progress already count as active blockers via resolveTicketBlockers. Supersedes draft ticket tkt_01ksez0nykeeqpkqty81dcnm03.",
+  "researchFindings": [
+    "blockedByIds is persisted on TicketFrontMatter (src/shared/schemas/ticket.ts); resolveTicketBlockers in src/shared/blockers.ts sets active when blocker column is non-terminal, so Review and In Progress block dependents without new semantics.",
+    "preflightCodexRunInternal and reconcileTicketQueueState call preflight before queueing (src/services/codex/index.ts ~4718–4726, 5807–5810); reconcileSchedulableReadyTickets only touches Ready tasks and will skip blocked tickets when preflight fails.",
+    "leanTaskDraftSchema has no dependency field; applyFeatureTreePlan/createTaskUnderFeatureRecord create siblings with default empty blockedByIds (src/storage/filesystem.ts ~1155–1176, 1393–1406).",
+    "isTaskProcessable combines agent-runnable checks with blocker resolution (src/renderer/src/lib/boardColumnLayout.ts); tasksEligibleForReadyQueue and tasksMovableToReady alias it (src/renderer/src/lib/boardDragDrop.ts, boardColumnLayout.ts).",
+    "App drag-to-Ready uses tasksEligibleForReadyQueue then queueTaskForReady, which requires isTaskProcessable and successful preflight before setTicketQueued (src/renderer/src/App.tsx ~2050–2124).",
+    "Backend tests cover blocker preflight and hierarchy apply without dependencies (tests/backend.test.ts ~2716–2787, 2521–2594); board-drag-drop.test.tsx excludes blocked tasks from tasksEligibleForReadyQueue."
+  ],
+  "requirements": [
+    "Lean task drafts accept optional blockedByTitles: exact sibling lean task titles under the same feature; omit for isolated tasks.",
+    "Applying feature_tree, epic_tree, extend_epic, and extend_feature plans resolves titles to ticket IDs, writes blockedByIds on created tasks, rejects dependency cycles with warnings, and warns on unknown or duplicate titles without failing the whole apply.",
+    "Dependencies are limited to sibling tasks created in the same apply batch (same parentFeatureId); cross-feature or cross-epic links are out of scope.",
+    "Blocked dependents may be placed in Ready (drag/bulk move) but must not auto-queue or start; preflight and scheduling continue to block until all blockers are terminal.",
+    "Drafting prompts (Codex/Cursor JSON schema and guidance) instruct agents to set blockedByTitles when decomposition order matters."
+  ],
+  "implementationPlan": [
+    "Add optional blockedByTitles to leanTaskDraftSchema and leanTaskDraftSchemaJson; extend normalizeLeanTaskDraft to trim/dedupe title strings.",
+    "Add shared resolver (e.g. src/shared/leanTaskDependencies.ts): map titles to created task IDs, detect cycles, return blockedByIds plus warnings; reuse uniqueTicketIds patterns from blockers.ts.",
+    "Refactor applyFeatureTreePlan and all createTaskUnderFeatureRecord loops to two-pass sibling creation: create tasks, then patch blockedByIds from resolved lean-task dependencies; thread warnings into apply result or logs.",
+    "Introduce isTaskReadyPlaceable (agent-runnable + run-status guards, no blocker check) in boardColumnLayout.ts; keep isTaskProcessable for agent start; point tasksEligibleForReadyQueue and tasksMovableToReady at the new helper.",
+    "Update queueTaskForReady in App.tsx: if resolveTicketBlockers.isBlocked, moveTicket to Ready only with an informative toast; otherwise keep preflight + enqueueCodexRun flow.",
+    "Extend Codex draft prompts (ticketTypeGuidance / lean task bullets in src/services/codex/index.ts) to document blockedByTitles semantics and sibling-only scope."
+  ],
+  "testPlan": [
+    "tests/schemas.test.ts: lean task with blockedByTitles parses; invalid empty plannedFiles still fails.",
+    "tests/backend.test.ts: applyHierarchyDraftPlan feature_tree with A→B dependency sets blockedByIds; cycle and missing title produce warnings and sane partial links.",
+    "tests/board-column-layout.test.ts and tests/board-drag-drop.test.tsx: blocked todo task is Ready-placeable but not processable; blocker in review keeps dependent blocked.",
+    "tests/backend.test.ts: preflight still fails for active blockers; passes after blocker moved to terminal column."
+  ],
+  "acceptanceCriteria": [
+    "Feature draft with lean task B blockedByTitles: [\"Task A\"] materializes B.blockedByIds pointing at A's ticket id.",
+    "Dragging blocked dependent to Ready succeeds without queuing a run; moving blocker to Completed allows dependent to start from Ready.",
+    "Dependent with blocker in Review remains in Ready (or can be moved there) and shows blocked state on the card; scheduler does not queue it."
+  ],
+  "clarificationQuestions": [],
+  "assumptions": [
+    "blockedByTitles references only sibling lean task titles from the same feature draft batch, matched case-insensitively after trim.",
+    "A dependency is satisfied only when every blocker is in a terminal column (completed, not_doing, archive); Review and In Progress remain blocking.",
+    "Manual ticket-detail blocker editing via blockedByIds remains unchanged; this feature only automates links at feature-tree apply time."
+  ],
+  "implementationNotes": [
+    "createTaskUnderFeatureRecord uses FeatureTaskCreateInput without blockedByIds today; extend input or patch tickets after the sibling map is built.",
+    "reconcileSchedulableReadyTickets already no-ops blocked Ready tasks via failed preflight; no scheduler change required beyond tests."
+  ],
+  "plannedFiles": [
+    "src/shared/schemas/ticket.ts",
+    "src/shared/leanTaskDependencies.ts",
+    "src/storage/filesystem.ts",
+    "src/services/codex/index.ts",
+    "src/renderer/src/lib/boardColumnLayout.ts",
+    "src/renderer/src/lib/boardDragDrop.ts",
+    "src/renderer/src/App.tsx"
+  ],
+  "subtickets": [],
+  "featureStubs": [],
+  "leanTasks": [
+    {
+      "title": "Add blockedByTitles to lean task draft schema and Codex prompts",
+      "summary": "Expose sibling-task dependency titles on lean task drafts so drafting agents can declare order before tickets exist.\n- Schema + JSON schema + normalizeLeanTaskDraft\n- Prompt guidance for Feature mode leanTasks\nValidate with schemas.test.ts parse cases.",
+      "priority": "medium",
+      "labels": ["drafting", "schema"],
+      "context": "First slice: data model and agent contract only; no board or filesystem apply changes yet.",
+      "goal": "Lean task drafts and Codex/Cursor draft responses can include blockedByTitles.",
+      "requirements": [
+        "leanTaskDraftSchema and leanTaskDraftSchemaJson accept optional blockedByTitles string array.",
+        "normalizeLeanTaskDraft trims, dedupes, and drops empty title strings.",
+        "Feature-mode draft prompt tells agents to use blockedByTitles for sibling dependencies only."
+      ],
+      "acceptanceCriteria": [
+        "Parse valid hierarchy draft plan containing leanTasks[].blockedByTitles.",
+        "Codex draft JSON schema validates the new field without breaking existing drafts."
+      ],
+      "implementationPlan": [
+        "Add blockedByTitles: withDefault(stringArrayWithDefault()) to leanTaskDraftSchema in ticket.ts.",
+        "Mirror field in leanTaskDraftSchemaJson and normalizeLeanTaskDraft in codex/index.ts.",
+        "Add prompt bullet near lean task guidance describing sibling-title dependencies.",
+        "Add schemas.test.ts cases for present/absent blockedByTitles."
+      ],
+      "assumptions": [
+        "Field name blockedByTitles is preferred over dependsOn for symmetry with blockedByIds."
+      ],
+      "plannedFiles": [
+        "src/shared/schemas/ticket.ts",
+        "src/services/codex/index.ts",
+        "tests/schemas.test.ts"
+      ]
+    },
+    {
+      "title": "Materialize lean-task blockedByTitles when applying feature trees",
+      "summary": "When a feature draft is applied, sibling lean-task dependencies become real blockedByIds on created task tickets.\n- Shared title→ID resolver with cycle/missing warnings\n- Two-pass create in applyFeatureTreePlan paths\nCovered by backend hierarchy-apply tests.",
+      "priority": "medium",
+      "labels": ["storage", "drafting"],
+      "context": "Depends on blockedByTitles schema from prior lean task.",
+      "goal": "applyHierarchyDraftPlan writes correct blockedByIds for feature and extend plans.",
+      "requirements": [
+        "Shared resolver maps lean task titles to created ticket IDs and returns warnings for cycles, self-deps, and unknown titles.",
+        "applyFeatureTreePlan, epic_tree, extend_epic, and extend_feature paths run two-pass sibling creation and patch blockedByIds.",
+        "createTaskUnderFeatureRecord callers pass resolved blockedByIds or use a post-create patch helper."
+      ],
+      "acceptanceCriteria": [
+        "feature_tree apply with B blockedByTitles [\"A\"] yields B.frontMatter.blockedByIds containing A's id.",
+        "Circular A↔B titles log warnings and do not write invalid blocker links."
+      ],
+      "implementationPlan": [
+        "Create src/shared/leanTaskDependencies.ts with resolveLeanTaskBlockedByTitles(leanTasks, titleToIdMap).",
+        "In filesystem.ts applyFeatureTreePlan, collect created records, build title→id map, patch each task's blockedByIds.",
+        "Apply same pattern in epic_tree, extend_epic, and extend_feature loops.",
+        "Add backend.test.ts hierarchy apply cases for linear chain, cycle, and missing title."
+      ],
+      "assumptions": [
+        "Title matching is case-insensitive; first created task wins on duplicate titles."
+      ],
+      "plannedFiles": [
+        "src/shared/leanTaskDependencies.ts",
+        "src/storage/filesystem.ts",
+        "tests/backend.test.ts"
+      ]
+    },
+    {
+      "title": "Allow Ready placement for blocked tasks without auto-start",
+      "summary": "Dependents can sit in Ready while blockers are in Review, but agent preflight and scheduling still wait for terminal blockers.\n- isTaskReadyPlaceable vs isTaskProcessable\n- queueTaskForReady move-only path for blocked tasks\nVerify board-drag and preflight tests.",
+      "priority": "medium",
+      "labels": ["board", "scheduling"],
+      "context": "Uses existing resolveTicketBlockers active semantics; no change to terminal column rules.",
+      "goal": "Board Ready column can hold blocked dependents without starting runs until blockers finish.",
+      "requirements": [
+        "isTaskReadyPlaceable allows blocked tasks that are otherwise agent-runnable and not in active run states.",
+        "tasksEligibleForReadyQueue and tasksMovableToReady use isTaskReadyPlaceable.",
+        "queueTaskForReady moves blocked tasks to Ready via moveTicket only; unblocked path unchanged.",
+        "isTaskProcessable and preflightCodexRun still reject active blockers."
+      ],
+      "acceptanceCriteria": [
+        "Blocked todo task appears in tasksEligibleForReadyQueue but not isTaskProcessable.",
+        "Drag blocked task to Ready leaves runStatus idle and does not set lastRunId.",
+        "After blocker reaches Completed, dependent in Ready can preflight and queue successfully."
+      ],
+      "implementationPlan": [
+        "Add isTaskReadyPlaceable and isTaskAgentStartable (or retain isTaskProcessable name for start) in boardColumnLayout.ts.",
+        "Switch tasksEligibleForReadyQueue in boardDragDrop.ts to the placeable helper.",
+        "Branch queueTaskForReady in App.tsx for blocked vs unblocked flows.",
+        "Update board-column-layout.test.ts and board-drag-drop.test.tsx expectations; add review-blocker case."
+      ],
+      "assumptions": [
+        "Users may manually move blocked tasks to Ready via ticket detail status control; same preflight rules apply on explicit Run."
+      ],
+      "plannedFiles": [
+        "src/renderer/src/lib/boardColumnLayout.ts",
+        "src/renderer/src/lib/boardDragDrop.ts",
+        "src/renderer/src/App.tsx",
+        "tests/board-column-layout.test.ts",
+        "tests/board-drag-drop.test.tsx"
+      ]
+    }
+  ]
+}

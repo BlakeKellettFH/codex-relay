@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ksf1exbsmfeygyc9sn66xvpy",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ksf1exckn6dxhhy05deq7qrr",
+  "runId": "run_01ksf1exbsmfeygyc9sn66xvpy",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ksf1exckn6dxhhy05deq7qrr:run_01ksf1exbsmfeygyc9sn66xvpy",
+  "status": "running",
+  "attempts": 1,
+  "createdAt": "2026-05-25T07:44:16.292Z",
+  "updatedAt": "2026-05-25T07:44:16.300Z",
+  "lastAppliedEventSequence": 4,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ksf1exdbsq4wz6p6w2y18f1j",
+    "leaseToken": "lease_01ksf1exdc1db5qmrsrfn8mbmr",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-25T07:44:16.299Z",
+    "heartbeatAt": "2026-05-25T07:44:16.300Z",
+    "startedAt": "2026-05-25T07:44:16.300Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "Repository chat context:\nUser: I need an archive button in the completed ticket view, on the epic and features, if all tasks are compelte i should be able to open that ticket and click arcchive to archive all the epic feature and task ticks in one go\n\nCreate a ticket from this latest user request:\nUser: I need an archive button in the completed ticket view, on the epic and features, if all tasks are compelte i should be able to open that ticket and click arcchive to archive all the epic feature and task ticks in one go",
+    "priority": "medium",
+    "agentModel": "auto",
+    "preferredTicketType": "feature",
+    "draftScope": "product_feature",
+    "runIntake": true,
+    "runId": "run_01ksf1exbsmfeygyc9sn66xvpy",
+    "ticketId": "tkt_01ksf1exckn6dxhhy05deq7qrr"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket draft generation started."
+}

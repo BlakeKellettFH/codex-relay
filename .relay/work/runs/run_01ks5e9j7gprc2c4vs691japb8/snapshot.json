@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks5e9j7gprc2c4vs691japb8",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks5bq09wzt2z5dn5p87qhcy1",
+  "runId": "run_01ks5e9j7gprc2c4vs691japb8",
+  "subject": "ticket",
+  "action": "redraft",
+  "kind": "ticket.redraft",
+  "idempotencyKey": "ticket.redraft:/Users/blakekellett/repos/codex-relay:tkt_01ks5bq09wzt2z5dn5p87qhcy1:run_01ks5e9j7gprc2c4vs691japb8",
+  "status": "failed",
+  "attempts": 1,
+  "createdAt": "2026-05-21T14:16:08.181Z",
+  "updatedAt": "2026-05-21T14:16:23.004Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks5e9j7vkcry7dcs7c16chpr",
+    "leaseToken": "lease_01ks5e9j7vwp9zjc3g2twdagek",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-21T14:16:08.187Z",
+    "heartbeatAt": "2026-05-21T14:16:08.188Z",
+    "startedAt": "2026-05-21T14:16:08.188Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks5bq09wzt2z5dn5p87qhcy1",
+    "purpose": "default",
+    "idea": "update the main readme, add \"TEMP TEXT\" at the top",
+    "effort": "low",
+    "preferredTicketType": "feature",
+    "relatedTicketIds": [],
+    "runId": "run_01ks5e9j7gprc2c4vs691japb8"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "The agent returned an invalid ticket draft. Your rough idea is still available; retry the agent when ready.",
+  "error": {
+    "code": "invalid_response",
+    "message": "The agent returned an invalid ticket draft. Your rough idea is still available; retry the agent when ready.",
+    "recoverable": true,
+    "requestId": "tdr_01ks5e9j7xttd5gx8gf7dy6pgr",
+    "durationMs": 14804,
+    "reason": "invalid_agent_response"
+  }
+}

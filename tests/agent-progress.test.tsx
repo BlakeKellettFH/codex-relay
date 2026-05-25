@@ -90,6 +90,27 @@ test("agent activity panel exposes a dedicated log entry point", () => {
   assert.doesNotMatch(markup, /Run started \(thread_1\)/);
 });
 
+test("agent activity panel keeps live command output in recent activity", () => {
+  const markup = renderToStaticMarkup(
+    <AgentActivityPanel
+      events={[
+        event({ type: "run.started", runId: "run_1", threadId: "thread_1", timestamp: "2026-05-11T10:00:00.000Z" }),
+        event({ type: "command.started", command: "npm test", timestamp: "2026-05-11T10:00:01.000Z" }),
+        event({ type: "command.output", stream: "stdout", text: "streamed test output", timestamp: "2026-05-11T10:00:02.000Z" })
+      ]}
+      status="running"
+      runId="run_1"
+      runSummary={null}
+      logLoading={false}
+      logError={null}
+      onOpenLogs={() => undefined}
+      onRevealFile={() => undefined}
+    />
+  );
+
+  assert.match(markup, /streamed test output/);
+});
+
 test("agent activity panel keeps run summary timing and token usage behind diagnostics disclosure", () => {
   const markup = renderToStaticMarkup(
     <AgentActivityPanel
@@ -115,6 +136,16 @@ test("agent activity panel keeps run summary timing and token usage behind diagn
           reasoningOutputTokens: 50,
           totalTokens: 1500
         },
+        changedFiles: [
+          {
+            path: "src/App.tsx",
+            eventCount: 2,
+            kinds: ["updated"],
+            firstChangedAt: "2026-05-11T10:00:20.000Z",
+            lastChangedAt: "2026-05-11T10:00:30.000Z",
+            lastSummary: "update src/App.tsx"
+          }
+        ],
         eventCount: 2,
         latestEventAt: "2026-05-11T10:01:05.000Z"
       }}
@@ -152,6 +183,7 @@ test("agent activity panel marks token usage unavailable inside diagnostics when
         durationMs: 30_000,
         finalStatus: "cancelled",
         usage: null,
+        changedFiles: [],
         eventCount: 1,
         latestEventAt: "2026-05-11T10:00:30.000Z"
       }}

@@ -46,6 +46,31 @@ export const showFeatureArchive = (feature: TicketSummary, columnId: string, all
 export const showEpicArchive = (epic: TicketSummary, columnId: string, allTickets: TicketSummary[]): boolean =>
   completedColumnArchivable(columnId) && epicCanArchive(epic, allTickets);
 
+export const taskCanArchive = (task: TicketSummary): boolean =>
+  task.ticketType === "task" && task.status === RELAY_COMPLETED_STATUS;
+
+export const showTaskArchive = (task: TicketSummary, columnId: string): boolean =>
+  completedColumnArchivable(columnId) && taskCanArchive(task);
+
+export const ARCHIVE_TICKET_UPDATE_REQUEST =
+  "Archive this completed ticket with a lean summary for long-term storage.";
+
+const archiveBundleTypeOrder: Record<TicketSummary["ticketType"], number> = {
+  task: 0,
+  feature: 1,
+  epic: 2
+};
+
+export const sortArchiveBundleIds = (bundleIds: string[], allTickets: TicketSummary[]): string[] => {
+  const byId = new Map(allTickets.map((ticket) => [ticket.id, ticket]));
+  return [...new Set(bundleIds)].sort((leftId, rightId) => {
+    const leftOrder = archiveBundleTypeOrder[byId.get(leftId)?.ticketType ?? "task"];
+    const rightOrder = archiveBundleTypeOrder[byId.get(rightId)?.ticketType ?? "task"];
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return leftId.localeCompare(rightId);
+  });
+};
+
 export const archiveBundleForFeature = (featureId: string, allTickets: TicketSummary[]): string[] => {
   const feature = allTickets.find((ticket) => ticket.id === featureId && ticket.ticketType === "feature");
   if (!feature) return [];

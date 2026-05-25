@@ -1,0 +1,24 @@
+{
+  "scope": "product_feature",
+  "planKind": "feature_tree",
+  "confidence": 0.88,
+  "estimatedTouchPoints": 4,
+  "rationale": "User wants to fix repository chat typing UX (perceived rerenders and noisy PUT logs). Codebase already shows root causes: per-keystroke draft state in RepositoryChatPanel re-renders the full panel including MarkdownBlock transcript, and a 400ms debounced autosave issues PUT /api/projects/repository-chat (logged at INFO). This is a new repository-chat performance feature, not an extension of the completed streaming UX feature (terminal). A feature_tree with 2-3 lean tasks is enough: isolate composer rendering, tune persistence, and add focused renderer tests.",
+  "matchedEpicId": null,
+  "matchedFeatureId": null,
+  "knownFacts": [
+    "Repository chat autosaves draft, messages, and threadId via REPOSITORY_CHAT_PERSIST_DEBOUNCE_MS (400) in RepositoryChatPanel (src/renderer/src/App.tsx), calling PUT /api/projects/repository-chat through useSaveRepositoryChatMutation (src/renderer/src/lib/relayQueries.ts).",
+    "Each keystroke updates draft with setDraft, re-rendering RepositoryChatPanel and RepositoryChatPanelContent; assistant transcript uses MarkdownBlock and re-parses on every draft change.",
+    "useSaveRepositoryChatMutation does not invalidate queries or update cache on success, so autosave should not refetch the board; PUT noise is from intentional debounced persistence plus requestLoggingMiddleware INFO logs (src/http/middleware/requestLogging.ts).",
+    "User confirmed they want to fix the issue after learning autosave and panel rerenders are mostly by design; goal is smoother typing and fewer disruptive saves/logs, not removing persistence.",
+    "Conservative default: keep autosave to .relay/repository-chat.json but increase debounce (e.g. 1500-2000ms), flush on panel close and after send/clear, and avoid mutation-status-driven extra rerenders where possible.",
+    "Conservative default: split or memoize transcript vs composer so draft typing only re-renders the textarea/composer subtree, not the full transcript MarkdownBlock list.",
+    "Hydration useEffect (App.tsx ~2702-2729) depends on draft/messages/threadId; tighten dependencies and first-hydration guards so typing before initial query success cannot skip server hydration incorrectly.",
+    "Completed feature tkt_01ks7dand93t0q183ks5eja51x addressed streaming/thinking UX; it is terminal and not a parent for extend_feature."
+  ],
+  "relatedTicketIds": [
+    "tkt_01ks7dand93t0q183ks5eja51x",
+    "tkt_01kseydxj7g1x80fxxz0v2cqgd"
+  ],
+  "questions": []
+}

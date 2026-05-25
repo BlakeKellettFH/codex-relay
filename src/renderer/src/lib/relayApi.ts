@@ -1,4 +1,5 @@
 import {
+  agentEndpoints,
   boardEndpoints,
   codexEndpoints,
   decodeHttpPayload,
@@ -7,11 +8,16 @@ import {
   type AnyHttpEndpoint,
   type HttpEndpoint,
   type HttpEndpointRequest,
-  type HttpEndpointResponse
+  type HttpEndpointResponse,
+  type TicketArchiveInput,
+  type TicketArchiveResult
 } from "@shared/http";
-import { rendererRunEventSchema } from "@shared/schemas";
+import { rendererRunEventSchema, repositoryChatStreamEventSchema } from "@shared/schemas";
 import type {
   AddProjectResult,
+  AgentProviderInventory,
+  AgentProviderSwitchInput,
+  AgentProviderSwitchResult,
   AgentTicketUpdateInput,
   AgentTicketUpdateStartResult,
   BoardSnapshot,
@@ -32,11 +38,16 @@ import type {
   FeatureTaskCreateRequest,
   GitMetadata,
   GitMetadataOptions,
+  LocalVoiceInputStatus,
+  LocalVoiceInputTranscriptionResult,
   ProjectOpenInEditorInput,
   ProjectOpenInEditorResult,
   ProjectSummary,
+  RepositoryChatSaveInput,
+  RepositoryChatStore,
   RendererRunEvent,
   RepositoryChatInput,
+  RepositoryChatStreamEvent,
   RepositoryChatResponse,
   RunSummary,
   StartRunInput,
@@ -69,6 +80,13 @@ export class RelayApiError extends Error {
 }
 
 export type RelayApiClient = {
+  readonly agents: {
+    readonly providers: () => Promise<AgentProviderInventory>;
+    readonly switchProvider: (input: AgentProviderSwitchInput) => Promise<AgentProviderSwitchResult>;
+    readonly voiceInputStatus: () => Promise<LocalVoiceInputStatus>;
+    readonly configureVoiceInput: (input: { readonly commandPath: string }) => Promise<LocalVoiceInputStatus>;
+    readonly transcribeVoiceInput: (input: { readonly audioBase64: string }) => Promise<LocalVoiceInputTranscriptionResult>;
+  };
   readonly projects: {
     readonly list: () => Promise<ProjectSummary[]>;
     readonly addFolder: () => Promise<AddProjectResult | null>;
@@ -78,6 +96,9 @@ export type RelayApiClient = {
     readonly gitMetadata: (input: { readonly projectPath: string; readonly options?: GitMetadataOptions }) => Promise<GitMetadata>;
     readonly revealInFinder: (input: { readonly projectPath: string }) => Promise<void>;
     readonly openInEditor: (input: ProjectOpenInEditorInput) => Promise<ProjectOpenInEditorResult>;
+    readonly readRepositoryChat: (input: { readonly projectPath: string }) => Promise<RepositoryChatStore>;
+    readonly saveRepositoryChat: (input: RepositoryChatSaveInput) => Promise<RepositoryChatStore>;
+    readonly clearRepositoryChat: (input: { readonly projectPath: string }) => Promise<RepositoryChatStore>;
   };
   readonly board: {
     readonly read: (input: { readonly projectPath: string }) => Promise<BoardSnapshot>;
@@ -101,6 +122,7 @@ export type RelayApiClient = {
     readonly save: (input: TicketSaveInput) => Promise<TicketRecord>;
     readonly saveAttachment: (input: TicketAttachmentSaveInput) => Promise<TicketAttachmentSaveResult>;
     readonly move: (input: TicketMoveInput) => Promise<BoardSnapshot>;
+    readonly archive: (input: TicketArchiveInput) => Promise<TicketArchiveResult>;
     readonly clarifications: (input: { readonly projectPath: string; readonly ticketId: string }) => Promise<ClarificationQuestion[]>;
     readonly answerClarification: (input: ClarificationAnswerInput) => Promise<ClarificationQuestion>;
     readonly approveScopeClarification: (input: { readonly projectPath: string; readonly ticketId: string; readonly clarificationQuestionId: string }) => Promise<AgentTicketUpdateStartResult>;
@@ -120,17 +142,26 @@ export type RelayApiClient = {
     readonly readLatestRunSummary: (input: { readonly projectPath: string; readonly ticketId: string }) => Promise<RunSummary | null>;
   };
   readonly subscribeRunEvents: (listener: (event: RendererRunEvent) => void) => () => void;
+  readonly subscribeRepositoryChatEvents: (listener: (event: RepositoryChatStreamEvent) => void) => () => void;
 };
 
 let testClient: RelayApiClient | null = null;
 let browserClient: RelayApiClient | null = null;
+let browserClientConfig: RelayApiConfig | null = null;
 
 const normalizeBaseUrl = (value: string): string => value.endsWith("/") ? value : `${value}/`;
+
+const defaultRelayApiBaseUrl = (): string => {
+  if (typeof window !== "undefined" && window.location.protocol.startsWith("http")) {
+    return window.location.origin;
+  }
+  return "http://127.0.0.1:17654";
+};
 
 const apiConfigFromLocation = (): RelayApiConfig => {
   const params = typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search);
   return {
-    baseUrl: params.get("relayApiBaseUrl") ?? "http://127.0.0.1:17654",
+    baseUrl: params.get("relayApiBaseUrl") ?? defaultRelayApiBaseUrl(),
     token: params.get("relayApiToken") ?? "relay-dev"
   };
 };
@@ -141,6 +172,18 @@ const appendQuery = (url: URL, input: Record<string, unknown>): void => {
     url.searchParams.set(key, String(value));
   }
 };
+
+export class RelayNetworkError extends Error {
+  readonly code = "network_error";
+  readonly url: string;
+
+  constructor(url: string, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Relay could not reach the local API at ${url}. ${detail}`);
+    this.name = "RelayNetworkError";
+    this.url = url;
+  }
+}
 
 const readError = async (response: Response): Promise<RelayApiError> => {
   try {
@@ -176,7 +219,12 @@ const request = async <Endpoint extends AnyHttpEndpoint>(
     init.body = JSON.stringify(input);
   }
 
-  const response = await fetch(url, init);
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch (error) {
+    throw new RelayNetworkError(url.toString(), error);
+  }
   if (!response.ok) throw await readError(response);
   if (!endpoint.response || response.status === 204) return undefined as HttpEndpointResponse<Endpoint>;
   return decodeHttpPayload(endpoint.response, await response.json()) as HttpEndpointResponse<Endpoint>;
@@ -189,6 +237,13 @@ const call = <Endpoint extends HttpEndpoint<unknown, unknown>>(
 ): Promise<HttpEndpointResponse<Endpoint>> => request(config, endpoint, input);
 
 export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => ({
+  agents: {
+    providers: () => call(config, agentEndpoints.providers, undefined),
+    switchProvider: (input) => call(config, agentEndpoints.switchProvider, input),
+    voiceInputStatus: () => call(config, agentEndpoints.voiceInputStatus, undefined),
+    configureVoiceInput: (input) => call(config, agentEndpoints.configureVoiceInput, input),
+    transcribeVoiceInput: (input) => call(config, agentEndpoints.transcribeVoiceInput, input)
+  },
   projects: {
     list: () => call(config, projectEndpoints.list, undefined),
     addFolder: () => call(config, projectEndpoints.addFolder, undefined),
@@ -201,7 +256,10 @@ export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => 
         force: options?.force === undefined ? undefined : String(options.force)
       }),
     revealInFinder: (input) => call(config, projectEndpoints.revealInFinder, input).then(() => undefined),
-    openInEditor: (input) => call(config, projectEndpoints.openInEditor, input)
+    openInEditor: (input) => call(config, projectEndpoints.openInEditor, input),
+    readRepositoryChat: (input) => call(config, projectEndpoints.readRepositoryChat, input),
+    saveRepositoryChat: (input) => call(config, projectEndpoints.saveRepositoryChat, input),
+    clearRepositoryChat: (input) => call(config, projectEndpoints.clearRepositoryChat, input)
   },
   board: {
     read: (input) => call(config, boardEndpoints.read, input)
@@ -225,6 +283,7 @@ export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => 
     save: (input) => call(config, ticketEndpoints.save, input),
     saveAttachment: (input) => call(config, ticketEndpoints.saveAttachment, input),
     move: (input) => call(config, ticketEndpoints.move, input),
+    archive: (input) => call(config, ticketEndpoints.archive, input),
     clarifications: (input) => call(config, ticketEndpoints.clarifications, input),
     answerClarification: (input) => call(config, ticketEndpoints.answerClarification, input),
     approveScopeClarification: (input) => call(config, ticketEndpoints.approveScopeClarification, input),
@@ -252,16 +311,40 @@ export const createRelayApiClient = (config: RelayApiConfig): RelayApiClient => 
     };
     source.addEventListener("run-event", onRunEvent);
     return () => source.close();
+  },
+  subscribeRepositoryChatEvents: (listener) => {
+    const url = new URL("/api/events", normalizeBaseUrl(config.baseUrl));
+    url.searchParams.set("token", config.token);
+    const source = new EventSource(url);
+    const onRepositoryChatEvent = (event: MessageEvent<string>): void => {
+      listener(decodeHttpPayload(repositoryChatStreamEventSchema, JSON.parse(event.data)));
+    };
+    source.addEventListener("repository-chat-event", onRepositoryChatEvent);
+    return () => source.close();
   }
 });
 
+const sameRelayApiConfig = (left: RelayApiConfig, right: RelayApiConfig): boolean =>
+  left.baseUrl === right.baseUrl && left.token === right.token;
+
 const activeClient = (): RelayApiClient => {
   if (testClient) return testClient;
-  browserClient ??= createRelayApiClient(apiConfigFromLocation());
+  const config = apiConfigFromLocation();
+  if (!browserClient || !browserClientConfig || !sameRelayApiConfig(browserClientConfig, config)) {
+    browserClient = createRelayApiClient(config);
+    browserClientConfig = config;
+  }
   return browserClient;
 };
 
 export const relayApi: RelayApiClient = {
+  agents: {
+    providers: () => activeClient().agents.providers(),
+    switchProvider: (input) => activeClient().agents.switchProvider(input),
+    voiceInputStatus: () => activeClient().agents.voiceInputStatus(),
+    configureVoiceInput: (input) => activeClient().agents.configureVoiceInput(input),
+    transcribeVoiceInput: (input) => activeClient().agents.transcribeVoiceInput(input)
+  },
   projects: {
     list: () => activeClient().projects.list(),
     addFolder: () => activeClient().projects.addFolder(),
@@ -270,7 +353,10 @@ export const relayApi: RelayApiClient = {
     read: (input) => activeClient().projects.read(input),
     gitMetadata: (input) => activeClient().projects.gitMetadata(input),
     revealInFinder: (input) => activeClient().projects.revealInFinder(input),
-    openInEditor: (input) => activeClient().projects.openInEditor(input)
+    openInEditor: (input) => activeClient().projects.openInEditor(input),
+    readRepositoryChat: (input) => activeClient().projects.readRepositoryChat(input),
+    saveRepositoryChat: (input) => activeClient().projects.saveRepositoryChat(input),
+    clearRepositoryChat: (input) => activeClient().projects.clearRepositoryChat(input)
   },
   board: {
     read: (input) => activeClient().board.read(input)
@@ -294,8 +380,10 @@ export const relayApi: RelayApiClient = {
     save: (input) => activeClient().tickets.save(input),
     saveAttachment: (input) => activeClient().tickets.saveAttachment(input),
     move: (input) => activeClient().tickets.move(input),
+    archive: (input) => activeClient().tickets.archive(input),
     clarifications: (input) => activeClient().tickets.clarifications(input),
     answerClarification: (input) => activeClient().tickets.answerClarification(input),
+    approveScopeClarification: (input) => activeClient().tickets.approveScopeClarification(input),
     delete: (input) => activeClient().tickets.delete(input),
     duplicate: (input) => activeClient().tickets.duplicate(input),
     revealFile: (input) => activeClient().tickets.revealFile(input)
@@ -311,7 +399,8 @@ export const relayApi: RelayApiClient = {
     readRunEvents: (input) => activeClient().codex.readRunEvents(input),
     readLatestRunSummary: (input) => activeClient().codex.readLatestRunSummary(input)
   },
-  subscribeRunEvents: (listener) => activeClient().subscribeRunEvents(listener)
+  subscribeRunEvents: (listener) => activeClient().subscribeRunEvents(listener),
+  subscribeRepositoryChatEvents: (listener) => activeClient().subscribeRepositoryChatEvents(listener)
 };
 
 export const setRelayApiClientForTests = (client: RelayApiClient | null): (() => void) => {

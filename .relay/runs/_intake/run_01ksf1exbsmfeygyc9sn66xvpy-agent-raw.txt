@@ -1,0 +1,28 @@
+{
+  "scope": "product_feature",
+  "planKind": "extend_feature",
+  "confidence": 0.94,
+  "estimatedTouchPoints": 4,
+  "rationale": "The request matches the in-flight feature tkt_01kseyph9agqpws8zz0w4q2h2m (archive in Completed detail and on board for epics/features/tasks when descendants are done). Backend archive API, bundle ordering, and detail/board UI are already implemented in Review child tasks; intake should extend that feature for gap-fill or acceptance rather than a new feature tree.",
+  "matchedEpicId": null,
+  "matchedFeatureId": "tkt_01kseyph9agqpws8zz0w4q2h2m",
+  "knownFacts": [
+    "Parent feature tkt_01kseyph9agqpws8zz0w4q2h2m already scopes bundle archive for completed epics/features plus completed tasks, with agent lean rewrite before moving to the hidden archive column.",
+    "Detail view shows an Archive control when ticket status is completed: detailArchiveTarget in App.tsx covers epic, feature, and task; bundle IDs come from archiveBundleForEpic/archiveBundleForFeature.",
+    "Gating uses featureCanArchive/epicCanArchive in boardArchive.ts: all descendant tasks must be completed; features under an epic also require the full epic task tree complete.",
+    "One click archives the container and descendants bottom-up (tasks, then features, then epic) via archiveTicketIdsWithAgent / POST /api/tickets/archive with sortArchiveBundleIds.",
+    "Board Completed column shows archive on epic/feature group triggers and completed task cards (HierarchyBoardGroupTrigger, BoardTaskCardLeading).",
+    "Default eligibility: only tickets in completed status are archivable; archive runs use ticket.update purpose archive (no clarifications).",
+    "Three child tasks (API, UI wire, archive purpose) are already in Review under the parent feature; finishing review may satisfy the user request without new scope.",
+    "Draft ticket tkt_01ksf1exckn6dxhhy05deq7qrr was spawned from the same repository-chat request and should be deduped into the parent feature extension."
+  ],
+  "relatedTicketIds": [
+    "tkt_01kseyph9agqpws8zz0w4q2h2m",
+    "tkt_01ksf03k0ht1p5g152bakkprt2",
+    "tkt_01ksf03k156jwpq2s0avhvw37h",
+    "tkt_01ksf03k1r7gsmkpsjkch67jh7",
+    "tkt_01ksf1exckn6dxhhy05deq7qrr",
+    "tkt_01ks6810f8qgk82fbeh7wfbqga"
+  ],
+  "questions": []
+}

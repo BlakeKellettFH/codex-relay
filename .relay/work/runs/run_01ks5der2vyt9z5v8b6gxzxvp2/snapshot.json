@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks5der2vyt9z5v8b6gxzxvp2",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks5bq09wzt2z5dn5p87qhcy1",
+  "runId": "run_01ks5der2vyt9z5v8b6gxzxvp2",
+  "subject": "ticket",
+  "action": "redraft",
+  "kind": "ticket.redraft",
+  "idempotencyKey": "ticket.redraft:/Users/blakekellett/repos/codex-relay:tkt_01ks5bq09wzt2z5dn5p87qhcy1:run_01ks5der2vyt9z5v8b6gxzxvp2",
+  "status": "failed",
+  "attempts": 1,
+  "createdAt": "2026-05-21T14:01:29.447Z",
+  "updatedAt": "2026-05-21T14:01:29.482Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks5der3h4hbetetargkb4tey",
+    "leaseToken": "lease_01ks5der3h4c74xha5twn0am9g",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-21T14:01:29.457Z",
+    "heartbeatAt": "2026-05-21T14:01:29.460Z",
+    "startedAt": "2026-05-21T14:01:29.460Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks5bq09wzt2z5dn5p87qhcy1",
+    "purpose": "default",
+    "idea": "update the main readme, add \"TEMP TEXT\" at the top",
+    "effort": "low",
+    "preferredTicketType": "feature",
+    "relatedTicketIds": [],
+    "runId": "run_01ks5der2vyt9z5v8b6gxzxvp2"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "effectiveDraftPreferredTicketType is not defined",
+  "error": {
+    "code": "backend_failure",
+    "message": "effectiveDraftPreferredTicketType is not defined",
+    "recoverable": true,
+    "requestId": "tdr_01ks5der3qzzym9xs2rdqgwqfm",
+    "durationMs": 8,
+    "reason": "codex_backend_failure"
+  }
+}

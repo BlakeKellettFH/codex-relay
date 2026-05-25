@@ -9,9 +9,15 @@ import {
   tasksMovableToReady,
   ticketsForBoardColumn,
   isTaskProcessable,
+  isTaskReadyPlaceable,
   isTaskRetryable
 } from "../src/renderer/src/lib/boardColumnLayout";
-import type { RelayColumn, TicketSummary } from "../src/shared/schemas";
+import {
+  RELAY_COMPLETED_STATUS,
+  RELAY_REVIEW_STATUS,
+  type RelayColumn,
+  type TicketSummary
+} from "../src/shared/schemas";
 
 const ticket = (patch: Partial<TicketSummary> & Pick<TicketSummary, "id" | "title" | "ticketType" | "status">): TicketSummary => ({
   schemaVersion: 1,
@@ -195,7 +201,45 @@ test("isTaskProcessable rejects paused implementation tasks", () => {
   assert.equal(isTaskProcessable(paused, columns, [paused]), false);
 });
 
-test("tasksMovableToReady and epicTasksMovableToReady only include processable todo tasks", () => {
+test("isTaskReadyPlaceable allows blocked todo tasks but isTaskProcessable rejects them", () => {
+  const blocker = ticket({ id: "blocker_1", title: "Blocker", ticketType: "task", status: "todo", position: 1000 });
+  const blocked = ticket({
+    id: "task_blocked",
+    title: "Blocked dependent",
+    ticketType: "task",
+    status: "todo",
+    position: 1100,
+    blockedByIds: ["blocker_1"]
+  });
+  const allTickets = [blocker, blocked];
+
+  assert.equal(isTaskReadyPlaceable(blocked, columns, allTickets), true);
+  assert.equal(isTaskProcessable(blocked, columns, allTickets), false);
+});
+
+test("blocked dependent stays unprocessable while blocker is in review", () => {
+  const blocker = ticket({
+    id: "blocker_review",
+    title: "Blocker in review",
+    ticketType: "task",
+    status: RELAY_REVIEW_STATUS,
+    position: 1000
+  });
+  const blocked = ticket({
+    id: "task_waiting",
+    title: "Waiting dependent",
+    ticketType: "task",
+    status: "ready",
+    position: 1100,
+    blockedByIds: ["blocker_review"]
+  });
+  const allTickets = [blocker, blocked];
+
+  assert.equal(isTaskReadyPlaceable(blocked, columns, allTickets), true);
+  assert.equal(isTaskProcessable(blocked, columns, allTickets), false);
+});
+
+test("tasksMovableToReady and epicTasksMovableToReady include ready-placeable blocked tasks", () => {
   const feature = ticket({ id: "feat_1", title: "Auth", ticketType: "feature", status: "todo", position: 1000 });
   const readyTask = ticket({
     id: "task_ready",
@@ -218,8 +262,14 @@ test("tasksMovableToReady and epicTasksMovableToReady only include processable t
   const allTickets = [feature, readyTask, movableTask, blocker];
   const featureGroup = { feature, tasks: [readyTask, movableTask], featureInColumn: true };
 
-  assert.deepEqual(tasksMovableToReady([readyTask, movableTask], columns, allTickets).map((entry) => entry.id), ["task_move"]);
-  assert.deepEqual(epicTasksMovableToReady([featureGroup], columns, allTickets).map((entry) => entry.id), ["task_move"]);
+  assert.deepEqual(tasksMovableToReady([readyTask, movableTask], columns, allTickets).map((entry) => entry.id).sort(), [
+    "task_move",
+    "task_ready"
+  ]);
+  assert.deepEqual(epicTasksMovableToReady([featureGroup], columns, allTickets).map((entry) => entry.id).sort(), [
+    "task_move",
+    "task_ready"
+  ]);
 });
 
 test("draft_ticket in todo appears as a standalone board card", () => {
@@ -266,6 +316,98 @@ test("draft_ticket in ready does not appear on the board", () => {
     position: 1000
   });
   assert.equal(organizeColumnBoardItems("ready", [draft]).length, 0);
+});
+
+test("review column shows feature in review with all tasks completed as container-only group", () => {
+  const feature = ticket({
+    id: "feat_review",
+    title: "Auth",
+    ticketType: "feature",
+    status: RELAY_REVIEW_STATUS,
+    position: 1000,
+    subticketIds: ["task_done"]
+  });
+  const doneTask = ticket({
+    id: "task_done",
+    title: "Login",
+    ticketType: "task",
+    status: RELAY_COMPLETED_STATUS,
+    position: 1100,
+    parentFeatureId: "feat_review"
+  });
+  const allTickets = [feature, doneTask];
+
+  const items = organizeColumnBoardItems(RELAY_REVIEW_STATUS, allTickets);
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, "feature-group");
+  if (items[0]?.kind === "feature-group") {
+    assert.equal(items[0].feature.id, "feat_review");
+    assert.equal(items[0].tasks.length, 0);
+    assert.equal(items[0].featureInColumn, true);
+  }
+
+  const columnTickets = ticketsForBoardColumn(RELAY_REVIEW_STATUS, allTickets);
+  assert.ok(columnTickets.some((entry) => entry.id === "feat_review"));
+  assert.ok(!columnTickets.some((entry) => entry.id === "task_done"));
+});
+
+test("review column shows epic in review with all features completed as epic-only group", () => {
+  const epic = ticket({
+    id: "epic_review",
+    title: "Platform",
+    ticketType: "epic",
+    status: RELAY_REVIEW_STATUS,
+    position: 2000,
+    subticketIds: ["feat_done"]
+  });
+  const feature = ticket({
+    id: "feat_done",
+    title: "Auth",
+    ticketType: "feature",
+    status: RELAY_COMPLETED_STATUS,
+    position: 1000,
+    parentEpicId: "epic_review",
+    subticketIds: ["task_done"]
+  });
+  const doneTask = ticket({
+    id: "task_done",
+    title: "Login",
+    ticketType: "task",
+    status: RELAY_COMPLETED_STATUS,
+    position: 1100,
+    parentFeatureId: "feat_done",
+    parentEpicId: "epic_review"
+  });
+  const allTickets = [epic, feature, doneTask];
+
+  const items = organizeColumnBoardItems(RELAY_REVIEW_STATUS, allTickets);
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, "epic-group");
+  if (items[0]?.kind === "epic-group") {
+    assert.equal(items[0].epic.id, "epic_review");
+    assert.equal(items[0].featureGroups.length, 0);
+  }
+});
+
+test("todo column does not show containers without in-column tasks", () => {
+  const feature = ticket({
+    id: "feat_review",
+    title: "Auth",
+    ticketType: "feature",
+    status: RELAY_REVIEW_STATUS,
+    position: 1000
+  });
+  const doneTask = ticket({
+    id: "task_done",
+    title: "Login",
+    ticketType: "task",
+    status: RELAY_COMPLETED_STATUS,
+    position: 1100,
+    parentFeatureId: "feat_review"
+  });
+
+  assert.equal(organizeColumnBoardItems("todo", [feature, doneTask]).length, 0);
+  assert.equal(ticketsForBoardColumn("todo", [feature, doneTask]).length, 0);
 });
 
 test("isTaskRetryable allows failed in-progress tasks with a stored thread", () => {

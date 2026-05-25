@@ -1,5 +1,6 @@
 import { Schema } from "effect";
-import { isoString, mutableArray, nonEmptyString, numberSchema, passthroughStruct, type SchemaType } from "./common";
+import { agentProviderIdSchema } from "./agents";
+import { isoString, mutableArray, nonEmptyString, numberSchema, passthroughStruct, withDefault, type SchemaType } from "./common";
 import { themePreferenceSchema } from "./primitives";
 
 export const appRegistrySchema = passthroughStruct({
@@ -10,6 +11,15 @@ export const appRegistrySchema = passthroughStruct({
       pinned: Schema.Boolean,
       lastOpenedAt: isoString,
       sidebarPosition: numberSchema
+    })
+  ),
+  selectedProviderId: withDefault(agentProviderIdSchema, () => "codex" as const),
+  voiceInput: withDefault(
+    Schema.Struct({
+      whisperCommandPath: Schema.NullOr(Schema.String)
+    }),
+    () => ({
+      whisperCommandPath: null
     })
   ),
   ui: Schema.Struct({

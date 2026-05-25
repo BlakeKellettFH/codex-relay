@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks5k4zm00k2ej7g9j38dc0v5",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks5k4zmbz7pxts84s2p4qyxc",
+  "runId": "run_01ks5k4zm00k2ej7g9j38dc0v5",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks5k4zmbz7pxts84s2p4qyxc:run_01ks5k4zm00k2ej7g9j38dc0v5",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-21T15:41:00.951Z",
+  "updatedAt": "2026-05-21T15:43:24.408Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks5k4zn006705nswrnswdm2h",
+    "leaseToken": "lease_01ks5k4zn0vd2hbf7j24e3q4sn",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-21T15:41:00.960Z",
+    "heartbeatAt": "2026-05-21T15:41:00.962Z",
+    "startedAt": "2026-05-21T15:41:00.962Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "Add \"Hello world\" to main readme",
+    "priority": "medium",
+    "agentModel": "auto",
+    "preferredTicketType": "feature",
+    "draftScope": "product_feature",
+    "runIntake": true,
+    "runId": "run_01ks5k4zm00k2ej7g9j38dc0v5",
+    "ticketId": "tkt_01ks5k4zmbz7pxts84s2p4qyxc"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket draft completed.",
+  "result": {
+    "ticketId": "tkt_01ks5k4zmbz7pxts84s2p4qyxc",
+    "title": "Add \"Hello world\" to main README"
+  }
+}

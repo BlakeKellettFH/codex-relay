@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { cursorAgentModelSchema } from "./agents";
 import {
   mutableArray,
   nonEmptyString,
@@ -193,7 +194,8 @@ export const leanTaskDraftSchema = strictStruct({
   acceptanceCriteria: stringArrayWithDefault(),
   implementationPlan: stringArrayWithDefault(),
   assumptions: stringArrayWithDefault(),
-  plannedFiles: nonEmptyRepoRelativePathArraySchema
+  plannedFiles: nonEmptyRepoRelativePathArraySchema,
+  blockedByTitles: stringArrayWithDefault()
 });
 export type LeanTaskDraft = SchemaType<typeof leanTaskDraftSchema>;
 
@@ -213,7 +215,7 @@ export const ticketDraftSchema = strictStruct({
   ...ticketDraftBaseFields,
   draftState: withDefault(Schema.Literals(["ready", "needs_clarification"]), () => "ready" as const),
   blockingClarificationQuestions: stringArrayWithDefault(),
-  ticketType: withDefault(finalTicketTypeSchema, () => "task" as const),
+  ticketType: withDefault(finalTicketTypeSchema, () => "feature" as const),
   subtickets: withDefault(mutableArray(ticketDraftBaseSchema), () => []),
   featureStubs: withDefault(mutableArray(featureStubDraftSchema), () => []),
   leanTasks: withDefault(mutableArray(leanTaskDraftSchema), () => []),
@@ -244,6 +246,7 @@ export const ticketDraftErrorPayloadSchema = Schema.Struct({
     "timeout",
     "cancelled",
     "clarification_required",
+    "cursor_incomplete_result",
     "invalid_response",
     "backend_failure"
   ]),
@@ -312,6 +315,7 @@ export const draftIntakeInputSchema = passthroughStruct({
   idea: Schema.String,
   scopeOverride: Schema.optional(draftScopeSchema),
   effort: Schema.optional(ticketEffortSchema),
+  agentModel: Schema.optional(cursorAgentModelSchema),
   autoHierarchy: Schema.optional(Schema.Boolean)
 });
 export type DraftIntakeInput = SchemaType<typeof draftIntakeInputSchema>;
@@ -486,6 +490,7 @@ export const createDraftInputSchema = passthroughStruct({
   idea: Schema.String,
   priority: Schema.optional(ticketPrioritySchema),
   effort: Schema.optional(ticketEffortSchema),
+  agentModel: Schema.optional(cursorAgentModelSchema),
   preferredTicketType: Schema.optional(finalTicketTypeSchema),
   ticketId: Schema.optional(Schema.String),
   draftScope: Schema.optional(draftScopeSchema),
@@ -524,7 +529,7 @@ export const agentTicketUpdateInputSchema = passthroughStruct({
   projectPath: Schema.String,
   ticketId: Schema.String,
   request: Schema.String,
-  purpose: Schema.optional(Schema.Literals(["default", "scope_recovery"])),
+  purpose: Schema.optional(Schema.Literals(["default", "scope_recovery", "archive"])),
   clarificationQuestionId: Schema.optional(Schema.String)
 });
 export type AgentTicketUpdateInput = SchemaType<typeof agentTicketUpdateInputSchema>;

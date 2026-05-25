@@ -11,7 +11,8 @@ import {
   epicCanArchive,
   featureCanArchive,
   showEpicArchive,
-  showFeatureArchive
+  showFeatureArchive,
+  sortArchiveBundleIds
 } from "../src/renderer/src/lib/boardArchive";
 import type { TicketSummary } from "../src/shared/schemas";
 
@@ -145,4 +146,30 @@ test("epic can archive only when every descendant task is complete", () => {
   assert.equal(epicCanArchive(epic, completeTickets), true);
   assert.equal(showEpicArchive(epic, RELAY_COMPLETED_STATUS, completeTickets), true);
   assert.deepEqual(archiveBundleForEpic("epic_1", completeTickets).sort(), ["epic_1", "feat_a", "task_done"].sort());
+});
+
+test("sortArchiveBundleIds archives tasks before features and epics", () => {
+  const epic = ticket({ id: "epic_1", title: "Platform", ticketType: "epic", status: "todo" });
+  const feature = ticket({
+    id: "feat_a",
+    title: "Auth",
+    ticketType: "feature",
+    status: "todo",
+    parentEpicId: "epic_1"
+  });
+  const task = ticket({
+    id: "task_done",
+    title: "Done",
+    ticketType: "task",
+    status: RELAY_COMPLETED_STATUS,
+    parentFeatureId: "feat_a",
+    parentEpicId: "epic_1"
+  });
+  const allTickets = [epic, feature, task];
+
+  assert.deepEqual(sortArchiveBundleIds(["epic_1", "feat_a", "task_done"], allTickets), [
+    "task_done",
+    "feat_a",
+    "epic_1"
+  ]);
 });

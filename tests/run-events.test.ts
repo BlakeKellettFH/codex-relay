@@ -19,6 +19,21 @@ test("run summaries derive timing, status, thread, and token usage from JSONL ev
       payload: { runId: "run_1", threadId: "thread_1" }
     }),
     baseLine({
+      timestamp: "2026-05-11T10:00:15.000Z",
+      type: "file.change",
+      payload: { path: "src/App.tsx", kind: "updated", summary: "updated src/App.tsx" }
+    }),
+    baseLine({
+      timestamp: "2026-05-11T10:00:35.000Z",
+      type: "file.change",
+      payload: { path: "src/App.tsx", kind: "updated", summary: "updated src/App.tsx again" }
+    }),
+    baseLine({
+      timestamp: "2026-05-11T10:00:45.000Z",
+      type: "file.change",
+      payload: { path: "src/lib/chat.ts", kind: "created", summary: "created src/lib/chat.ts" }
+    }),
+    baseLine({
       timestamp: "2026-05-11T10:01:05.000Z",
       type: "run.completed",
       payload: {
@@ -48,6 +63,24 @@ test("run summaries derive timing, status, thread, and token usage from JSONL ev
     reasoningOutputTokens: 5,
     totalTokens: 150
   });
+  assert.deepEqual(summary?.changedFiles, [
+    {
+      path: "src/App.tsx",
+      eventCount: 2,
+      kinds: ["updated"],
+      firstChangedAt: "2026-05-11T10:00:15.000Z",
+      lastChangedAt: "2026-05-11T10:00:35.000Z",
+      lastSummary: "updated src/App.tsx again"
+    },
+    {
+      path: "src/lib/chat.ts",
+      eventCount: 1,
+      kinds: ["created"],
+      firstChangedAt: "2026-05-11T10:00:45.000Z",
+      lastChangedAt: "2026-05-11T10:00:45.000Z",
+      lastSummary: "created src/lib/chat.ts"
+    }
+  ]);
 });
 
 test("run summaries remain readable for usage-absent cancelled logs", () => {
@@ -69,6 +102,7 @@ test("run summaries remain readable for usage-absent cancelled logs", () => {
   assert.equal(summary?.finalStatus, "cancelled");
   assert.equal(summary?.durationMs, 30_000);
   assert.equal(summary?.usage, null);
+  assert.deepEqual(summary?.changedFiles, []);
 });
 
 test("run summaries infer failed status for legacy failure logs", () => {
@@ -90,6 +124,7 @@ test("run summaries infer failed status for legacy failure logs", () => {
   assert.equal(summary?.finalStatus, "failed");
   assert.equal(summary?.endedAt, "2026-05-11T10:00:45.000Z");
   assert.equal(summary?.durationMs, 45_000);
+  assert.deepEqual(summary?.changedFiles, []);
 });
 
 

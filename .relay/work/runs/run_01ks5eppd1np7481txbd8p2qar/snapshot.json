@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks5eppd1np7481txbd8p2qar",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks5bq09wzt2z5dn5p87qhcy1",
+  "runId": "run_01ks5eppd1np7481txbd8p2qar",
+  "subject": "ticket",
+  "action": "redraft",
+  "kind": "ticket.redraft",
+  "idempotencyKey": "ticket.redraft:/Users/blakekellett/repos/codex-relay:tkt_01ks5bq09wzt2z5dn5p87qhcy1:run_01ks5eppd1np7481txbd8p2qar",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-21T14:23:18.437Z",
+  "updatedAt": "2026-05-21T14:24:10.944Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks5eppdbxsknv8yqgxvfsad8",
+    "leaseToken": "lease_01ks5eppdbzgd0ac2bz2hbgmpq",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-21T14:23:18.443Z",
+    "heartbeatAt": "2026-05-21T14:23:18.444Z",
+    "startedAt": "2026-05-21T14:23:18.444Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks5bq09wzt2z5dn5p87qhcy1",
+    "purpose": "default",
+    "idea": "update the main readme, add \"TEMP TEXT\" at the top",
+    "effort": "low",
+    "preferredTicketType": "feature",
+    "relatedTicketIds": [],
+    "runId": "run_01ks5eppd1np7481txbd8p2qar"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket redraft completed.",
+  "result": {
+    "ticketId": "tkt_01ks5bq09wzt2z5dn5p87qhcy1",
+    "title": "Add TEMP TEXT banner to main README",
+    "purpose": "default"
+  }
+}

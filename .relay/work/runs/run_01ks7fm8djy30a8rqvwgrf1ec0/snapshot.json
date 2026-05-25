@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks7fm8djy30a8rqvwgrf1ec0",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks7dand93t0q183ks5eja51x",
+  "runId": "run_01ks7fm8djy30a8rqvwgrf1ec0",
+  "subject": "ticket",
+  "action": "redraft",
+  "kind": "ticket.redraft",
+  "idempotencyKey": "ticket.redraft:/Users/blakekellett/repos/codex-relay:tkt_01ks7dand93t0q183ks5eja51x:run_01ks7fm8djy30a8rqvwgrf1ec0",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-22T09:17:56.038Z",
+  "updatedAt": "2026-05-22T09:20:46.654Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks7fm8egaspynx3b6f6hdsaz",
+    "leaseToken": "lease_01ks7fm8egy1v9w674rmdtp1bs",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-22T09:17:56.048Z",
+    "heartbeatAt": "2026-05-22T09:17:56.049Z",
+    "startedAt": "2026-05-22T09:17:56.049Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks7dand93t0q183ks5eja51x",
+    "purpose": "default",
+    "idea": "So this chat isnt workign.\nThe response goes into a \"read repository context\" with a spinner. and then it stays like that untill the full response.\n\nIm currently working on the cursor cli trying to get it to work.\n\nIm expecting a shorter \"thinking...\" then soon as response stream comes in then i want to start showing the response typing out.\n\nalso currently at the end when the response comes its not showing the response at all its just not there",
+    "effort": "medium",
+    "preferredTicketType": "feature",
+    "relatedTicketIds": [],
+    "runId": "run_01ks7fm8djy30a8rqvwgrf1ec0"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket redraft completed.",
+  "result": {
+    "ticketId": "tkt_01ks7dand93t0q183ks5eja51x",
+    "title": "Fix repository chat streaming UX and missing responses",
+    "purpose": "default"
+  }
+}

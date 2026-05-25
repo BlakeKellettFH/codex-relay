@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from "effect";
 import {
   RELAY_SCHEMA_VERSION,
+  type RunChangedFile,
   type RelayCodexEvent,
   type RendererRunEvent,
   type RunLogLine,
@@ -136,6 +137,35 @@ const terminalStatusFromEvent = (event: RelayCodexEvent | null, statusOverride?:
 const isTerminalEvent = (event: RelayCodexEvent): boolean =>
   event.type === "run.completed" || event.type === "run.failed" || event.type === "clarification.requested";
 
+const summarizeChangedFiles = (
+  entries: Array<{ line: RunLogLine; event: RelayCodexEvent }>
+): RunChangedFile[] => {
+  const byPath = new Map<string, RunChangedFile>();
+
+  for (const { line, event } of entries) {
+    if (event.type !== "file.change") continue;
+    const existing = byPath.get(event.path);
+    if (!existing) {
+      byPath.set(event.path, {
+        path: event.path,
+        eventCount: 1,
+        kinds: event.kind ? [event.kind] : [],
+        firstChangedAt: line.timestamp,
+        lastChangedAt: line.timestamp,
+        lastSummary: event.summary ?? null
+      });
+      continue;
+    }
+
+    existing.eventCount += 1;
+    if (event.kind && !existing.kinds.includes(event.kind)) existing.kinds.push(event.kind);
+    existing.lastChangedAt = line.timestamp;
+    if (event.summary) existing.lastSummary = event.summary;
+  }
+
+  return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+};
+
 export const summarizeRunLogLines = (
   ticketId: string,
   runId: string,
@@ -163,6 +193,7 @@ export const summarizeRunLogLines = (
     .find(({ event }) => event.type === "run.completed" && event.usage !== undefined);
   const usage =
     completedEntryWithUsage?.event.type === "run.completed" ? summarizeRunUsage(completedEntryWithUsage.event.usage) : null;
+  const changedFiles = summarizeChangedFiles(entries);
   const threadId =
     (startedEntry?.event.type === "run.started" ? startedEntry.event.threadId : null) ??
     entries.find(({ line }) => line.threadId)?.line.threadId ??
@@ -178,6 +209,7 @@ export const summarizeRunLogLines = (
     durationMs: startMs !== null && endMs !== null ? Math.max(0, endMs - startMs) : null,
     finalStatus,
     usage,
+    changedFiles,
     eventCount: entries.length,
     latestEventAt
   };

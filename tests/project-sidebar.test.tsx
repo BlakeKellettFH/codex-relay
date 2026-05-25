@@ -2,16 +2,56 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { openProjectInEditorFromHeader, ProjectEditorDropdown, ProjectSidebar } from "../src/renderer/src/App";
-import type { CodexStatus, ProjectEditorId, ProjectOpenInEditorInput, ProjectSummary } from "../src/shared/schemas";
+import type { AgentProviderInventory, ProjectEditorId, ProjectOpenInEditorInput, ProjectSummary } from "../src/shared/schemas";
 
 const projectPath = "/tmp/relay-sidebar-project";
 
-const codexStatus = (patch: Partial<CodexStatus> = {}): CodexStatus => ({
-  sdkAvailable: true,
-  cliAvailable: true,
-  cliVersion: "codex-cli 0.130.0",
-  authenticated: true,
-  message: "Codex is available.",
+const providerInventory = (patch: Partial<AgentProviderInventory> = {}): AgentProviderInventory => ({
+  providers: [
+    {
+      id: "codex",
+      label: "Codex",
+      installState: "installed",
+      authState: "authenticated",
+      status: "ready",
+      message: "Codex is available.",
+      version: "codex-cli 0.130.0",
+      canSelect: true,
+      blockedReasonCode: null,
+      blockedReasonMessage: null
+    },
+    {
+      id: "cursor",
+      label: "Cursor",
+      installState: "installed",
+      authState: "authenticated",
+      status: "ready",
+      message: "Cursor CLI is available.",
+      version: "cursor-cli 1.2.0",
+      canSelect: true,
+      blockedReasonCode: null,
+      blockedReasonMessage: null
+    },
+    {
+      id: "claude",
+      label: "Claude",
+      installState: "installed",
+      authState: "unauthenticated",
+      status: "unauthenticated",
+      message: "Claude CLI needs authentication.",
+      version: "claude 0.9.0",
+      canSelect: false,
+      blockedReasonCode: "provider_unauthenticated",
+      blockedReasonMessage: "Sign in to Claude before switching."
+    }
+  ],
+  selectedProviderId: "codex",
+  switchability: {
+    canSwitch: true,
+    reasonCode: null,
+    message: null,
+    blockingWorkCount: 0
+  },
   ...patch
 });
 
@@ -49,11 +89,11 @@ const renderSidebar = (
       onReveal={() => undefined}
       onToggleVisibility={() => undefined}
       toggleShortcutLabel={toggleShortcutLabel}
-      codexStatus={codexStatus()}
-      codexStatusLoading={false}
-      codexStatusError={false}
-      codexStatusRefreshing={false}
-      onRefreshCodexStatus={() => undefined}
+      providerInventory={providerInventory()}
+      providerInventoryLoading={false}
+      providerInventoryError={false}
+      providerInventoryRefreshing={false}
+      onOpenProviderSelector={() => undefined}
       defaultExpandedProjectPaths={defaultExpandedProjectPaths}
     />
   );
@@ -77,6 +117,7 @@ test("project sidebar heading exposes hide and add project controls", () => {
   assert.match(markup, /aria-expanded="true"/);
   assert.match(markup, /aria-keyshortcuts="Meta\+B Control\+B"/);
   assert.match(markup, /aria-label="Add project"/);
+  assert.match(markup, /Open CLI selector\. Codex: Connected/);
 });
 
 test("project sidebar renders per-project reveal and remove icon actions", () => {

@@ -4,7 +4,7 @@ import { PlatformLive } from "../platform";
 import { AtomicFileLive, StorageLive } from "../storage";
 import { BackendWorkLive } from "../services/work";
 import { GitServiceLive } from "../services/git";
-import { RegistryStoreLive } from "../services/registry";
+import { RegistryStoreLive } from "../services/registry/store";
 import { BackendServicesBaseLive } from "../runtime";
 import { LoggerLive } from "../runtime/Logging";
 import { RelayWindowLive } from "./RelayWindow";

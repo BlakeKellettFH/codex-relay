@@ -62,6 +62,14 @@ export default defineConfig({
         "@renderer/": resolve(__dirname, "src/renderer/src") + "/"
       }
     },
-    plugins: [react()]
+    plugins: [react()],
+    server: {
+      proxy: {
+        "/api": {
+          target: "http://127.0.0.1:17654",
+          changeOrigin: true
+        }
+      }
+    }
   }
 });

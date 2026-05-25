@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Effect } from "effect";
 import {
   cancelTicketUpdateRun,
   startTicketUpdateRun,
@@ -19,6 +20,8 @@ import {
   readTicket,
   writeProjectConfig
 } from "../src/storage";
+import { BackendWorkLive, WorkEngine } from "../src/services/work";
+import { runBackendEffect } from "../src/runtime";
 import type { AgentTicketUpdate, RendererRunEvent } from "../src/shared/schemas";
 
 const createProject = async (): Promise<string> => {
@@ -40,41 +43,34 @@ const createFakeRunEventSink = (): { runEventSink: NonNullable<TicketUpdateDepen
 };
 
 type TicketUpdateThreadOptions = Parameters<TicketUpdateCodexClient["startThread"]>[0];
-type TicketUpdateRunOptions = NonNullable<Parameters<TicketUpdateThread["runStreamed"]>[1]> & { signal: AbortSignal };
-type TicketUpdateRunStreamedMock = (
+type TicketUpdateRunOptions = NonNullable<Parameters<TicketUpdateThread["run"]>[1]> & { signal: AbortSignal };
+type TicketUpdateRunMock = (
   prompt: string,
   options: TicketUpdateRunOptions
-) => ReturnType<TicketUpdateThread["runStreamed"]>;
-
-const codexUsage = {
-  input_tokens: 1,
-  cached_input_tokens: 0,
-  output_tokens: 1,
-  reasoning_output_tokens: 0
-} as const;
+) => Promise<{ items: []; usage: null; finalResponse: string }>;
 
 const createTicketUpdateCodexClient = (
   threadId: string,
-  runStreamed: TicketUpdateRunStreamedMock,
+  run: TicketUpdateRunMock,
   onStartThread?: (options: TicketUpdateThreadOptions) => void
 ): TicketUpdateCodexClient => ({
   startThread: (options) => {
     onStartThread?.(options);
     return {
       id: threadId,
-      runStreamed: (input, runOptions) => {
+      run: async (input, runOptions) => {
         if (typeof input !== "string") throw new TypeError("Ticket update tests expect string prompts.");
         if (!runOptions?.signal) throw new TypeError("Ticket update tests expect an AbortSignal.");
-        return runStreamed(input, { ...runOptions, signal: runOptions.signal });
+        return run(input, { ...runOptions, signal: runOptions.signal });
       }
     };
   }
 });
 
-const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
+const waitFor = async (predicate: () => boolean | Promise<boolean>, label: string): Promise<void> => {
   const deadline = Date.now() + 1000;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail(`Timed out waiting for ${label}`);
@@ -124,17 +120,12 @@ test("ticket update run uses a strict structured-output schema for patch fields"
     createCodexClient: () =>
       createTicketUpdateCodexClient("thread_ticket_update_schema", async (_prompt, options) => {
         outputSchema = options.outputSchema;
-        return {
-          events: (async function*() {
-            yield { type: "thread.started", thread_id: "thread_ticket_update_schema" };
-            yield { type: "item.completed", item: { id: "msg_ticket_update_schema", type: "agent_message", text: updateJson() } };
-            yield { type: "turn.completed", usage: codexUsage };
-          })()
-        };
+        return { items: [], usage: null, finalResponse: updateJson() };
       })
   };
 
   await startTicketUpdateRun({ projectPath, ticketId: ticket.frontMatter.id, request: "Refine the ticket." }, dependencies);
+  await waitFor(() => Boolean(outputSchema), "ticket update schema capture");
 
   assertStrictSchemaRequiresAllProperties(outputSchema);
   assert.ok(((outputSchema as { required?: string[] }).required ?? []).includes("plannedFiles"));
@@ -173,13 +164,7 @@ test("ticket update agent applies validated structured output and preserves unre
         async (prompt, options) => {
           capturedPrompt = prompt;
           assert.equal(options.signal?.aborted, false);
-          return {
-            events: (async function* () {
-              yield { type: "thread.started", thread_id: "thread_ticket_update_success" };
-              yield { type: "item.completed", item: { id: "msg_ticket_update_success", type: "agent_message", text: updateJson() } };
-              yield { type: "turn.completed", usage: codexUsage };
-            })()
-          };
+          return { items: [], usage: null, finalResponse: updateJson() };
         },
         (options) => {
           capturedOptions = options;
@@ -235,14 +220,9 @@ test("ticket update agent leaves the ticket unchanged when output validation fai
     createRunId: () => "run_ticket_update_invalid",
     createCodexClient: () =>
       createTicketUpdateCodexClient("thread_ticket_update_invalid", async () => ({
-        events: (async function* () {
-          yield { type: "thread.started", thread_id: "thread_ticket_update_invalid" };
-          yield {
-            type: "item.completed",
-            item: { id: "msg_ticket_update_invalid", type: "agent_message", text: updateJson({ title: "" }) }
-          };
-          yield { type: "turn.completed", usage: codexUsage };
-        })()
+        items: [],
+        usage: null,
+        finalResponse: updateJson({ title: "" })
       }))
   };
 
@@ -254,6 +234,59 @@ test("ticket update agent leaves the ticket unchanged when output validation fai
   assert.equal(unchanged.markdown, original.markdown);
   assert.deepEqual(await readClarificationQuestions(projectPath, ticket.frontMatter.id), []);
   assert.match(events.find((event) => event.type === "run.failed")?.message ?? "", /invalid/i);
+});
+
+test("ticket update runs use the provider selected when work starts", async () => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Provider-selected update",
+    priority: "medium",
+    labels: ["original"],
+    markdown: "# Provider-selected update\n"
+  });
+  let selectedProviderId: "cursor" | "claude" = "cursor";
+  let capturedProviderId = "";
+  const dependencies: TicketUpdateDependencies = {
+    createRunId: () => "run_ticket_update_provider_selected",
+    readSelectedProviderId: async () => selectedProviderId,
+    createAgentProvider: async (providerId) => {
+      capturedProviderId = providerId;
+      return {
+        providerId,
+        runStructured: async <T = unknown>() =>
+          ({
+            providerId,
+            rawResponse: updateJson(),
+            output: JSON.parse(updateJson()) as T,
+            providerSessionRef: { providerId, externalId: `${providerId}-session-1` }
+          }),
+        runText: async () => {
+          throw new Error("repository chat is not part of this test");
+        }
+      };
+    }
+  };
+
+  const started = await startTicketUpdateRun(
+    { projectPath, ticketId: ticket.frontMatter.id, request: "Refine this ticket." },
+    dependencies
+  );
+  selectedProviderId = "claude";
+  await waitFor(
+    async () =>
+      (
+        await runBackendEffect(
+          Effect.provide(WorkEngine.use((engine) => engine.findByRunId(projectPath, started.runId)), BackendWorkLive)
+        )
+      )?.currentAttempt?.providerId === "cursor",
+    "provider-selected update work provider"
+  );
+  const snapshot = await runBackendEffect(
+    Effect.provide(WorkEngine.use((engine) => engine.findByRunId(projectPath, started.runId)), BackendWorkLive)
+  );
+
+  assert.equal(capturedProviderId, "cursor");
+  assert.equal(snapshot?.currentAttempt?.providerId, "cursor");
 });
 
 test("scope recovery ticket updates include approved paths and persist merged plannedFiles on the same task", async () => {
@@ -300,27 +333,18 @@ Current planned scope:
       createTicketUpdateCodexClient("thread_ticket_update_scope_recovery", async (prompt) => {
         capturedPrompt = prompt;
         return {
-          events: (async function*() {
-            yield { type: "thread.started", thread_id: "thread_ticket_update_scope_recovery" };
-            yield {
-              type: "item.completed",
-              item: {
-                id: "msg_ticket_update_scope_recovery",
-                type: "agent_message",
-                text: updateJson({
-                  authoringState: "ready",
-                  plannedFiles: ["src/http/resources/tickets.ts", "src/shared/plannedScope.ts"],
-                  clarificationQuestions: [],
-                  patch: {
-                    summary: "Merged approved scope.",
-                    appendMarkdown: "## Implementation Plan\n\n- [ ] Expand planned scope safely.\n",
-                    fullMarkdown: null
-                  }
-                })
-              }
-            };
-            yield { type: "turn.completed", usage: codexUsage };
-          })()
+          items: [],
+          usage: null,
+          finalResponse: updateJson({
+            authoringState: "ready",
+            plannedFiles: ["src/http/resources/tickets.ts", "src/shared/plannedScope.ts"],
+            clarificationQuestions: [],
+            patch: {
+              summary: "Merged approved scope.",
+              appendMarkdown: "## Implementation Plan\n\n- [ ] Expand planned scope safely.\n",
+              fullMarkdown: null
+            }
+          })
         };
       })
   };
@@ -384,27 +408,18 @@ Current planned scope:
     createRunId: () => "run_ticket_update_scope_invalid",
     createCodexClient: () =>
       createTicketUpdateCodexClient("thread_ticket_update_scope_invalid", async () => ({
-        events: (async function*() {
-          yield { type: "thread.started", thread_id: "thread_ticket_update_scope_invalid" };
-          yield {
-            type: "item.completed",
-            item: {
-              id: "msg_ticket_update_scope_invalid",
-              type: "agent_message",
-              text: updateJson({
-                authoringState: "ready",
-                plannedFiles: [],
-                clarificationQuestions: [],
-                patch: {
-                  summary: "Tried to clear scope.",
-                  appendMarkdown: "## Notes\n\nInvalid scope.\n",
-                  fullMarkdown: null
-                }
-              })
-            }
-          };
-          yield { type: "turn.completed", usage: codexUsage };
-        })()
+        items: [],
+        usage: null,
+        finalResponse: updateJson({
+          authoringState: "ready",
+          plannedFiles: [],
+          clarificationQuestions: [],
+          patch: {
+            summary: "Tried to clear scope.",
+            appendMarkdown: "## Notes\n\nInvalid scope.\n",
+            fullMarkdown: null
+          }
+        })
       }))
   };
 
@@ -422,6 +437,119 @@ Current planned scope:
   assert.match(events.find((event) => event.type === "run.failed")?.message ?? "", /non-empty planned file scope/i);
 });
 
+test("archive ticket update persists lean fullMarkdown, summary, and archive status", async () => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Completed archive target",
+    priority: "medium",
+    labels: ["done"],
+    status: "completed",
+    markdown: `# Completed archive target
+
+## Context
+
+Verbose context that should be trimmed during archive.
+
+## Goal
+
+Ship the archive flow.
+
+## Requirements
+
+- Preserve lean requirements bullets
+
+## Acceptance Criteria
+
+- Archive lands in the archive column
+`
+  });
+  const { runEventSink, events } = createFakeRunEventSink();
+  let capturedPrompt = "";
+
+  const dependencies: TicketUpdateDependencies = {
+    runEventSink,
+    createRunId: () => "run_ticket_update_archive_success",
+    createCodexClient: () =>
+      createTicketUpdateCodexClient("thread_ticket_update_archive_success", async (prompt) => {
+        capturedPrompt = prompt;
+        return {
+          items: [],
+          usage: null,
+          finalResponse: updateJson({
+            authoringState: "ready",
+            clarificationQuestions: [],
+            patch: {
+              summary: "Lean archived summary for the completed task.",
+              fullMarkdown: "# Completed archive target\n\n## Requirements\n\n- Preserve lean requirements bullets\n\n## Acceptance Criteria\n\n- Archive lands in the archive column\n",
+              appendMarkdown: null
+            }
+          })
+        };
+      })
+  };
+
+  await startTicketUpdateRun(
+    {
+      projectPath,
+      ticketId: ticket.frontMatter.id,
+      request: "Archive this completed ticket with a lean summary.",
+      purpose: "archive"
+    },
+    dependencies
+  );
+  await waitFor(() => events.some((event) => event.type === "run.completed"), "archive ticket update completion");
+
+  const updated = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.match(capturedPrompt, /archiving one completed Relay ticket/i);
+  assert.match(capturedPrompt, /patch\.fullMarkdown: REQUIRED/i);
+  assert.match(capturedPrompt, /Remove Context and Goal sections entirely/i);
+  assert.equal(updated.frontMatter.status, "archive");
+  assert.equal(updated.frontMatter.summary, "Lean archived summary for the completed task.");
+  assert.doesNotMatch(updated.markdown, /## Context/);
+  assert.match(updated.markdown, /## Requirements/);
+  assert.match(updated.markdown, /## Acceptance Criteria/);
+  assert.deepEqual(await readClarificationQuestions(projectPath, ticket.frontMatter.id), []);
+});
+
+test("archive ticket updates reject non-completed tickets before the agent runs", async () => {
+  const projectPath = await createProject();
+  const ticket = await createTicket(projectPath, {
+    title: "Todo archive guard",
+    priority: "low",
+    labels: [],
+    markdown: "# Todo archive guard\n",
+    status: "todo"
+  });
+  const { runEventSink, events } = createFakeRunEventSink();
+  let agentStarted = false;
+  const dependencies: TicketUpdateDependencies = {
+    runEventSink,
+    createRunId: () => "run_ticket_update_archive_reject",
+    createCodexClient: () =>
+      createTicketUpdateCodexClient("thread_ticket_update_archive_reject", async () => {
+        agentStarted = true;
+        return { items: [], usage: null, finalResponse: updateJson() };
+      })
+  };
+
+  await assert.rejects(
+    startTicketUpdateRun(
+      {
+        projectPath,
+        ticketId: ticket.frontMatter.id,
+        request: "Archive this ticket.",
+        purpose: "archive"
+      },
+      dependencies
+    ),
+    /Only completed tickets can be archived/
+  );
+
+  assert.equal(agentStarted, false);
+  assert.equal(events.some((event) => event.type === "run.completed"), false);
+  assert.equal((await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.status, "todo");
+});
+
 test("ticket update agent prevents duplicate active runs for the same ticket", async () => {
   const projectPath = await createProject();
   const ticket = await createTicket(projectPath, {
@@ -434,15 +562,12 @@ test("ticket update agent prevents duplicate active runs for the same ticket", a
   const dependencies: TicketUpdateDependencies = {
     runEventSink,
     createRunId: () => "run_ticket_update_duplicate",
-    createCodexClient: () =>
-      createTicketUpdateCodexClient("thread_ticket_update_duplicate", async (_prompt, options) => ({
-        events: (async function* () {
-          yield { type: "thread.started", thread_id: "thread_ticket_update_duplicate" };
-          await new Promise<never>((_resolve, reject) => {
-            options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-          });
-        })()
-      }))
+    createCodexClient: () => createTicketUpdateCodexClient("thread_ticket_update_duplicate", async (_prompt, options) => {
+      await new Promise<never>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+      return { items: [], usage: null, finalResponse: updateJson() };
+    })
   };
 
   await startTicketUpdateRun({ projectPath, ticketId: ticket.frontMatter.id, request: "Keep running." }, dependencies);
@@ -452,5 +577,13 @@ test("ticket update agent prevents duplicate active runs for the same ticket", a
   );
 
   await cancelTicketUpdateRun("run_ticket_update_duplicate");
-  await waitFor(() => events.some((event) => event.type === "run.failed"), "ticket update cancellation");
+  await waitFor(
+    async () =>
+      (
+        await runBackendEffect(
+          Effect.provide(WorkEngine.use((engine) => engine.findByRunId(projectPath, "run_ticket_update_duplicate")), BackendWorkLive)
+        )
+      )?.status === "cancelled",
+    "ticket update cancellation"
+  );
 });

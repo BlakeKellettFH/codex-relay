@@ -1,3 +1,4 @@
+import { Schema } from "effect";
 import {
   agentTicketUpdateInputSchema,
   agentTicketUpdateStartResultSchema,
@@ -23,6 +24,19 @@ import {
   ticketSaveInputSchema
 } from "../schemas";
 import { arrayOf, defineEndpoint } from "./contract";
+
+export const ticketArchiveInputSchema = Schema.Struct({
+  projectPath: Schema.String,
+  ticketId: Schema.optional(Schema.String),
+  ticketIds: Schema.optional(Schema.Array(Schema.String))
+});
+export type TicketArchiveInput = typeof ticketArchiveInputSchema.Type;
+
+export const ticketArchiveResultSchema = Schema.Struct({
+  ticket: ticketRecordSchema,
+  board: boardSnapshotSchema
+});
+export type TicketArchiveResult = typeof ticketArchiveResultSchema.Type;
 import {
   cancelTicketUpdateRequestSchema,
   createManualTicketRequestSchema,
@@ -137,6 +151,12 @@ export const ticketEndpoints = {
     path: "/api/tickets/move",
     request: { location: "body", schema: ticketMoveInputSchema },
     response: boardSnapshotSchema
+  }),
+  archive: defineEndpoint({
+    method: "POST",
+    path: "/api/tickets/archive",
+    request: { location: "body", schema: ticketArchiveInputSchema },
+    response: ticketArchiveResultSchema
   }),
   clarifications: defineEndpoint({
     method: "GET",

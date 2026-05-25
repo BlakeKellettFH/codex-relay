@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "workerSlots": 3,
+  "interactiveSlots": 1,
+  "baseBranch": "main",
+  "defaultRemote": "origin",
+  "worktreeParent": "..",
+  "worktreeNameTemplate": "{repo}-{ticketRef}",
+  "branchNameTemplate": "agent/{ticketRef}-{slug}",
+  "reviewSummaryPathTemplate": ".relay/reviews/{ticketId}.md",
+  "mergeQueue": {
+    "strategy": "rebase",
+    "testCommand": "npm test -- --runInBand",
+    "worktreeNameTemplate": "{repo}-merge-{ticketRef}",
+    "createClarificationOnConflict": true,
+    "pushAfterMerge": false
+  }
+}

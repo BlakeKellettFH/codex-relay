@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ksf081dv4x7kqhm891p1erpx",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ksf03k156jwpq2s0avhvw37h",
+  "runId": "run_01ksf081dv4x7kqhm891p1erpx",
+  "subject": "ticket",
+  "action": "implement",
+  "kind": "ticket.implementation",
+  "idempotencyKey": "ticket.implementation:/Users/blakekellett/repos/codex-relay:tkt_01ksf03k156jwpq2s0avhvw37h:run_01ksf081dv4x7kqhm891p1erpx",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-25T07:23:02.464Z",
+  "updatedAt": "2026-05-25T07:34:31.979Z",
+  "lastAppliedEventSequence": 6,
+  "executor": "agent",
+  "providerId": "cursor",
+  "requiredCapabilities": [
+    "agent.code-edit",
+    "agent.resume"
+  ],
+  "providerSessionRef": {
+    "providerId": "cursor",
+    "externalId": "89897388-0b52-42e8-bc62-239b0c3de809",
+    "parts": {
+      "sessionId": "89897388-0b52-42e8-bc62-239b0c3de809"
+    }
+  },
+  "currentAttempt": {
+    "attemptId": "attempt_01ksf0nr81780sah1axryewbvm",
+    "leaseToken": "lease_01ksf0nr816ag0bwrfwpqzpd44",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-25T07:30:31.809Z",
+    "heartbeatAt": "2026-05-25T07:30:35.104Z",
+    "startedAt": "2026-05-25T07:30:31.890Z",
+    "providerSessionRef": {
+      "providerId": "cursor",
+      "externalId": "89897388-0b52-42e8-bc62-239b0c3de809",
+      "parts": {
+        "sessionId": "89897388-0b52-42e8-bc62-239b0c3de809"
+      }
+    }
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ksf03k156jwpq2s0avhvw37h",
+    "freshThread": false,
+    "resume": false,
+    "runId": "run_01ksf081dv4x7kqhm891p1erpx"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "resume": false,
+    "executor": "agent",
+    "providerSessionRef": {
+      "providerId": "cursor",
+      "externalId": "89897388-0b52-42e8-bc62-239b0c3de809",
+      "parts": {
+        "sessionId": "89897388-0b52-42e8-bc62-239b0c3de809"
+      }
+    }
+  },
+  "message": "cursor implementation completed.",
+  "result": {
+    "ticketId": "tkt_01ksf03k156jwpq2s0avhvw37h",
+    "threadId": "cursor::89897388-0b52-42e8-bc62-239b0c3de809"
+  }
+}

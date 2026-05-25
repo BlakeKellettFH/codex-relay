@@ -4,7 +4,7 @@ import { ConfigProvider, Effect, Layer, ManagedRuntime, Sink, Stream } from "eff
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { access, appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { CodexOptions, Input, ThreadOptions } from "@openai/codex-sdk";
@@ -27,10 +27,15 @@ import {
   type CodexRunDependencies,
   type CreateCodexDependencies,
   type RepositoryChatCodexClient,
+  type RepositoryChatStreamEvent,
   type RepositoryChatThread,
   type TicketDraftStartDependencies
 } from "../src/services/codex";
 import { resolveAvailableCodexCli, runCodexVersionEffect, type CodexCliCandidate } from "../src/services/codex/cli";
+import { createClaudeAgentProvider } from "../src/services/agents/claudeProvider";
+import { createCursorAgentProvider } from "../src/services/agents/cursorProvider";
+import { configureLocalVoiceInput, readLocalVoiceInputStatus, transcribeLocalVoiceInput } from "../src/services/agents/localVoiceInput";
+import { readAgentProviderInventory, switchAgentProviderSelection } from "../src/services/registry";
 import {
   BackendWorkLive,
   markWorkRunStatus,
@@ -45,7 +50,7 @@ import {
 import { BackendClock } from "../src/platform";
 import { BackendConfig, BackendConfigDefaults, loadBackendConfig } from "../src/config/AppConfig";
 import { runBackendEffect } from "../src/runtime";
-import type { HierarchyDraftPlan } from "../src/shared/schemas";
+import type { AppRegistry, HierarchyDraftPlan } from "../src/shared/schemas";
 import {
   answerClarificationQuestion,
   createClarificationQuestions,
@@ -745,6 +750,12 @@ type RepositoryChatRunResult = Awaited<ReturnType<RepositoryChatThread["run"]>>;
 
 test("repository chat starts a read-only thread with project and board context", async () => {
   const projectPath = await createProject();
+  await mkdir(path.join(projectPath, ".relay", "context"), { recursive: true });
+  await writeFile(
+    path.join(projectPath, ".relay", "context", "chat.md"),
+    "Keep repository chat brief and focused on the exact question.",
+    "utf8"
+  );
   const config = await readProjectConfig(projectPath);
   await writeProjectConfig(projectPath, {
     ...config,
@@ -798,28 +809,32 @@ test("repository chat starts a read-only thread with project and board context",
 
   assert.equal(startCalls, 1);
   assert.deepEqual(response, {
-    threadId: "thread_repository_chat",
+    threadId: "codex::thread_repository_chat",
     message: "The shortcut docs should cover arrow and J/K navigation."
   });
   const options = capturedOptions[0];
   assert.equal(options.workingDirectory, projectPath);
   assert.equal(options.model, "gpt-chat-test");
-  assert.equal(options.modelReasoningEffort, "high");
+  assert.equal(options.modelReasoningEffort, "low");
   assert.equal(options.approvalPolicy, "never");
   assert.equal(options.sandboxMode, "read-only");
   assert.equal(options.networkAccessEnabled, false);
   assert.equal(options.webSearchMode, "disabled");
   assert.equal(options.skipGitRepoCheck, true);
   assert.deepEqual(options.additionalDirectories, [path.join(projectPath, "packages")]);
+  assert.match(capturedPrompt, /Repository chat rules \(from \.relay\/context\/chat\.md\):/);
+  assert.match(capturedPrompt, /Keep repository chat brief and focused on the exact question/);
+  assert.match(capturedPrompt, /Treat this like a fast back-and-forth chat, not a report/);
+  assert.match(capturedPrompt, /Start with the answer, not with process narration/);
   assert.match(capturedPrompt, /Project path:/);
   assert.match(capturedPrompt, /Repository Chat Fixture/);
   assert.match(capturedPrompt, /Workflow columns: Todo, Ready, In Progress/);
+  assert.match(capturedPrompt, /Board summary: 1 total ticket\(s\)\./);
+  assert.match(capturedPrompt, /Active tickets:/);
   assert.match(capturedPrompt, /Document board shortcuts/);
-  assert.match(capturedPrompt, /status: Todo/);
-  assert.match(capturedPrompt, /Explain the keyboard flow for board navigation/);
   assert.match(capturedPrompt, /Do not create, edit, move, rename, or delete files/);
   assert.match(capturedPrompt, /Do not create, edit, move, rename, or delete Relay tickets or board cards/);
-  assert.match(capturedPrompt, /Network access and web search are disabled/);
+  assert.match(capturedPrompt, /Keep the response short and useful/);
   assert.match(capturedPrompt, /Where should shortcut docs go/);
 });
 
@@ -860,14 +875,14 @@ test("repository chat resumes an existing thread without mutating board state", 
   };
 
   const response = await sendRepositoryChatMessage(
-    { projectPath, message: "What changed since my last question?", threadId: "thread_existing_chat" },
+    { projectPath, message: "What changed since my last question?", threadId: "codex::thread_existing_chat" },
     dependencies
   );
   const boardAfter = await readBoard(projectPath);
 
   assert.equal(resumeCalls, 1);
   assert.equal(resumedThreadId, "thread_existing_chat");
-  assert.deepEqual(response, { threadId: "thread_existing_chat", message: "No board state changes are needed." });
+  assert.deepEqual(response, { threadId: "codex::thread_existing_chat", message: "No board state changes are needed." });
   assert.deepEqual(boardAfter, boardBefore);
 });
 
@@ -897,6 +912,818 @@ test("repository chat rejects and aborts when the Codex turn never settles", asy
     /Repository chat timed out after 5ms\./
   );
   assert.equal(runSignal?.aborted, true);
+});
+
+test("repository chat resumes the provider encoded in the session id instead of the current selection", async () => {
+  const projectPath = await createProject();
+  const calls: string[] = [];
+  const dependencies = {
+    selectedProviderId: "cursor" as const,
+    createAgentProvider: async (providerId: "codex" | "cursor" | "claude") => ({
+      providerId,
+      runStructured: async () => {
+        throw new Error("structured work should not be used for repository chat");
+      },
+      runText: async (request: { providerSessionRef?: { externalId?: string | null } | null }) => {
+        calls.push(`${providerId}:${request.providerSessionRef?.externalId ?? "new"}`);
+        return {
+          providerId,
+          text: request.providerSessionRef?.externalId ? "Resumed in Cursor." : "Started in Cursor.",
+          rawResponse: providerId,
+          providerSessionRef: {
+            providerId,
+            externalId: request.providerSessionRef?.externalId ?? "cursor-session-1"
+          }
+        };
+      }
+    })
+  };
+
+  const started = await sendRepositoryChatMessage({ projectPath, message: "Start a chat." }, dependencies);
+  const resumed = await sendRepositoryChatMessage(
+    { projectPath, message: "Resume the same chat.", threadId: started.threadId },
+    { ...dependencies, selectedProviderId: "claude" }
+  );
+
+  assert.deepEqual(calls, ["cursor:new", "cursor:cursor-session-1"]);
+  assert.equal(started.threadId, "cursor::cursor-session-1");
+  assert.equal(resumed.threadId, "cursor::cursor-session-1");
+  assert.equal(resumed.message, "Resumed in Cursor.");
+});
+
+test("repository chat streams delta events before the final response completes for codex-style chat streaming", async () => {
+  const projectPath = await createProject();
+  const streamedEvents: RepositoryChatStreamEvent[] = [];
+  let releaseCompleted!: () => void;
+  const completedGate = new Promise<void>((resolve) => {
+    releaseCompleted = resolve;
+  });
+
+  const responsePromise = sendRepositoryChatMessage(
+    { projectPath, message: "Where is the repository chat prompt built?", requestId: "rch_stream" },
+    {
+      selectedProviderId: "codex",
+      getStatus: async () => readyCodexStatus,
+      createAgentProvider: async (providerId) => ({
+        providerId,
+        runStructured: async () => {
+          throw new Error("structured work should not be used for repository chat");
+        },
+        runText: async () => {
+          throw new Error("buffered text execution should not be used for streaming repository chat");
+        },
+        runTextStream: async () => ({
+          providerId,
+          events: (async function*() {
+            yield {
+              rawEvent: { type: "message.delta", text: "The prompt is built in " },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session" }
+            };
+            yield {
+              rawEvent: { type: "message.delta", text: "`src/services/codex/index.ts`." },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session" }
+            };
+            await completedGate;
+          })(),
+          completed: (async () => {
+            await completedGate;
+            return {
+              providerId,
+              text: "The prompt is built in `src/services/codex/index.ts`.",
+              rawResponse: "",
+              providerSessionRef: { providerId, externalId: "cursor-chat-session" }
+            };
+          })()
+        })
+      }),
+      onStreamEvent: (event) => {
+        streamedEvents.push(event);
+      }
+    }
+  );
+
+  await waitForAsync(
+    async () => streamedEvents.some((event) => event.type === "delta" && event.text.includes("built in")),
+    "repository chat delta"
+  );
+  assert.equal(streamedEvents.some((event) => event.type === "completed"), false);
+
+  releaseCompleted();
+
+  const response = await responsePromise;
+  assert.deepEqual(response, {
+    threadId: "codex::cursor-chat-session",
+    message: "The prompt is built in `src/services/codex/index.ts`."
+  });
+  assert.deepEqual(
+    streamedEvents.map((event) => event.type),
+    ["started", "delta", "delta", "completed"]
+  );
+});
+
+test("repository chat streams cursor-like answer text from message.completed when no deltas arrive", async () => {
+  const projectPath = await createProject();
+  const streamedEvents: RepositoryChatStreamEvent[] = [];
+  let releaseCompleted!: () => void;
+  const completedGate = new Promise<void>((resolve) => {
+    releaseCompleted = resolve;
+  });
+  const answer = "The repository chat prompt is assembled in `src/services/codex/index.ts`.";
+
+  const responsePromise = sendRepositoryChatMessage(
+    { projectPath, message: "Where is the repository chat prompt built?", requestId: "rch_stream_completed" },
+    {
+      selectedProviderId: "cursor",
+      createAgentProvider: async (providerId) => ({
+        providerId,
+        runStructured: async () => {
+          throw new Error("structured work should not be used for repository chat");
+        },
+        runText: async () => {
+          throw new Error("buffered text execution should not be used for streaming repository chat");
+        },
+        runTextStream: async () => ({
+          providerId,
+          events: (async function*() {
+            yield {
+              rawEvent: { type: "command.started", command: "rg repository chat" },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-2" }
+            };
+            yield {
+              rawEvent: { type: "message.completed", message: answer },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-2" }
+            };
+            await completedGate;
+          })(),
+          completed: (async () => {
+            await completedGate;
+            return {
+              providerId,
+              text: answer,
+              rawResponse: "",
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-2" }
+            };
+          })()
+        })
+      }),
+      onStreamEvent: (event) => {
+        streamedEvents.push(event);
+      }
+    }
+  );
+
+  await waitForAsync(
+    async () => streamedEvents.some((event) => event.type === "delta" && event.text.includes("assembled in")),
+    "repository chat completed delta"
+  );
+  assert.equal(streamedEvents.some((event) => event.type === "completed"), false);
+
+  releaseCompleted();
+
+  const response = await responsePromise;
+  assert.deepEqual(response, {
+    threadId: "cursor::cursor-chat-session-2",
+    message: answer
+  });
+  assert.deepEqual(
+    streamedEvents.map((event) => event.type),
+    ["started", "delta", "completed"]
+  );
+});
+
+test("repository chat streams cursor-like answer text from a terminal result event", async () => {
+  const projectPath = await createProject();
+  const streamedEvents: RepositoryChatStreamEvent[] = [];
+  const answer = "Relay stores project context under `.relay/context/`.";
+
+  const response = await sendRepositoryChatMessage(
+    { projectPath, message: "Where does Relay store project context?", requestId: "rch_stream_result" },
+    {
+      selectedProviderId: "cursor",
+      createAgentProvider: async (providerId) => ({
+        providerId,
+        runStructured: async () => {
+          throw new Error("structured work should not be used for repository chat");
+        },
+        runText: async () => {
+          throw new Error("buffered text execution should not be used for streaming repository chat");
+        },
+        runTextStream: async () => ({
+          providerId,
+          events: (async function*() {
+            yield {
+              rawEvent: { type: "command.output", stdout: "scanning files\n" },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-3" }
+            };
+            yield {
+              rawEvent: { type: "result", subtype: "success", result: answer, session_id: "cursor-chat-session-3" },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-3" }
+            };
+          })(),
+          completed: Promise.resolve({
+            providerId,
+            text: answer,
+            rawResponse: "",
+            providerSessionRef: { providerId, externalId: "cursor-chat-session-3" }
+          })
+        })
+      }),
+      onStreamEvent: (event) => {
+        streamedEvents.push(event);
+      }
+    }
+  );
+
+  assert.deepEqual(response, {
+    threadId: "cursor::cursor-chat-session-3",
+    message: answer
+  });
+  assert.deepEqual(
+    streamedEvents.map((event) => event.type),
+    ["started", "delta", "completed"]
+  );
+  assert.equal(streamedEvents.find((event) => event.type === "delta")?.text, answer);
+});
+
+test("repository chat ignores cursor-like fragment progress and keeps only the lean final answer", async () => {
+  const projectPath = await createProject();
+  const streamedEvents: RepositoryChatStreamEvent[] = [];
+  const answer = "Hey. What do you want to look at?";
+
+  const response = await sendRepositoryChatMessage(
+    { projectPath, message: "hey relay", requestId: "rch_stream_greeting" },
+    {
+      selectedProviderId: "cursor",
+      createAgentProvider: async (providerId) => ({
+        providerId,
+        runStructured: async () => {
+          throw new Error("structured work should not be used for repository chat");
+        },
+        runText: async () => {
+          throw new Error("buffered text execution should not be used for streaming repository chat");
+        },
+        runTextStream: async () => ({
+          providerId,
+          events: (async function*() {
+            yield {
+              rawEvent: { type: "message.delta", text: 'The user greeted "hey relay" in the repository chat.' },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-4" }
+            };
+            yield {
+              rawEvent: { type: "message.completed", message: answer },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-4" }
+            };
+          })(),
+          completed: Promise.resolve({
+            providerId,
+            text: answer,
+            rawResponse: "",
+            providerSessionRef: { providerId, externalId: "cursor-chat-session-4" }
+          })
+        })
+      }),
+      onStreamEvent: (event) => {
+        streamedEvents.push(event);
+      }
+    }
+  );
+
+  assert.deepEqual(response, {
+    threadId: "cursor::cursor-chat-session-4",
+    message: answer
+  });
+  assert.deepEqual(
+    streamedEvents.map((event) => event.type),
+    ["started", "delta", "completed"]
+  );
+  assert.equal(streamedEvents.find((event) => event.type === "delta")?.text, answer);
+});
+
+test("repository chat allows cursor answer deltas while suppressing process narration", async () => {
+  const projectPath = await createProject();
+  const streamedEvents: RepositoryChatStreamEvent[] = [];
+
+  const response = await sendRepositoryChatMessage(
+    { projectPath, message: "Why is typing noisy?", requestId: "rch_stream_cursor_delta" },
+    {
+      selectedProviderId: "cursor",
+      createAgentProvider: async (providerId) => ({
+        providerId,
+        runStructured: async () => {
+          throw new Error("structured work should not be used for repository chat");
+        },
+        runText: async () => {
+          throw new Error("buffered text execution should not be used for streaming repository chat");
+        },
+        runTextStream: async () => ({
+          providerId,
+          events: (async function*() {
+            yield {
+              rawEvent: { type: "message.delta", text: "The user reports noisy typing logs." },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-5" }
+            };
+            yield {
+              rawEvent: { type: "message.delta", text: "It autosaves the draft while you type." },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-5" }
+            };
+            yield {
+              rawEvent: { type: "message.completed", message: "It autosaves the draft while you type." },
+              providerSessionRef: { providerId, externalId: "cursor-chat-session-5" }
+            };
+          })(),
+          completed: Promise.resolve({
+            providerId,
+            text: "It autosaves the draft while you type.",
+            rawResponse: "",
+            providerSessionRef: { providerId, externalId: "cursor-chat-session-5" }
+          })
+        })
+      }),
+      onStreamEvent: (event) => {
+        streamedEvents.push(event);
+      }
+    }
+  );
+
+  assert.deepEqual(response, {
+    threadId: "cursor::cursor-chat-session-5",
+    message: "It autosaves the draft while you type."
+  });
+  assert.deepEqual(
+    streamedEvents.map((event) => event.type),
+    ["started", "delta", "completed"]
+  );
+  assert.equal(streamedEvents.find((event) => event.type === "delta")?.text, "It autosaves the draft while you type.");
+});
+
+test("cursor structured provider parses plain stdout JSON and captures a session id", async () => {
+  const provider = createCursorAgentProvider({
+    command: "cursor-agent",
+    runCommand: async () => ({
+      stdout: JSON.stringify({
+        sessionId: "cursor-session-7",
+        output: { draftState: "ready", summary: "ok" }
+      }),
+      stderr: ""
+    })
+  });
+
+  const result = await provider.runStructured<{ draftState: string; summary: string }>({
+    kind: "ticket.draft",
+    projectPath: "/tmp/project",
+    prompt: "Draft this.",
+    outputSchema: {},
+    mode: "read_only"
+  });
+
+  assert.equal(result.providerId, "cursor");
+  assert.equal(result.output.draftState, "ready");
+  assert.equal(result.providerSessionRef?.externalId, "cursor-session-7");
+});
+
+test("claude structured provider surfaces an actionable stream-json parsing error", async () => {
+  const provider = createClaudeAgentProvider({
+    runCommand: async () => ({
+      stdout: "not-json\n",
+      stderr: ""
+    })
+  });
+
+  await assert.rejects(
+    provider.runStructured({
+      kind: "ticket.update",
+      projectPath: "/tmp/project",
+      prompt: "Update this.",
+      outputSchema: {},
+      mode: "read_only"
+    }),
+    /stream-json/
+  );
+});
+
+test("queued implementation work resumes on its stored provider after selection changes", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const firstTicket = await createImplementationTicket(projectPath, {
+    title: "Provider continuity first",
+    priority: "medium",
+    labels: ["provider"],
+    markdown: "# Provider continuity first\n"
+  });
+  const secondTicket = await createImplementationTicket(projectPath, {
+    title: "Provider continuity second",
+    priority: "medium",
+    labels: ["provider"],
+    markdown: "# Provider continuity second\n"
+  });
+  const { runEventSink, events } = createFakeRunEventSink();
+  const gate = deferred();
+  let selectedProviderId: "cursor" | "claude" = "cursor";
+  const providerCalls: string[] = [];
+
+  await startCodexRun(
+    { projectPath, ticketId: firstTicket.frontMatter.id },
+    {
+      runEventSink,
+      createRunId: () => "run_provider_continuity_first",
+      createCodexClient: () =>
+        ({
+          startThread: () => ({
+            id: "thread_provider_continuity_first",
+            runStreamed: async () => ({
+              events: (async function*() {
+                yield { type: "thread.started", thread_id: "thread_provider_continuity_first" };
+                await gate.promise;
+                yield { type: "turn.completed" };
+              })()
+            })
+          }),
+          resumeThread: () => {
+            throw new Error("resumeThread should not be used for a fresh run.");
+          }
+        }) as CodexRunDependencies["createCodexClient"] extends () => infer Client ? Client : never
+    }
+  );
+  await waitFor(
+    () => events.some((event) => event.runId === "run_provider_continuity_first" && event.type === "run.started"),
+    "first run start"
+  );
+
+  const queued = await startCodexRun(
+    { projectPath, ticketId: secondTicket.frontMatter.id },
+    {
+      runEventSink,
+      createRunId: () => "run_provider_continuity_second",
+      readSelectedProviderId: async () => selectedProviderId,
+      createAgentProvider: async (providerId: "codex" | "cursor" | "claude") => ({
+        providerId,
+        runStructured: async () => {
+          throw new Error("structured output should not be used for implementation runs");
+        },
+        runText: async () => {
+          providerCalls.push(providerId);
+          return {
+            providerId,
+            text: `Implemented in ${providerId}.`,
+            rawResponse: JSON.stringify({
+              type: "message.completed",
+              message: `Implemented in ${providerId}.`,
+              session_id: `${providerId}-session-queued`
+            }),
+            providerSessionRef: {
+              providerId,
+              externalId: `${providerId}-session-queued`
+            }
+          };
+        }
+      })
+    }
+  );
+  assert.equal(queued.state, "queued");
+  selectedProviderId = "claude";
+
+  gate.resolve();
+  await waitFor(
+    () => events.some((event) => event.runId === "run_provider_continuity_second" && event.type === "run.completed"),
+    "queued run completion"
+  );
+
+  assert.deepEqual(providerCalls, ["cursor"]);
+  const completedTicket = await readTicket(projectPath, secondTicket.frontMatter.id);
+  assert.equal(completedTicket.frontMatter.codexThreadId, "cursor::cursor-session-queued");
+});
+
+test("non-codex implementation runs normalize provider event streams and terminal failures", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const completedTicket = await createImplementationTicket(projectPath, {
+    title: "Normalized provider completion",
+    priority: "high",
+    labels: ["provider"],
+    markdown: "# Normalized provider completion\n"
+  });
+  const failedTicket = await createImplementationTicket(projectPath, {
+    title: "Normalized provider failure",
+    priority: "high",
+    labels: ["provider"],
+    markdown: "# Normalized provider failure\n"
+  });
+  const { runEventSink, events } = createFakeRunEventSink();
+
+  const providerFactory = async (providerId: "codex" | "cursor" | "claude") => ({
+    providerId,
+    runStructured: async () => {
+      throw new Error("structured output should not be used for implementation runs");
+    },
+    runText: async (request: { prompt: string }) => {
+      if (/failure/i.test(request.prompt)) {
+        return {
+          providerId,
+          text: "This should fail.",
+          rawResponse: `${JSON.stringify({ type: "run.failed", message: "Provider stream failed." })}\n`,
+          providerSessionRef: {
+            providerId,
+            externalId: "claude-session-failed"
+          }
+        };
+      }
+      return {
+        providerId,
+        text: "Implementation finished.",
+        rawResponse: [
+          JSON.stringify({ type: "command.started", command: "npm test" }),
+          JSON.stringify({ type: "command.output", stdout: "tests passed\n" }),
+          JSON.stringify({ type: "command.completed", status: "completed" }),
+          JSON.stringify({ type: "file.change", path: "src/main.app.ts", kind: "updated" }),
+          JSON.stringify({ type: "approval.requested", approval_id: "approval_1", kind: "command", payload: { command: "npm test" } }),
+          JSON.stringify({ type: "approval.resolved", approval_id: "approval_1", decision: "approved" }),
+          JSON.stringify({ type: "message.completed", message: "Implementation finished." })
+        ].join("\n"),
+        providerSessionRef: {
+          providerId,
+          externalId: "claude-session-completed"
+        }
+      };
+    }
+  });
+
+  await startCodexRun(
+    { projectPath, ticketId: completedTicket.frontMatter.id },
+    {
+      runEventSink,
+      createRunId: () => "run_provider_normalized_complete",
+      selectedProviderId: "claude",
+      createAgentProvider: providerFactory
+    }
+  );
+  await waitFor(
+    () => events.some((event) => event.runId === "run_provider_normalized_complete" && event.type === "run.completed"),
+    "provider completion"
+  );
+
+  const completedEvents = await readCodexRunEvents(projectPath, completedTicket.frontMatter.id, "run_provider_normalized_complete");
+  assert.equal(completedEvents.some((event) => event.type === "command.started" && event.command === "npm test"), true);
+  assert.equal(completedEvents.some((event) => event.type === "command.output" && /tests passed/.test(event.text)), true);
+  assert.equal(completedEvents.some((event) => event.type === "command.completed" && event.status === "completed"), true);
+  assert.equal(completedEvents.some((event) => event.type === "file.change" && event.path === "src/main.app.ts"), true);
+  assert.equal(completedEvents.some((event) => event.type === "approval.requested" && event.approvalId === "approval_1"), true);
+  assert.equal(completedEvents.some((event) => event.type === "approval.resolved" && event.approvalId === "approval_1"), true);
+  assert.equal(completedEvents.some((event) => event.type === "run.completed" && event.finalStatus === "completed"), true);
+
+  await startCodexRun(
+    { projectPath, ticketId: failedTicket.frontMatter.id },
+    {
+      runEventSink,
+      createRunId: () => "run_provider_normalized_failed",
+      selectedProviderId: "claude",
+      createAgentProvider: providerFactory
+    }
+  );
+  await waitFor(
+    () => events.some((event) => event.runId === "run_provider_normalized_failed" && event.type === "run.failed"),
+    "provider failure"
+  );
+
+  const failedEvents = await readCodexRunEvents(projectPath, failedTicket.frontMatter.id, "run_provider_normalized_failed");
+  assert.equal(failedEvents.some((event) => event.type === "run.failed" && event.message === "Provider stream failed."), true);
+  assert.equal((await readTicket(projectPath, failedTicket.frontMatter.id)).frontMatter.runStatus, "failed");
+});
+
+test("cursor-style streaming providers emit implementation events before the run completes", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Streaming provider progress",
+    priority: "high",
+    labels: ["provider", "streaming"],
+    markdown: "# Streaming provider progress\n"
+  });
+  const { runEventSink, events } = createFakeRunEventSink();
+  const release = deferred<void>();
+
+  const providerFactory = async (providerId: "codex" | "cursor" | "claude") => ({
+    providerId,
+    runStructured: async () => {
+      throw new Error("structured output should not be used for implementation runs");
+    },
+    runText: async () => {
+      throw new Error("buffered text execution should not be used for streaming providers");
+    },
+    runTextStream: async () => {
+      const providerSessionRef = { providerId, externalId: "cursor-session-live" } as const;
+      return {
+        providerId,
+        events: (async function*() {
+          yield {
+            providerSessionRef,
+            rawEvent: { type: "command.started", command: "npm test" }
+          };
+          await release.promise;
+          yield {
+            rawEvent: { type: "command.output", stdout: "tests passed\n" }
+          };
+          yield {
+            rawEvent: { type: "message.completed", message: "Implementation finished." }
+          };
+        })(),
+        completed: (async () => {
+          await release.promise;
+          return {
+            providerId,
+            text: "Implementation finished.",
+            rawResponse: [
+              JSON.stringify({ type: "command.started", command: "npm test" }),
+              JSON.stringify({ type: "command.output", stdout: "tests passed\n" }),
+              JSON.stringify({ type: "message.completed", message: "Implementation finished." })
+            ].join("\n"),
+            providerSessionRef
+          };
+        })()
+      };
+    }
+  });
+
+  await startCodexRun(
+    { projectPath, ticketId: ticket.frontMatter.id },
+    {
+      runEventSink,
+      createRunId: () => "run_provider_streaming_live",
+      selectedProviderId: "cursor",
+      createAgentProvider: providerFactory
+    }
+  );
+
+  await waitFor(
+    () => events.some((event) => event.runId === "run_provider_streaming_live" && event.type === "run.started"),
+    "streaming provider run start"
+  );
+  await waitFor(
+    () => events.some((event) => event.runId === "run_provider_streaming_live" && event.type === "command.started" && event.command === "npm test"),
+    "streaming provider command start"
+  );
+  assert.equal(events.some((event) => event.runId === "run_provider_streaming_live" && event.type === "run.completed"), false);
+
+  release.resolve();
+
+  await waitFor(
+    () => events.some((event) => event.runId === "run_provider_streaming_live" && event.type === "run.completed"),
+    "streaming provider completion"
+  );
+
+  const persistedEvents = await readCodexRunEvents(projectPath, ticket.frontMatter.id, "run_provider_streaming_live");
+  assert.equal(persistedEvents.some((event) => event.type === "command.started" && event.command === "npm test"), true);
+  assert.equal(persistedEvents.some((event) => event.type === "command.output" && /tests passed/.test(event.text)), true);
+  assert.equal(persistedEvents.some((event) => event.type === "run.completed" && event.finalStatus === "completed"), true);
+  assert.equal((await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.codexThreadId, "cursor::cursor-session-live");
+});
+
+test("local voice input status reports ready when whisper.cpp and a model are installed", async () => {
+  const status = await readLocalVoiceInputStatus({
+    runCommand: async () => ({ stdout: "help", stderr: "" }),
+    readEnv: async () => ({ RELAY_WHISPER_MODEL_PATH: "/models/ggml-base.en.bin" }),
+    readHomeDirectory: async () => "/Users/test",
+    readRegistry: async () => ({
+      schemaVersion: 1,
+      projects: [],
+      selectedProviderId: "codex",
+      voiceInput: {
+        whisperCommandPath: null
+      },
+      ui: {
+        lastProjectPath: null,
+        theme: "system"
+      }
+    }),
+    fileExists: async (target) => target === "/models/ggml-base.en.bin"
+  });
+
+  assert.deepEqual(status, {
+    available: true,
+    backend: "whisper.cpp",
+    command: "whisper-cli",
+    configuredCommandPath: null,
+    defaultCommandPath: "~/whisper.cpp/build/bin/whisper-cli",
+    message: "Local whisper.cpp transcription is ready."
+  });
+});
+
+test("local voice input status reports unavailable when whisper is not installed", async () => {
+  const status = await readLocalVoiceInputStatus({
+    runCommand: async () => {
+      const error = new Error("missing");
+      Object.assign(error, { code: "ENOENT" });
+      throw error;
+    },
+    readEnv: async () => ({}),
+    readHomeDirectory: async () => "/Users/test",
+    readRegistry: async () => ({
+      schemaVersion: 1,
+      projects: [],
+      selectedProviderId: "codex",
+      voiceInput: {
+        whisperCommandPath: null
+      },
+      ui: {
+        lastProjectPath: null,
+        theme: "system"
+      }
+    }),
+    fileExists: async () => false
+  });
+
+  assert.deepEqual(status, {
+    available: false,
+    backend: null,
+    command: null,
+    configuredCommandPath: null,
+    defaultCommandPath: "~/whisper.cpp/build/bin/whisper-cli",
+    message: "Local Whisper is not configured yet. Set the whisper.cpp CLI path to enable voice input."
+  });
+});
+
+test("configuring a whisper.cpp command path persists it and resolves the colocated model", async () => {
+  let registry: AppRegistry = {
+    schemaVersion: 1 as const,
+    projects: [],
+    selectedProviderId: "codex" as const,
+    voiceInput: {
+      whisperCommandPath: null
+    },
+    ui: {
+      lastProjectPath: null,
+      theme: "system" as const
+    }
+  };
+
+  const status = await configureLocalVoiceInput(
+    { commandPath: "~/whisper.cpp/build/bin/whisper-cli" },
+    {
+      readRegistry: async () => registry,
+      writeRegistry: async (next) => {
+        registry = next;
+      },
+      runCommand: async () => ({ stdout: "help", stderr: "" }),
+      readEnv: async () => ({}),
+      readHomeDirectory: async () => "/Users/test",
+      fileExists: async (target) =>
+        target === "/Users/test/whisper.cpp/build/bin/whisper-cli" || target === "/Users/test/whisper.cpp/models/ggml-base.en.bin"
+    }
+  );
+
+  assert.equal(registry.voiceInput.whisperCommandPath, "~/whisper.cpp/build/bin/whisper-cli");
+  assert.deepEqual(status, {
+    available: true,
+    backend: "whisper.cpp",
+    command: "/Users/test/whisper.cpp/build/bin/whisper-cli",
+    configuredCommandPath: "~/whisper.cpp/build/bin/whisper-cli",
+    defaultCommandPath: "~/whisper.cpp/build/bin/whisper-cli",
+    message: "Local whisper.cpp transcription is ready."
+  });
+});
+
+test("local voice transcription writes wav audio, invokes whisper.cpp, and returns the transcript", async () => {
+  const writes = new Map<string, Uint8Array>();
+  const removed: string[] = [];
+  const result = await transcribeLocalVoiceInput(
+    {
+      audioBase64: Buffer.from("wav-audio").toString("base64")
+    },
+    {
+      runCommand: async (_command, args) => {
+        const outputIndex = args.indexOf("-of");
+        const outputBase = outputIndex >= 0 ? String(args[outputIndex + 1]) : "/tmp/transcript";
+        writes.set(`${outputBase}.txt`, new TextEncoder().encode("Transcribed ticket idea."));
+        return { stdout: "", stderr: "" };
+      },
+      readEnv: async () => ({ RELAY_WHISPER_MODEL_PATH: "/models/ggml-base.en.bin" }),
+      readHomeDirectory: async () => "/Users/test",
+      readRegistry: async () => ({
+        schemaVersion: 1,
+        projects: [],
+        selectedProviderId: "codex",
+        voiceInput: {
+          whisperCommandPath: null
+        },
+        ui: {
+          lastProjectPath: null,
+          theme: "system"
+        }
+      }),
+      fileExists: async (target) => target === "/models/ggml-base.en.bin" || writes.has(target),
+      createTempDir: async () => "/tmp/relay-whisper-test",
+      writeBinaryFile: async (target, bytes) => {
+        writes.set(target, bytes);
+      },
+      readTextFile: async (target) => new TextDecoder().decode(writes.get(target)),
+      removeDirectory: async (target) => {
+        removed.push(target);
+      }
+    }
+  );
+
+  assert.equal(new TextDecoder().decode(writes.get("/tmp/relay-whisper-test/ticket-idea.wav")), "wav-audio");
+  assert.deepEqual(result, { transcript: "Transcribed ticket idea." });
+  assert.deepEqual(removed, ["/tmp/relay-whisper-test"]);
 });
 
 test("backend Effect runtime provides shared services", async () => {
@@ -1129,6 +1956,167 @@ test("codex status returns a terminal unavailable payload when cli discovery han
   assert.match(status.message, /timed out/i);
 });
 
+test("provider inventory returns three providers, the selected id, and switchability metadata", async () => {
+  const inventory = await readAgentProviderInventory({
+    readRegistry: async () => ({
+      schemaVersion: 1,
+      projects: [],
+      selectedProviderId: "codex",
+      voiceInput: {
+        whisperCommandPath: null
+      },
+      ui: {
+        lastProjectPath: null,
+        theme: "system"
+      }
+    }),
+    getCodexStatus: async () => readyCodexStatus,
+    probeCommand: async (command) => ({
+      installed: command === "cursor-agent" || command === "agent",
+      version: command === "cursor-agent" || command === "agent" ? "2026.05.20-2b5dd59" : null,
+      failed: false
+    }),
+    probeCursorStatus: async () => ({
+      authenticated: true,
+      failed: false
+    }),
+    readEnv: async () => ({}),
+    readHomeDirectory: async () => "/tmp/provider-home",
+    fileExists: async () => false,
+    listIncompleteWork: async () => []
+  });
+
+  assert.equal(inventory.providers.length, 3);
+  assert.equal(inventory.selectedProviderId, "codex");
+  assert.deepEqual(
+    inventory.providers.map((provider) => [provider.id, provider.status, provider.canSelect]),
+    [
+      ["codex", "ready", true],
+      ["cursor", "ready", true],
+      ["claude", "unavailable", false]
+    ]
+  );
+  assert.deepEqual(inventory.switchability, {
+    canSwitch: true,
+    reasonCode: null,
+    message: null,
+    blockingWorkCount: 0
+  });
+});
+
+test("provider switching persists the new selection when the target is ready", async () => {
+  let registry: AppRegistry = {
+    schemaVersion: 1 as const,
+    projects: [],
+    selectedProviderId: "codex" as const,
+    voiceInput: {
+      whisperCommandPath: null
+    },
+    ui: {
+      lastProjectPath: null,
+      theme: "system" as const
+    }
+  };
+
+  const result = await switchAgentProviderSelection(
+    { providerId: "cursor" },
+    {
+      readRegistry: async () => registry,
+      writeRegistry: async (next) => {
+        registry = next;
+      },
+      getCodexStatus: async () => readyCodexStatus,
+      probeCommand: async () => ({
+        installed: true,
+        version: "provider 1.0.0",
+        failed: false
+      }),
+      probeCursorStatus: async () => ({
+        authenticated: true,
+        failed: false
+      }),
+      readEnv: async () => ({
+        ANTHROPIC_API_KEY: "claude-token"
+      }),
+      readHomeDirectory: async () => "/tmp/provider-home",
+      fileExists: async () => false,
+      listIncompleteWork: async () => []
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(registry.selectedProviderId, "cursor");
+  assert.equal(result.selectedProviderId, "cursor");
+});
+
+test("provider switching is blocked deterministically when busy work exists and does not mutate registry state", async () => {
+  let registry: AppRegistry = {
+    schemaVersion: 1 as const,
+    projects: [{ path: "/tmp/project-a", pinned: true, lastOpenedAt: "2026-05-21T10:00:00.000Z", sidebarPosition: 1000 }],
+    selectedProviderId: "codex" as const,
+    voiceInput: {
+      whisperCommandPath: null
+    },
+    ui: {
+      lastProjectPath: "/tmp/project-a",
+      theme: "system" as const
+    }
+  };
+
+  const result = await switchAgentProviderSelection(
+    { providerId: "cursor" },
+    {
+      readRegistry: async () => registry,
+      writeRegistry: async (next) => {
+        registry = next;
+      },
+      getCodexStatus: async () => readyCodexStatus,
+      probeCommand: async () => ({
+        installed: true,
+        version: "provider 1.0.0",
+        failed: false
+      }),
+      probeCursorStatus: async () => ({
+        authenticated: true,
+        failed: false
+      }),
+      readEnv: async () => ({}),
+      readHomeDirectory: async () => "/tmp/provider-home",
+      fileExists: async () => false,
+      listIncompleteWork: async (projectPath) => [
+        {
+          schemaVersion: 1,
+          workId: "work_busy",
+          projectPath,
+          ticketId: "tkt_busy",
+          runId: "run_busy",
+          subject: "ticket",
+          action: "implement",
+          kind: "ticket.implementation",
+          idempotencyKey: "busy:key",
+          status: "running",
+          attempts: 1,
+          createdAt: "2026-05-21T10:00:00.000Z",
+          updatedAt: "2026-05-21T10:00:01.000Z",
+          lastAppliedEventSequence: 1,
+          executor: "agent",
+          providerId: "codex",
+          currentAttempt: null,
+          payload: {}
+        }
+      ]
+    }
+  );
+
+  assert.deepEqual(result, {
+    ok: false,
+    code: "busy",
+    message: "Relay cannot switch providers while 1 active work item(s) exist across 1 registered project(s).",
+    selectedProviderId: "codex"
+  });
+  assert.equal(registry.selectedProviderId, "codex");
+});
+
 test("createCodex passes the resolved CLI candidate as codexPathOverride", async () => {
   const candidates: CodexCliCandidate[] = [
     { source: "bundled", command: "/sdk/codex" },
@@ -1263,7 +2251,7 @@ test("epic tickets persist ordered subticket relationships across board reloads"
         actor: "user",
         source: "manual_board"
       }),
-    /cannot change workflow status/
+    /can only move to Review, Completed, or Archive/
   );
 
   const board = await readBoard(projectPath);
@@ -1476,7 +2464,12 @@ const emptyHierarchyResearch = () => ({
   }
 });
 
-const sampleLeanTask = (title: string) => ({
+const sampleLeanTask = (
+  title: string,
+  overrides: Partial<{
+    blockedByTitles: string[];
+  }> = {}
+) => ({
   title,
   summary: `Summary for ${title}.`,
   priority: "medium" as const,
@@ -1487,7 +2480,8 @@ const sampleLeanTask = (title: string) => ({
   acceptanceCriteria: ["Done."],
   implementationPlan: ["Step."],
   assumptions: [],
-  plannedFiles: [`src/${title.toLowerCase().replace(/\s+/g, "-")}.ts`]
+  plannedFiles: [`src/${title.toLowerCase().replace(/\s+/g, "-")}.ts`],
+  blockedByTitles: overrides.blockedByTitles ?? []
 });
 
 const sampleRoot = (title: string) => ({
@@ -1517,6 +2511,17 @@ test("createPendingTicketDraft creates draft_ticket with draftTargetType from pr
   assert.equal(placeholder.frontMatter.draftTargetType, "feature");
   assert.equal(placeholder.frontMatter.status, "todo");
   assert.equal(placeholder.frontMatter.runStatus, "drafting");
+});
+
+test("createPendingTicketDraft always sets draftTargetType even for autoHierarchy drafts", async () => {
+  const projectPath = await createProject();
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Change primary button color", autoHierarchy: true },
+    "run_pending_auto"
+  );
+  assert.equal(placeholder.frontMatter.ticketType, "draft_ticket");
+  assert.equal(placeholder.frontMatter.draftTargetType, "feature");
 });
 
 test("applyHierarchyDraftPlan normalizes legacy standalone_task plans into feature trees", async () => {
@@ -1592,6 +2597,106 @@ test("applyHierarchyDraftPlan extend_epic links feature and creates lean tasks",
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].title, "Wire Google OAuth");
   assert.deepEqual(tasks[0].plannedFiles, ["src/wire-google-oauth.ts"]);
+});
+
+test("applyHierarchyDraftPlan feature_tree materializes lean-task blockedByTitles as blockedByIds", async () => {
+  const projectPath = await createProject();
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Build auth flow", autoHierarchy: true },
+    "run_hierarchy_feature_tree_deps"
+  );
+  const featureId = await applyHierarchyDraftPlan(
+    projectPath,
+    placeholder.frontMatter.id,
+    {
+      planKind: "feature_tree",
+      draftState: "ready",
+      blockingClarificationQuestions: [],
+      matchedEpicId: null,
+      matchedFeatureId: null,
+      root: sampleRoot("Auth feature"),
+      features: [],
+      leanTasks: [
+        sampleLeanTask("Task A"),
+        sampleLeanTask("Task B", { blockedByTitles: ["Task A"] })
+      ],
+      research: emptyHierarchyResearch()
+    },
+    "run_hierarchy_feature_tree_deps"
+  );
+  const board = await readBoard(projectPath);
+  const tasks = board.tickets.filter((ticket) => ticket.parentFeatureId === featureId);
+  assert.equal(tasks.length, 2);
+  const taskA = tasks.find((ticket) => ticket.title === "Task A");
+  const taskB = tasks.find((ticket) => ticket.title === "Task B");
+  assert.ok(taskA);
+  assert.ok(taskB);
+  assert.deepEqual((await readTicket(projectPath, taskA.id)).frontMatter.blockedByIds, []);
+  assert.deepEqual((await readTicket(projectPath, taskB.id)).frontMatter.blockedByIds, [taskA.id]);
+});
+
+test("applyHierarchyDraftPlan feature_tree omits cyclic lean-task blocker links", async () => {
+  const projectPath = await createProject();
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Conflicting auth tasks", autoHierarchy: true },
+    "run_hierarchy_feature_tree_cycle"
+  );
+  const featureId = await applyHierarchyDraftPlan(
+    projectPath,
+    placeholder.frontMatter.id,
+    {
+      planKind: "feature_tree",
+      draftState: "ready",
+      blockingClarificationQuestions: [],
+      matchedEpicId: null,
+      matchedFeatureId: null,
+      root: sampleRoot("Auth feature"),
+      features: [],
+      leanTasks: [
+        sampleLeanTask("Task A", { blockedByTitles: ["Task B"] }),
+        sampleLeanTask("Task B", { blockedByTitles: ["Task A"] })
+      ],
+      research: emptyHierarchyResearch()
+    },
+    "run_hierarchy_feature_tree_cycle"
+  );
+  const board = await readBoard(projectPath);
+  const tasks = board.tickets.filter((ticket) => ticket.parentFeatureId === featureId);
+  assert.equal(tasks.length, 2);
+  for (const task of tasks) {
+    assert.deepEqual((await readTicket(projectPath, task.id)).frontMatter.blockedByIds, []);
+  }
+});
+
+test("applyHierarchyDraftPlan feature_tree ignores unknown lean-task blocker titles", async () => {
+  const projectPath = await createProject();
+  const placeholder = await createPendingTicketDraft(
+    projectPath,
+    { projectPath, idea: "Auth with missing blocker", autoHierarchy: true },
+    "run_hierarchy_feature_tree_missing"
+  );
+  const featureId = await applyHierarchyDraftPlan(
+    projectPath,
+    placeholder.frontMatter.id,
+    {
+      planKind: "feature_tree",
+      draftState: "ready",
+      blockingClarificationQuestions: [],
+      matchedEpicId: null,
+      matchedFeatureId: null,
+      root: sampleRoot("Auth feature"),
+      features: [],
+      leanTasks: [sampleLeanTask("Task B", { blockedByTitles: ["Missing task"] })],
+      research: emptyHierarchyResearch()
+    },
+    "run_hierarchy_feature_tree_missing"
+  );
+  const board = await readBoard(projectPath);
+  const tasks = board.tickets.filter((ticket) => ticket.parentFeatureId === featureId);
+  assert.equal(tasks.length, 1);
+  assert.deepEqual((await readTicket(projectPath, tasks[0].id)).frontMatter.blockedByIds, []);
 });
 
 test("applyHierarchyDraftPlan extend_feature deletes placeholder and appends tasks only", async () => {
@@ -1920,7 +3025,7 @@ test("new projects include Ready between Todo and In Progress", async () => {
   assert.equal(config.settings.codexNetworkAccessEnabled, false);
   assert.equal(config.settings.codexWebSearchMode, "disabled");
   assert.deepEqual(config.settings.codexAdditionalDirectories, []);
-  assert.equal(config.settings.agentConcurrency, 1);
+  assert.equal(config.settings.agentConcurrency, 3);
 });
 
 test("ticket effort defaults from project settings and can be overridden per ticket", async () => {
@@ -2009,7 +3114,7 @@ test("legacy project configs are normalized with ready and review lanes without 
   assert.equal(normalized.settings.codexNetworkAccessEnabled, false);
   assert.equal(normalized.settings.codexWebSearchMode, "disabled");
   assert.deepEqual(normalized.settings.codexAdditionalDirectories, []);
-  assert.equal(normalized.settings.agentConcurrency, 1);
+  assert.equal(normalized.settings.agentConcurrency, 3);
 
   const raw = await readFile(path.join(projectPath, ".relay", "project.json"), "utf8");
   assert.doesNotMatch(raw, /"id": "ready"/);
@@ -2409,6 +3514,59 @@ test("successful codex runs move to review before human acceptance", async () =>
   assert.equal((await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.status, "completed");
 });
 
+test("file changes under .relay are not scope-checked or path-locked", async () => {
+  const projectPath = await createProject();
+  await allowNonGitRuns(projectPath);
+  const ticket = await createImplementationTicket(projectPath, {
+    title: "Relay metadata edits",
+    priority: "medium",
+    labels: ["codex"],
+    markdown: "# Relay metadata edits\n",
+    plannedFiles: ["allowed.txt"]
+  });
+  const relayTicketPath = `.relay/tickets/${ticket.frontMatter.id}.md`;
+  const { runEventSink } = createFakeRunEventSink();
+  const dependencies: CodexRunDependencies = {
+    runEventSink,
+    createRunId: () => "run_relay_scope_exempt",
+    createCodexClient: () =>
+      ({
+        startThread: () => ({
+          id: "thread_relay_scope_exempt",
+          runStreamed: async () => ({
+            events: (async function*() {
+              yield { type: "thread.started", thread_id: "thread_relay_scope_exempt" };
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "file_change",
+                  changes: [
+                    { path: "allowed.txt", kind: "update" },
+                    { path: relayTicketPath, kind: "update" }
+                  ]
+                }
+              };
+              yield { type: "item.completed", item: { type: "agent_message", text: "Done." } };
+              yield { type: "turn.completed", usage: { total_tokens: 1 } };
+            })()
+          })
+        }),
+        resumeThread: () => {
+          throw new Error("resumeThread should not be used for a fresh run.");
+        }
+      }) as CodexRunDependencies["createCodexClient"] extends () => infer Client ? Client : never
+  };
+
+  await startCodexRun({ projectPath, ticketId: ticket.frontMatter.id }, dependencies);
+  await waitForAsync(
+    async () => (await readTicket(projectPath, ticket.frontMatter.id)).frontMatter.runStatus === "completed",
+    "relay scope exempt run completion"
+  );
+  const completed = await readTicket(projectPath, ticket.frontMatter.id);
+  assert.deepEqual(completed.frontMatter.plannedFiles, ["allowed.txt"]);
+  assert.equal((await readClarificationQuestions(projectPath, ticket.frontMatter.id)).length, 0);
+});
+
 test("out-of-scope file changes expand planned scope dynamically when paths are unlocked", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
@@ -2651,7 +3809,7 @@ test("path locks block another ticket until the holder releases them", async () 
   assert.equal((await pathLockConflictsFor(projectPath, ticketB.frontMatter.id, ["src/shared.ts"])).length, 0);
 });
 
-test("codex preflight rejects tickets whose planned files are locked by another task", async () => {
+test("codex preflight warns but allows queueing when planned files are locked by another task", async () => {
   const projectPath = await createProject();
   await allowNonGitRuns(projectPath);
   const ticketA = await createImplementationTicket(projectPath, {
@@ -2671,9 +3829,10 @@ test("codex preflight rejects tickets whose planned files are locked by another 
   const { tryAcquirePathLocks, releasePathLocksForRun } = await import("../src/services/path-lock");
   await tryAcquirePathLocks(projectPath, ticketA.frontMatter.id, "run_preflight_lock", ["src/preflight-lock.ts"]);
   const preflight = await preflightCodexRun({ projectPath, ticketId: ticketB.frontMatter.id });
-  assert.equal(preflight.ok, false);
-  assert.match(preflight.errors.join(" "), /locked by task/i);
-  assert.match(preflight.errors.join(" "), new RegExp(ticketA.frontMatter.id));
+  assert.equal(preflight.ok, true);
+  assert.equal(preflight.errors.length, 0);
+  assert.match(preflight.warnings.join(" "), /locked by task/i);
+  assert.match(preflight.warnings.join(" "), new RegExp(ticketA.frontMatter.id));
   await releasePathLocksForRun(projectPath, ticketA.frontMatter.id, "run_preflight_lock");
 });
 
@@ -2863,7 +4022,7 @@ test("codex runs persist structured todo and MCP tool-call SDK events", async ()
   assert.equal(failedMcp.error, "File not found.");
 });
 
-test("codex scheduler runs Ready queue one implementation at a time in board order", async () => {
+test("codex scheduler honors project agentConcurrency for Ready implementation runs", async () => {
   const projectPath = await createProject();
   const config = await readProjectConfig(projectPath);
   await writeProjectConfig(projectPath, {
@@ -2871,7 +4030,7 @@ test("codex scheduler runs Ready queue one implementation at a time in board ord
     settings: {
       ...config.settings,
       allowNonGitCodexRuns: true,
-      agentConcurrency: 2
+      agentConcurrency: 3
     }
   });
   const firstTicket = await createImplementationTicket(projectPath, {
@@ -2922,35 +4081,35 @@ test("codex scheduler runs Ready queue one implementation at a time in board ord
 
   assert.equal(firstResult.state, "queued");
   assert.equal(secondResult.state, "queued");
-  await waitFor(() => startedThreads.length === 1, "first queued run to start");
-  assert.deepEqual(startedThreads, ["thread_scheduler_first"]);
+  await waitFor(() => startedThreads.length === 2, "queued runs to start up to concurrency limit");
+  assert.deepEqual(startedThreads, ["thread_scheduler_first", "thread_scheduler_second"]);
   await waitForAsync(async () => {
     const current = await readTicket(projectPath, firstTicket.frontMatter.id);
     return current.frontMatter.runStatus === "running" && current.frontMatter.status === "in_progress";
   }, "first run marked running in progress");
+  await waitForAsync(async () => {
+    const current = await readTicket(projectPath, secondTicket.frontMatter.id);
+    return current.frontMatter.runStatus === "running" && current.frontMatter.status === "in_progress";
+  }, "second run marked running in progress");
   const runningFirst = await readTicket(projectPath, firstTicket.frontMatter.id);
   assert.equal(runningFirst.frontMatter.runStatus, "running");
   assert.equal(runningFirst.frontMatter.status, "in_progress");
   assert.equal(typeof runningFirst.frontMatter.lastRunStartedAt, "string");
   assert.equal(Number.isNaN(Date.parse(runningFirst.frontMatter.lastRunStartedAt ?? "")), false);
-  const queuedSecond = await readTicket(projectPath, secondTicket.frontMatter.id);
-  assert.equal(queuedSecond.frontMatter.status, "ready");
-  assert.equal(queuedSecond.frontMatter.runStatus, "queued");
-  assert.equal(queuedSecond.frontMatter.lastRunStartedAt, null);
+  const runningSecond = await readTicket(projectPath, secondTicket.frontMatter.id);
+  assert.equal(runningSecond.frontMatter.status, "in_progress");
+  assert.equal(runningSecond.frontMatter.runStatus, "running");
+  assert.equal(Number.isNaN(Date.parse(runningSecond.frontMatter.lastRunStartedAt ?? "")), false);
 
   const duplicatePreflight = await preflightCodexRun({ projectPath, ticketId: secondTicket.frontMatter.id });
   assert.equal(duplicatePreflight.ok, false);
   assert.match(duplicatePreflight.errors.join(" "), /already queued/);
 
   gates[0].resolve();
-  await waitFor(() => startedThreads.length === 2, "second queued run to start after first completion");
-  assert.deepEqual(startedThreads, ["thread_scheduler_first", "thread_scheduler_second"]);
-  await waitForAsync(async () => (await readTicket(projectPath, secondTicket.frontMatter.id)).frontMatter.runStatus === "running", "second run marked running");
-  const runningSecond = await readTicket(projectPath, secondTicket.frontMatter.id);
-  assert.equal(Number.isNaN(Date.parse(runningSecond.frontMatter.lastRunStartedAt ?? "")), false);
-  const completedFirst = await readTicket(projectPath, firstTicket.frontMatter.id);
-  assert.equal(completedFirst.frontMatter.status, "review");
-  assert.equal(completedFirst.frontMatter.runStatus, "completed");
+  await waitForAsync(async () => (await readTicket(projectPath, firstTicket.frontMatter.id)).frontMatter.runStatus === "completed", "first run completed");
+  const completedFirstAfter = await readTicket(projectPath, firstTicket.frontMatter.id);
+  assert.equal(completedFirstAfter.frontMatter.status, "review");
+  assert.equal(completedFirstAfter.frontMatter.runStatus, "completed");
 
   gates[1].resolve();
   await waitFor(() => events.some((event) => event.runId === "run_scheduler_second" && event.type === "run.completed"), "second run completion");
@@ -4156,4 +5315,77 @@ test("clarification questions and answers persist with auditable events", async 
     events.map((event) => event.eventType),
     ["ticket.status_changed", "clarification.question_created", "clarification.answer_submitted"]
   );
+});
+
+test("transitionTicketStatus allows feature and epic review and completed moves but rejects todo", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Container feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Container feature\n"
+  });
+
+  await transitionTicketStatus(projectPath, feature.frontMatter.id, "review", {
+    actor: "user",
+    source: "manual_board"
+  });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "review");
+
+  await transitionTicketStatus(projectPath, feature.frontMatter.id, "completed", {
+    actor: "user",
+    source: "manual_board"
+  });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "completed");
+
+  await assert.rejects(
+    () =>
+      transitionTicketStatus(projectPath, feature.frontMatter.id, "todo", {
+        actor: "user",
+        source: "manual_board"
+      }),
+    /can only move to Review, Completed, or Archive/
+  );
+
+  await assert.rejects(
+    () =>
+      transitionTicketStatus(projectPath, feature.frontMatter.id, "ready", {
+        actor: "user",
+        source: "manual_board"
+      }),
+    /can only move to Review, Completed, or Archive/
+  );
+});
+
+test("moveTicket promotes feature to review when last linked task completes and demotes on reopen", async () => {
+  const projectPath = await createProject();
+  const feature = await createTicket(projectPath, {
+    title: "Review gate feature",
+    ticketType: "feature",
+    priority: "medium",
+    labels: [],
+    markdown: "# Review gate feature\n"
+  });
+  const firstTask = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "First task", priority: "medium" }
+  });
+  const secondTask = await createTaskUnderFeature({
+    projectPath,
+    featureId: feature.frontMatter.id,
+    input: { title: "Second task", priority: "medium" }
+  });
+
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "todo");
+
+  await moveTicket({ projectPath, ticketId: firstTask.frontMatter.id, targetStatus: "completed" });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "todo");
+
+  await moveTicket({ projectPath, ticketId: secondTask.frontMatter.id, targetStatus: "completed" });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "review");
+
+  await moveTicket({ projectPath, ticketId: secondTask.frontMatter.id, targetStatus: "todo" });
+  assert.equal((await readTicket(projectPath, feature.frontMatter.id)).frontMatter.status, "todo");
 });

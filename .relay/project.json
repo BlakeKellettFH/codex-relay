@@ -66,6 +66,6 @@
     "codexNetworkAccessEnabled": false,
     "codexWebSearchMode": "disabled",
     "codexAdditionalDirectories": [],
-    "agentConcurrency": 1
+    "agentConcurrency": 3
   }
 }

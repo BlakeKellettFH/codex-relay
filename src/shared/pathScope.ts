@@ -1,5 +1,16 @@
 export const slashPath = (value: string): string => value.split(/[\\/]+/g).join("/");
 
+export const RELAY_MANAGED_DIRECTORY = ".relay";
+
+/** Relay metadata under `.relay/` is not subject to planned-scope or path-lock enforcement. */
+export const isRelayManagedPath = (path: string): boolean => {
+  const normalized = slashPath(path.trim()).replace(/^\.\//, "");
+  return normalized === RELAY_MANAGED_DIRECTORY || normalized.startsWith(`${RELAY_MANAGED_DIRECTORY}/`);
+};
+
+export const filterPathsForPathScope = (paths: readonly string[]): string[] =>
+  paths.filter((path) => !isRelayManagedPath(path));
+
 export const normalizeRepoPath = (value: string, projectRoot?: string): string | null => {
   let normalized = slashPath(value.trim()).replace(/^\.\//, "");
   const root = projectRoot ? slashPath(projectRoot).replace(/\/$/, "") : null;

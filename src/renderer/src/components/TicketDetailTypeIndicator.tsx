@@ -20,7 +20,7 @@ const finalTypeLabel = (ticketType: FinalTicketType): string => {
 
 const typeLabel = (ticketType: TicketType, draftTargetType?: FinalTicketType | null): string => {
   if (ticketType === "draft_ticket") {
-    const target = draftTargetType ?? "task";
+    const target = draftTargetType ?? "feature";
     return `Draft ${finalTypeLabel(target)}`;
   }
   return finalTypeLabel(ticketType);

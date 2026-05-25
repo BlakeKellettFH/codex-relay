@@ -13,6 +13,8 @@
     "clean:dist": "node scripts/package-electron.mjs --clean",
     "package:binary": "node scripts/package-electron.mjs",
     "dist": "npm run clean:dist && npm run build && npm run package:binary",
+    "agent:worktree": "node scripts/agent-worktree.mjs",
+    "agent:merge": "node scripts/merge-queue.mjs",
     "logs": "mkdir -p \"$HOME/Library/Application Support/relay\" && touch \"$HOME/Library/Application Support/relay/relay.log\" && tail -n 200 -f \"$HOME/Library/Application Support/relay/relay.log\"",
     "logs:dev": "touch /tmp/relay-dev.log && tail -n 200 -f /tmp/relay-dev.log",
     "preview": "electron-vite preview",

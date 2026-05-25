@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Effect } from "effect";
 import {
   cancelCodexRun,
   createDraftIntake,
@@ -29,6 +30,8 @@ import {
   readTicket,
   writeProjectConfig
 } from "../src/storage";
+import { BackendWorkLive, WorkEngine } from "../src/services/work";
+import { runBackendEffect } from "../src/runtime";
 import { ticketDraftDialogSubtext } from "../src/renderer/src/lib/markdown";
 import type { CodexStatus, RendererRunEvent } from "../src/shared/schemas";
 import type { StructuredAgentRequest, StructuredAgentResult } from "../src/services/agents";
@@ -865,6 +868,47 @@ test("async ticket drafts can run concurrently and update only their own placeho
     finalBoard.tickets.map((ticket) => ticket.title).sort(),
     ["First async draft", "Second async draft"]
   );
+});
+
+test("async draft runs keep the provider selected when work started", async () => {
+  const projectPath = await createProject();
+  let selectedProviderId: "cursor" | "claude" = "cursor";
+  let capturedProviderId = "";
+  let resolveDraft: ((value: StructuredAgentResult<unknown>) => void) | null = null;
+  const dependencies: TicketDraftStartDependencies = {
+    createRunId: () => "run_provider_persisted",
+    readSelectedProviderId: async () => selectedProviderId,
+    createAgentProvider: async (providerId) => {
+      capturedProviderId = providerId;
+      return {
+        providerId,
+        runStructured: async <T = unknown>(_request: StructuredAgentRequest): Promise<StructuredAgentResult<T>> =>
+          await new Promise((resolve) => {
+            resolveDraft = (value) => resolve(value as StructuredAgentResult<T>);
+          }),
+        runText: async () => {
+          throw new Error("repository chat is not part of this test");
+        }
+      };
+    }
+  };
+
+  const started = await startTicketDraftRun({ projectPath, idea: "Persist provider selection." }, dependencies);
+  selectedProviderId = "claude";
+  const snapshot = await runBackendEffect(
+    Effect.provide(WorkEngine.use((engine) => engine.findByRunId(projectPath, started.runId)), BackendWorkLive)
+  );
+
+  assert.equal(capturedProviderId, "cursor");
+  assert.equal(snapshot?.providerId, "cursor");
+  assert.ok(resolveDraft);
+  resolveDraft({
+    providerId: "cursor",
+    rawResponse: validDraftJson("Provider-persisted draft"),
+    output: JSON.parse(validDraftJson("Provider-persisted draft"))
+  });
+
+  await waitFor(async () => (await readTicket(projectPath, started.ticket.frontMatter.id)).frontMatter.runStatus === "draft_complete", "provider-persisted draft completion");
 });
 
 test("ticket draft prompt preserves markdown ticket references from the idea", async () => {

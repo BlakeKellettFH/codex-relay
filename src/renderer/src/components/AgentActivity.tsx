@@ -32,6 +32,8 @@ type AgentProgressSummaryProps = {
   now?: number;
 };
 
+const RECENT_ACTIVITY_LIMIT = 8;
+
 const useProgressNow = (active: boolean, now?: number): number => {
   const [currentNow, setCurrentNow] = useState(() => now ?? Date.now());
 
@@ -158,6 +160,25 @@ function AgentRunSummaryDetails({ summary }: { summary: RunSummary }): ReactElem
           </div>
         ) : (
           <div className="agent-usage-unavailable">Unavailable from this run log</div>
+        )}
+      </div>
+
+      <div className="agent-usage">
+        <div className="agent-usage-title">
+          <Files size={14} />
+          <span>Changed Files</span>
+        </div>
+        {summary.changedFiles.length > 0 ? (
+          <div className="agent-run-changed-files">
+            {summary.changedFiles.map((file) => (
+              <div key={file.path} className="agent-run-changed-file">
+                <code title={file.path}>{file.path}</code>
+                <span>{file.eventCount} event{file.eventCount === 1 ? "" : "s"}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="agent-usage-unavailable">No file changes recorded in this run log</div>
         )}
       </div>
     </div>
@@ -303,10 +324,7 @@ export function AgentActivityPanel({
   onRevealFile: () => void;
 }): ReactElement {
   const recentEvents = useMemo(
-    () =>
-      sortAgentEvents(events)
-        .filter((event) => event.type !== "command.output")
-        .slice(-4),
+    () => sortAgentEvents(events).slice(-RECENT_ACTIVITY_LIMIT),
     [events]
   );
 

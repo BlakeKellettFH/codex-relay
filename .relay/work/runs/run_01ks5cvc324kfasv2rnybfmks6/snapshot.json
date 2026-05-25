@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks5cvc324kfasv2rnybfmks6",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks5c2833gg1hkp2f4dhs9tk9",
+  "runId": "run_01ks5cvc324kfasv2rnybfmks6",
+  "subject": "ticket",
+  "action": "redraft",
+  "kind": "ticket.redraft",
+  "idempotencyKey": "ticket.redraft:/Users/blakekellett/repos/codex-relay:tkt_01ks5c2833gg1hkp2f4dhs9tk9:run_01ks5cvc324kfasv2rnybfmks6",
+  "status": "failed",
+  "attempts": 1,
+  "createdAt": "2026-05-21T13:50:54.566Z",
+  "updatedAt": "2026-05-21T13:51:51.786Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks5cvc3cqyh393wdddh0xj2c",
+    "leaseToken": "lease_01ks5cvc3c07zg46syaym4rbez",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-21T13:50:54.572Z",
+    "heartbeatAt": "2026-05-21T13:50:54.573Z",
+    "startedAt": "2026-05-21T13:50:54.573Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks5c2833gg1hkp2f4dhs9tk9",
+    "purpose": "default",
+    "idea": "Update the main README, put the text \"TEMP\" at the top",
+    "effort": "low",
+    "preferredTicketType": "task",
+    "relatedTicketIds": [],
+    "runId": "run_01ks5cvc324kfasv2rnybfmks6"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Task-only drafts are not supported. Use feature planning with lean tasks or hierarchy drafting.",
+  "error": {
+    "code": "backend_failure",
+    "message": "Task-only drafts are not supported. Use feature planning with lean tasks or hierarchy drafting.",
+    "recoverable": true,
+    "requestId": "unknown",
+    "durationMs": 0,
+    "reason": "unknown_ticket_draft_failure"
+  }
+}

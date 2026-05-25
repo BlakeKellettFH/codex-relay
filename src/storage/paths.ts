@@ -3,6 +3,8 @@ import type { Path } from "effect";
 export const resolveProjectPath = (path: Path.Path, projectPath: string): string => path.resolve(projectPath);
 export const projectRelayPath = (path: Path.Path, projectPath: string): string => path.join(resolveProjectPath(path, projectPath), ".relay");
 export const projectConfigPath = (path: Path.Path, projectPath: string): string => path.join(projectRelayPath(path, projectPath), "project.json");
+export const repositoryChatPath = (path: Path.Path, projectPath: string): string =>
+  path.join(projectRelayPath(path, projectPath), "repository-chat.json");
 export const ticketsPath = (path: Path.Path, projectPath: string): string => path.join(projectRelayPath(path, projectPath), "tickets");
 export const runsPath = (path: Path.Path, projectPath: string): string => path.join(projectRelayPath(path, projectPath), "runs");
 export const workPath = (path: Path.Path, projectPath: string): string => path.join(projectRelayPath(path, projectPath), "work");
@@ -20,6 +22,8 @@ export const pathLocksPath = (path: Path.Path, projectPath: string): string =>
   path.join(projectRelayPath(path, projectPath), "path-locks.json");
 export const clarificationsPath = (path: Path.Path, projectPath: string): string =>
   path.join(projectRelayPath(path, projectPath), "clarifications");
+export const contextPath = (path: Path.Path, projectPath: string): string =>
+  path.join(projectRelayPath(path, projectPath), "context");
 export const trashPath = (path: Path.Path, projectPath: string): string => path.join(projectRelayPath(path, projectPath), "trash");
 export const attachmentsPath = (path: Path.Path, projectPath: string): string =>
   path.join(projectRelayPath(path, projectPath), "attachments");

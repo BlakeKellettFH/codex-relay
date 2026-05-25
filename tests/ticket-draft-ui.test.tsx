@@ -10,6 +10,7 @@ import {
   activeRunElapsedLabel,
   BoardView,
   canRedraftTicket,
+  CliProviderSelectorModal,
   CodexCollapsedStatusIndicator,
   CodexSidebarStatus,
   CreateTicketDraftMessage,
@@ -18,10 +19,12 @@ import {
   emptyColumnMessage,
   FloatingTicketComposer,
   getTicketDetailExecutionActionState,
+  getContainerTicketStatusNote,
   getTicketReviewActionState,
   getFloatingComposerDraftInput,
   getScopeRecoveryClarificationActionQuestionIds,
   getCodexStatusDisplay,
+  getProviderInventoryDisplay,
   RepositoryChatPanelContent,
   TicketCardContent,
   TicketFullBodyPanel,
@@ -31,20 +34,25 @@ import {
   TicketAuthoringStatePill,
   TicketChecklistPill,
   TicketRunElapsedPill,
-  TicketRunStatusPill
+  TicketRunStatusPill,
+  VoiceInputSetupModal
 } from "../src/renderer/src/App";
+import { relayQueryKeys, syncProviderInventoryAfterSwitch } from "../src/renderer/src/lib/relayQueries";
 import {
+  type AgentProviderInventory,
   type CodexStatus,
   DEFAULT_COLUMNS,
   type ClarificationQuestion,
   type DraftIntakeResult,
   type BoardSnapshot,
+  type LocalVoiceInputStatus,
   type TicketRecord,
   type TicketSummary
 } from "../src/shared/schemas";
 
-const renderWithQueryClient = (element: ReactElement): string => {
+const renderWithQueryClient = (element: ReactElement, seed?: (queryClient: QueryClient) => void): string => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  seed?.(queryClient);
   return renderToStaticMarkup(<QueryClientProvider client={queryClient}>{element}</QueryClientProvider>);
 };
 
@@ -54,6 +62,65 @@ const codexStatus = (patch: Partial<CodexStatus> = {}): CodexStatus => ({
   cliVersion: null,
   authenticated: null,
   message: "Checking Codex...",
+  ...patch
+});
+
+const providerInventory = (patch: Partial<AgentProviderInventory> = {}): AgentProviderInventory => ({
+  providers: [
+    {
+      id: "codex",
+      label: "Codex",
+      installState: "installed",
+      authState: "authenticated",
+      status: "ready",
+      message: "Codex is available.",
+      version: "codex-cli 0.130.0",
+      canSelect: true,
+      blockedReasonCode: null,
+      blockedReasonMessage: null
+    },
+    {
+      id: "cursor",
+      label: "Cursor",
+      installState: "installed",
+      authState: "unknown",
+      status: "unknown",
+      message: "Relay could not confirm Cursor CLI status.",
+      version: "cursor-cli 1.4.0",
+      canSelect: false,
+      blockedReasonCode: "provider_status_unknown",
+      blockedReasonMessage: "Refresh Cursor status before switching."
+    },
+    {
+      id: "claude",
+      label: "Claude",
+      installState: "installed",
+      authState: "unauthenticated",
+      status: "unauthenticated",
+      message: "Claude CLI is installed but not signed in.",
+      version: null,
+      canSelect: false,
+      blockedReasonCode: "provider_unauthenticated",
+      blockedReasonMessage: "Sign in to Claude before switching."
+    }
+  ],
+  selectedProviderId: "codex",
+  switchability: {
+    canSwitch: true,
+    reasonCode: null,
+    message: null,
+    blockingWorkCount: 0
+  },
+  ...patch
+});
+
+const voiceInputStatus = (patch: Partial<LocalVoiceInputStatus> = {}): LocalVoiceInputStatus => ({
+  available: false,
+  backend: null,
+  command: null,
+  configuredCommandPath: null,
+  defaultCommandPath: "~/whisper.cpp/build/bin/whisper-cli",
+  message: "Local Whisper is not configured yet. Set the whisper.cpp CLI path to enable voice input.",
   ...patch
 });
 
@@ -224,50 +291,66 @@ test("codex sidebar status display uses simple connected labels", () => {
   );
 });
 
-test("codex sidebar status renders compact footer markup", () => {
+test("provider inventory display reflects the selected provider label and state", () => {
+  assert.deepEqual(getProviderInventoryDisplay(undefined, { isLoading: true }), {
+    tone: "loading",
+    label: "CLI: Checking..."
+  });
+  assert.deepEqual(
+    getProviderInventoryDisplay(
+      providerInventory({
+        selectedProviderId: "cursor"
+      })
+    ),
+    {
+      tone: "warning",
+      label: "Cursor: Status unknown"
+    }
+  );
+  assert.deepEqual(
+    getProviderInventoryDisplay(
+      providerInventory({
+        selectedProviderId: "claude"
+      })
+    ),
+    {
+      tone: "warning",
+      label: "Claude: Not connected"
+    }
+  );
+});
+
+test("sidebar provider status renders a modal trigger with the selected provider label", () => {
   const warningMarkup = renderToStaticMarkup(
     <CodexSidebarStatus
-      codexStatus={codexStatus({
-        cliAvailable: true,
-        cliVersion: "codex-cli 0.130.0",
-        authenticated: false,
-        message: "Codex CLI is available, but no Codex auth file or API key was found."
+      providerInventory={providerInventory({
+        selectedProviderId: "claude"
       })}
       isLoading={false}
       isError={false}
-      onRefresh={() => undefined}
+      onOpenSelector={() => undefined}
     />
   );
   assert.match(warningMarkup, /sidebar-codex-status warning/);
-  assert.match(warningMarkup, /Codex: Not connected/);
+  assert.match(warningMarkup, /Open CLI selector\. Claude: Not connected/);
 
   const healthyMarkup = renderToStaticMarkup(
     <CodexSidebarStatus
-      codexStatus={codexStatus({
-        cliAvailable: true,
-        cliVersion: "codex-cli 0.130.0",
-        authenticated: true,
-        message: "Codex is available."
-      })}
+      providerInventory={providerInventory()}
       isLoading={false}
       isError={false}
-      onRefresh={() => undefined}
+      onOpenSelector={() => undefined}
     />
   );
   assert.match(healthyMarkup, /sidebar-codex-status ok connected/);
   assert.match(healthyMarkup, /Codex: Connected/);
 });
 
-test("collapsed codex indicator uses green connected and red disconnected floating buttons", () => {
+test("collapsed provider indicator opens the selector and uses selected-provider state", () => {
   const connectedMarkup = renderToStaticMarkup(
     <CodexCollapsedStatusIndicator
-      codexStatus={codexStatus({
-        cliAvailable: true,
-        cliVersion: "codex-cli 0.130.0",
-        authenticated: true,
-        message: "Codex is available."
-      })}
-      onRefresh={() => undefined}
+      providerInventory={providerInventory()}
+      onOpenSelector={() => undefined}
     />
   );
   assert.match(connectedMarkup, /sidebar-codex-indicator-button connected/);
@@ -275,17 +358,87 @@ test("collapsed codex indicator uses green connected and red disconnected floati
 
   const disconnectedMarkup = renderToStaticMarkup(
     <CodexCollapsedStatusIndicator
-      codexStatus={codexStatus({
-        cliAvailable: true,
-        cliVersion: "codex-cli 0.130.0",
-        authenticated: false,
-        message: "Codex CLI is available, but no Codex auth file or API key was found."
+      providerInventory={providerInventory({
+        selectedProviderId: "cursor"
       })}
-      onRefresh={() => undefined}
+      onOpenSelector={() => undefined}
     />
   );
   assert.match(disconnectedMarkup, /sidebar-codex-indicator-button disconnected/);
-  assert.match(disconnectedMarkup, /aria-label="Codex: Not connected"/);
+  assert.match(disconnectedMarkup, /aria-label="Cursor: Status unknown"/);
+});
+
+test("provider selector modal renders version text, disabled actions, and current selection", () => {
+  const markup = renderWithQueryClient(
+    <CliProviderSelectorModal
+      inventory={providerInventory({
+        providers: [
+          {
+            id: "codex",
+            label: "Codex",
+            installState: "installed",
+            authState: "authenticated",
+            status: "ready",
+            message: "Codex is available.",
+            version: "codex-cli 0.130.0",
+            canSelect: true,
+            blockedReasonCode: null,
+            blockedReasonMessage: null
+          },
+          {
+            id: "cursor",
+            label: "Cursor",
+            installState: "installed",
+            authState: "unknown",
+            status: "unknown",
+            message: "Relay could not confirm Cursor CLI status.",
+            version: "cursor-cli 1.4.0",
+            canSelect: false,
+            blockedReasonCode: "provider_status_unknown",
+            blockedReasonMessage: "Refresh Cursor status before switching."
+          },
+          {
+            id: "claude",
+            label: "Claude",
+            installState: "not_installed",
+            authState: "unknown",
+            status: "unavailable",
+            message: "Claude CLI was not found on PATH.",
+            version: null,
+            canSelect: false,
+            blockedReasonCode: "provider_unavailable",
+            blockedReasonMessage: "Install Claude CLI before switching."
+          }
+        ]
+      })}
+      onClose={() => undefined}
+      onSelectProvider={() => undefined}
+    />
+  );
+
+  assert.match(markup, /Choose agent CLI/);
+  assert.match(markup, /Codex/);
+  assert.match(markup, /codex-cli 0.130.0/);
+  assert.match(markup, /In use/);
+  assert.match(markup, /Cursor/);
+  assert.match(markup, /Installed, status unknown/);
+  assert.match(markup, /Cursor status could not be verified\./);
+  assert.match(markup, /Claude/);
+  assert.match(markup, /Not installed/);
+  assert.match(markup, /Claude must be installed before Relay can use it\./);
+});
+
+test("provider switch cache sync updates the selected provider inventory", () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  queryClient.setQueryData(relayQueryKeys.providerInventory, providerInventory());
+
+  syncProviderInventoryAfterSwitch(queryClient, {
+    ok: true,
+    selectedProviderId: "cursor",
+    inventory: providerInventory({ selectedProviderId: "cursor" })
+  });
+
+  assert.deepEqual(queryClient.getQueryData(relayQueryKeys.providerInventory), providerInventory({ selectedProviderId: "cursor" }));
 });
 
 test("scope clarification approve CTA only appears for fully answered blocked task tickets", () => {
@@ -618,10 +771,28 @@ test("tooltip wrapper exposes hover label via data-tooltip", () => {
   assert.match(markup, /data-tooltip="Accept"/);
 });
 
-test("ticket review action state shows accept and reject only for tasks in review", () => {
+test("ticket review action state shows accept and reject for tasks, features, and epics in review", () => {
   assert.deepEqual(
     getTicketReviewActionState({
       ticketType: "task",
+      status: "review",
+      columns: DEFAULT_COLUMNS
+    }),
+    { showAcceptReject: true }
+  );
+
+  assert.deepEqual(
+    getTicketReviewActionState({
+      ticketType: "feature",
+      status: "review",
+      columns: DEFAULT_COLUMNS
+    }),
+    { showAcceptReject: true }
+  );
+
+  assert.deepEqual(
+    getTicketReviewActionState({
+      ticketType: "epic",
       status: "review",
       columns: DEFAULT_COLUMNS
     }),
@@ -640,11 +811,26 @@ test("ticket review action state shows accept and reject only for tasks in revie
   assert.deepEqual(
     getTicketReviewActionState({
       ticketType: "feature",
-      status: "review",
+      status: "todo",
       columns: DEFAULT_COLUMNS
     }),
     { showAcceptReject: false }
   );
+});
+
+test("container ticket status note uses review guidance when in review", () => {
+  assert.match(
+    getContainerTicketStatusNote("feature", "review"),
+    /This feature is in Review/
+  );
+  assert.match(getContainerTicketStatusNote("feature", "review"), /moves only this feature to Completed/);
+  assert.match(
+    getContainerTicketStatusNote("epic", "review"),
+    /This epic is in Review/
+  );
+  assert.match(getContainerTicketStatusNote("epic", "review"), /child features and tasks stay as they are/);
+  assert.match(getContainerTicketStatusNote("feature", "todo"), /Features follow child task columns/);
+  assert.match(getContainerTicketStatusNote("epic", "todo"), /Epics follow child task columns/);
 });
 
 test("ticket card label overflow exposes hidden label names without rendering extra label chips", () => {
@@ -791,6 +977,7 @@ test("floating ticket composer renders compact drafting controls without create 
     <FloatingTicketComposer
       projectPath="/tmp/project"
       defaultEffort="medium"
+      selectedProviderId="codex"
       onCreated={() => undefined}
       setToast={() => undefined}
     />
@@ -799,13 +986,14 @@ test("floating ticket composer renders compact drafting controls without create 
   assert.match(markup, /floating-ticket-composer/);
   assert.match(markup, /aria-label="Draft ticket idea"/);
   assert.match(markup, /aria-label="Ticket idea"/);
+  assert.match(markup, /aria-label="Record ticket idea with voice"/);
   assert.doesNotMatch(markup, /Relay chooses epic, feature, or task/);
   assert.doesNotMatch(markup, />Planning</);
   assert.doesNotMatch(markup, /Planning mode/);
   assert.match(markup, />Type</);
-  assert.match(markup, /value="auto" selected="">Auto/);
   assert.match(markup, /value="epic">Epic/);
-  assert.match(markup, /value="feature">Feature/);
+  assert.match(markup, /value="feature" selected="">Feature/);
+  assert.doesNotMatch(markup, /value="auto"/);
   assert.doesNotMatch(markup, /value="ticket"/);
   assert.match(markup, />Priority</);
   assert.match(markup, />Effort</);
@@ -814,31 +1002,135 @@ test("floating ticket composer renders compact drafting controls without create 
   assert.doesNotMatch(markup, /Create Ticket/);
 });
 
+test("floating ticket composer keeps voice input clickable for local whisper setup", () => {
+  const markup = renderWithQueryClient(
+    <FloatingTicketComposer
+      projectPath="/tmp/project"
+      defaultEffort="medium"
+      selectedProviderId="codex"
+      onCreated={() => undefined}
+      setToast={() => undefined}
+    />,
+    (queryClient) => {
+      queryClient.setQueryData(relayQueryKeys.voiceInputStatus, voiceInputStatus());
+    }
+  );
+
+  assert.match(markup, /data-tooltip="Set up local Whisper path"/);
+  assert.match(markup, /aria-label="Record ticket idea with voice"/);
+  assert.doesNotMatch(markup, /floating-ticket-voice" disabled=""/);
+});
+
+test("floating ticket composer enables voice input when local whisper is ready", () => {
+  const markup = renderWithQueryClient(
+    <FloatingTicketComposer
+      projectPath="/tmp/project"
+      defaultEffort="medium"
+      selectedProviderId="codex"
+      onCreated={() => undefined}
+      setToast={() => undefined}
+    />,
+    (queryClient) => {
+      queryClient.setQueryData(
+        relayQueryKeys.voiceInputStatus,
+        voiceInputStatus({
+          available: true,
+          backend: "whisper.cpp",
+          command: "whisper-cli",
+          message: "Local whisper.cpp transcription is ready."
+        })
+      );
+    }
+  );
+
+  assert.match(markup, /data-tooltip="Record voice idea"/);
+  assert.doesNotMatch(markup, /floating-ticket-voice" disabled=""/);
+});
+
+test("voice input setup modal renders the default whisper path and install guide", () => {
+  const markup = renderToStaticMarkup(
+    <VoiceInputSetupModal
+      commandPath="~/whisper.cpp/build/bin/whisper-cli"
+      statusMessage="Local Whisper is not configured yet."
+      onCommandPathChange={() => undefined}
+      onClose={() => undefined}
+      onSave={() => undefined}
+      savePending={false}
+    />
+  );
+
+  assert.match(markup, /Set up local Whisper/);
+  assert.match(markup, /value="~\/whisper\.cpp\/build\/bin\/whisper-cli"/);
+  assert.match(markup, /download-ggml-model\.sh base\.en/);
+  assert.match(markup, /brew install cmake ffmpeg/);
+  assert.match(markup, /apt install -y build-essential cmake ffmpeg/);
+});
+
 test("floating composer draft input maps each type selector to the expected request shape", () => {
   const shared = {
     projectPath: "/tmp/project",
     idea: "Draft a settings change",
     priority: "high" as const,
-    effort: "medium" as const
+    effort: "medium" as const,
+    selectedProviderId: "codex" as const
   };
 
-  assert.deepEqual(getFloatingComposerDraftInput({ ...shared, draftType: "auto" }), {
-    ...shared,
-    autoHierarchy: true,
-    runIntake: true
-  });
   assert.deepEqual(getFloatingComposerDraftInput({ ...shared, draftType: "epic" }), {
-    ...shared,
+    projectPath: shared.projectPath,
+    idea: shared.idea,
+    priority: shared.priority,
+    effort: shared.effort,
     runIntake: true,
     preferredTicketType: "epic",
     draftScope: "epic"
   });
   assert.deepEqual(getFloatingComposerDraftInput({ ...shared, draftType: "feature" }), {
-    ...shared,
+    projectPath: shared.projectPath,
+    idea: shared.idea,
+    priority: shared.priority,
+    effort: shared.effort,
     runIntake: true,
     preferredTicketType: "feature",
     draftScope: "product_feature"
   });
+});
+
+test("floating composer draft input sends cursor agent model instead of effort", () => {
+  assert.deepEqual(
+    getFloatingComposerDraftInput({
+      projectPath: "/tmp/project",
+      idea: "Draft with cursor",
+      priority: "medium",
+      agentModel: "auto",
+      selectedProviderId: "cursor",
+      draftType: "feature"
+    }),
+    {
+      projectPath: "/tmp/project",
+      idea: "Draft with cursor",
+      priority: "medium",
+      agentModel: "auto",
+      runIntake: true,
+      preferredTicketType: "feature",
+      draftScope: "product_feature"
+    }
+  );
+});
+
+test("floating ticket composer shows model selector when cursor CLI is selected", () => {
+  const markup = renderWithQueryClient(
+    <FloatingTicketComposer
+      projectPath="/tmp/project"
+      defaultEffort="medium"
+      selectedProviderId="cursor"
+      onCreated={() => undefined}
+      setToast={() => undefined}
+    />
+  );
+
+  assert.match(markup, />Model</);
+  assert.match(markup, /value="auto" selected="">Auto/);
+  assert.doesNotMatch(markup, />Effort</);
 });
 
 test("floating ticket composer submit button is disabled for blank ideas", () => {
@@ -846,6 +1138,7 @@ test("floating ticket composer submit button is disabled for blank ideas", () =>
     <FloatingTicketComposer
       projectPath="/tmp/project"
       defaultEffort="medium"
+      selectedProviderId="codex"
       onCreated={() => undefined}
       setToast={() => undefined}
     />
@@ -860,6 +1153,7 @@ test("board view renders the ticket composer inside the workspace region", () =>
       board={boardSnapshot()}
       projectPath="/tmp/project"
       defaultEffort="medium"
+      selectedProviderId="codex"
       composerRef={undefined}
       onCreated={() => undefined}
       query=""
@@ -928,46 +1222,310 @@ test("repository chat panel content renders transcript, pending state, and contr
         { id: "assistant-1", role: "assistant", text: "The board is rendered in `BoardView`." }
       ]}
       draft="What owns selected project state?"
-      pending
+      pendingChat
+      pendingThinking
+      pendingDraft={false}
       errorMessage="Codex is not authenticated."
+      usesCursorAgent
+      draftType="feature"
+      priority="medium"
+      effort="medium"
+      cursorAgentModel="auto"
+      recording={false}
+      transcribing={false}
+      voiceSetupRequired={false}
+      voiceButtonLabel="Record idea with voice"
+      voiceButtonTooltip="Record voice idea"
+      voiceButtonDisabled={false}
       onDraftChange={noop}
-      onSubmit={noop}
+      onDraftBlur={noop}
+      onSubmitChat={noop}
+      onSubmitDraft={noop}
+      onDraftTypeChange={noop}
+      onPriorityChange={noop}
+      onEffortChange={noop}
+      onCursorAgentModelChange={noop}
+      onVoiceInput={noop}
       onClose={noop}
+      onClearChat={noop}
+      clearChatDisabled={false}
     />
   );
 
   assert.match(markup, /id="repository-chat-panel"/);
   assert.match(markup, /aria-label="Repository chat for Relay"/);
+  assert.match(markup, /aria-label="Clear repository chat"/);
+  assert.match(markup, /title="Clear chat"/);
   assert.match(markup, /aria-label="Close repository chat"/);
   assert.match(markup, />You</);
   assert.match(markup, /Where is the board rendered/);
   assert.match(markup, />Agent</);
   assert.match(markup, /BoardView/);
   assert.match(markup, /aria-busy="true"/);
-  assert.match(markup, /Reading repository context/);
+  assert.match(markup, /Thinking\.\.\./);
+  assert.doesNotMatch(markup, /Reading repository context/);
   assert.match(markup, /role="alert"/);
   assert.match(markup, /Codex is not authenticated/);
   assert.match(markup, /aria-label="Repository chat question"/);
-  assert.match(markup, /aria-label="Send repository chat question"/);
-  assert.match(markup, /disabled=""/);
+  assert.match(markup, /placeholder="Press Enter to chat, when ready click Draft ticket"/);
+  assert.doesNotMatch(markup, /repository-chat-enter-hint/);
+  assert.match(markup, /aria-label="Create ticket draft"/);
+  assert.match(markup, /repository-chat-option-trigger-label">Feature</);
+  assert.match(markup, /aria-label="Type: Feature"/);
+  assert.match(markup, /aria-label="Priority: Medium"/);
+  assert.doesNotMatch(markup, /<span>Type<\/span>/);
+  assert.match(markup, /repository-chat-action-row/);
 });
 
-test("repository chat send button is disabled for blank drafts", () => {
+test("repository chat shows Thinking... until streamed assistant content is visible", () => {
+  const noop = (): void => undefined;
+  const thinkingMarkup = renderToStaticMarkup(
+    <RepositoryChatPanelContent
+      projectName="Relay"
+      messages={[{ id: "user-1", role: "user", text: "How does streaming work?" }]}
+      draft=""
+      pendingChat
+      pendingThinking
+      pendingDraft={false}
+      errorMessage={null}
+      usesCursorAgent={false}
+      draftType="feature"
+      priority="medium"
+      effort="medium"
+      cursorAgentModel="auto"
+      recording={false}
+      transcribing={false}
+      voiceSetupRequired={false}
+      voiceButtonLabel="Record idea with voice"
+      voiceButtonTooltip="Record voice idea"
+      voiceButtonDisabled={false}
+      onDraftChange={noop}
+      onDraftBlur={noop}
+      onSubmitChat={noop}
+      onSubmitDraft={noop}
+      onDraftTypeChange={noop}
+      onPriorityChange={noop}
+      onEffortChange={noop}
+      onCursorAgentModelChange={noop}
+      onVoiceInput={noop}
+      onClose={noop}
+      onClearChat={noop}
+      clearChatDisabled={false}
+    />
+  );
+
+  const streamedMarkup = renderToStaticMarkup(
+    <RepositoryChatPanelContent
+      projectName="Relay"
+      messages={[
+        { id: "user-1", role: "user", text: "How does streaming work?" },
+        { id: "assistant-1", role: "assistant", text: "Streaming updates the transcript as deltas arrive." }
+      ]}
+      draft=""
+      pendingChat
+      pendingThinking={false}
+      pendingDraft={false}
+      errorMessage={null}
+      usesCursorAgent={false}
+      draftType="feature"
+      priority="medium"
+      effort="medium"
+      cursorAgentModel="auto"
+      recording={false}
+      transcribing={false}
+      voiceSetupRequired={false}
+      voiceButtonLabel="Record idea with voice"
+      voiceButtonTooltip="Record voice idea"
+      voiceButtonDisabled={false}
+      onDraftChange={noop}
+      onDraftBlur={noop}
+      onSubmitChat={noop}
+      onSubmitDraft={noop}
+      onDraftTypeChange={noop}
+      onPriorityChange={noop}
+      onEffortChange={noop}
+      onCursorAgentModelChange={noop}
+      onVoiceInput={noop}
+      onClose={noop}
+      onClearChat={noop}
+      clearChatDisabled={false}
+    />
+  );
+
+  assert.match(thinkingMarkup, /Thinking\.\.\./);
+  assert.match(thinkingMarkup, /repository-chat-message assistant thinking/);
+  assert.match(streamedMarkup, /Streaming updates the transcript as deltas arrive/);
+  assert.doesNotMatch(streamedMarkup, /Thinking\.\.\./);
+  assert.doesNotMatch(streamedMarkup, /repository-chat-message assistant thinking/);
+  assert.doesNotMatch(streamedMarkup, /repository-chat-message assistant pending/);
+});
+
+test("repository chat ticket action is enabled when the conversation has messages", () => {
+  const noop = (): void => undefined;
+  const markup = renderToStaticMarkup(
+    <RepositoryChatPanelContent
+      projectName="Relay"
+      messages={[{ id: "user-1", role: "user", text: "Where is auth handled?" }]}
+      draft="   "
+      pendingChat={false}
+      pendingThinking={false}
+      pendingDraft={false}
+      errorMessage={null}
+      usesCursorAgent={false}
+      draftType="feature"
+      priority="medium"
+      effort="medium"
+      cursorAgentModel="auto"
+      recording={false}
+      transcribing={false}
+      voiceSetupRequired={true}
+      voiceButtonLabel="Record idea with voice"
+      voiceButtonTooltip="Set up local Whisper path"
+      voiceButtonDisabled={false}
+      onDraftChange={noop}
+      onDraftBlur={noop}
+      onSubmitChat={noop}
+      onSubmitDraft={noop}
+      onDraftTypeChange={noop}
+      onPriorityChange={noop}
+      onEffortChange={noop}
+      onCursorAgentModelChange={noop}
+      onVoiceInput={noop}
+      onClose={noop}
+      onClearChat={noop}
+      clearChatDisabled={false}
+    />
+  );
+
+  assert.doesNotMatch(markup, /repository-chat-ticket-send" disabled=""/);
+});
+
+test("repository chat ticket action is disabled for blank drafts and empty chat", () => {
   const noop = (): void => undefined;
   const markup = renderToStaticMarkup(
     <RepositoryChatPanelContent
       projectName="Relay"
       messages={[]}
       draft="   "
-      pending={false}
+      pendingChat={false}
+      pendingThinking={false}
+      pendingDraft={false}
       errorMessage={null}
+      usesCursorAgent={false}
+      draftType="feature"
+      priority="medium"
+      effort="medium"
+      cursorAgentModel="auto"
+      recording={false}
+      transcribing={false}
+      voiceSetupRequired={true}
+      voiceButtonLabel="Record idea with voice"
+      voiceButtonTooltip="Set up local Whisper path"
+      voiceButtonDisabled={false}
       onDraftChange={noop}
-      onSubmit={noop}
+      onDraftBlur={noop}
+      onSubmitChat={noop}
+      onSubmitDraft={noop}
+      onDraftTypeChange={noop}
+      onPriorityChange={noop}
+      onEffortChange={noop}
+      onCursorAgentModelChange={noop}
+      onVoiceInput={noop}
       onClose={noop}
+      onClearChat={noop}
+      clearChatDisabled={false}
     />
   );
 
-  assert.match(markup, /Ask a read-only question about this repository/);
-  assert.match(markup, /repository-chat-send" disabled=""/);
-  assert.match(markup, /aria-label="Send repository chat question"/);
+  assert.match(markup, /turn the same idea into a ticket draft/);
+  assert.match(markup, /repository-chat-ticket-send" disabled=""/);
+  assert.match(markup, /aria-label="Create ticket draft"/);
+  assert.match(markup, /setup-required/);
+  assert.doesNotMatch(markup, /disabled=""[^>]*aria-label="Record idea with voice"/);
+});
+
+test("repository chat voice button reflects recording and transcription states", () => {
+  const noop = (): void => undefined;
+  const recordingMarkup = renderToStaticMarkup(
+    <RepositoryChatPanelContent
+      projectName="Relay"
+      messages={[]}
+      draft="record something"
+      pendingChat={false}
+      pendingThinking={false}
+      pendingDraft={false}
+      errorMessage={null}
+      usesCursorAgent={false}
+      draftType="feature"
+      priority="medium"
+      effort="medium"
+      cursorAgentModel="auto"
+      recording
+      transcribing={false}
+      voiceSetupRequired={false}
+      voiceButtonLabel="Stop recording and transcribe"
+      voiceButtonTooltip="Stop recording and transcribe"
+      voiceButtonDisabled={false}
+      onDraftChange={noop}
+      onDraftBlur={noop}
+      onSubmitChat={noop}
+      onSubmitDraft={noop}
+      onDraftTypeChange={noop}
+      onPriorityChange={noop}
+      onEffortChange={noop}
+      onCursorAgentModelChange={noop}
+      onVoiceInput={noop}
+      onClose={noop}
+      onClearChat={noop}
+      clearChatDisabled={false}
+    />
+  );
+
+  const transcribingMarkup = renderToStaticMarkup(
+    <RepositoryChatPanelContent
+      projectName="Relay"
+      messages={[]}
+      draft="record something"
+      pendingChat={false}
+      pendingThinking={false}
+      pendingDraft={false}
+      errorMessage={null}
+      usesCursorAgent={false}
+      draftType="feature"
+      priority="medium"
+      effort="medium"
+      cursorAgentModel="auto"
+      recording={false}
+      transcribing
+      voiceSetupRequired={false}
+      voiceButtonLabel="Transcribing voice input locally"
+      voiceButtonTooltip="Transcribing audio locally..."
+      voiceButtonDisabled
+      onDraftChange={noop}
+      onDraftBlur={noop}
+      onSubmitChat={noop}
+      onSubmitDraft={noop}
+      onDraftTypeChange={noop}
+      onPriorityChange={noop}
+      onEffortChange={noop}
+      onCursorAgentModelChange={noop}
+      onVoiceInput={noop}
+      onClose={noop}
+      onClearChat={noop}
+      clearChatDisabled={false}
+    />
+  );
+
+  assert.match(recordingMarkup, /aria-pressed="true"/);
+  assert.match(recordingMarkup, /recording/);
+  assert.match(transcribingMarkup, /spin/);
+});
+
+test("repository chat transcript component is memoized without draft props", () => {
+  const transcriptSource = readFileSync("src/renderer/src/components/RepositoryChatTranscript.tsx", "utf8");
+  const composerSource = readFileSync("src/renderer/src/components/RepositoryChatComposer.tsx", "utf8");
+
+  assert.match(transcriptSource, /memo\(/);
+  assert.doesNotMatch(transcriptSource, /RepositoryChatTranscriptProps[\s\S]*\bdraft\b/);
+  assert.match(composerSource, /\bdraft:\s*string/);
 });

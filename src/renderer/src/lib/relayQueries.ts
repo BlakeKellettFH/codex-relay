@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type {
+  AgentProviderInventory,
+  AgentProviderSwitchResult,
   AgentTicketUpdateInput,
   BoardSnapshot,
   CancelRunInput,
@@ -13,9 +15,13 @@ import type {
   FeatureTaskCreateRequest,
   GitMetadata,
   GitMetadataOptions,
+  LocalVoiceInputStatus,
   ProjectOpenInEditorInput,
   RendererRunEvent,
   RepositoryChatInput,
+  RepositoryChatSaveInput,
+  RepositoryChatStore,
+  RepositoryChatStreamEvent,
   RunSummary,
   StartRunInput,
   TicketAttachmentSaveInput,
@@ -24,6 +30,7 @@ import type {
   TicketRecord,
   TicketSaveInput
 } from "@shared/schemas";
+import type { TicketArchiveInput } from "@shared/http";
 import { relayApi } from "./relayApi";
 
 type ProjectPath = string | null | undefined;
@@ -32,6 +39,8 @@ type RunId = string | null | undefined;
 
 export const relayQueryKeys = {
   projects: ["relay", "projects"] as const,
+  providerInventory: ["relay", "agents", "providers"] as const,
+  voiceInputStatus: ["relay", "agents", "voice-input-status"] as const,
   board: (projectPath: ProjectPath) => ["relay", "board", projectPath ?? null] as const,
   ticket: (projectPath: ProjectPath, ticketId: TicketId) => ["relay", "ticket", projectPath ?? null, ticketId ?? null] as const,
   ticketClarifications: (projectPath: ProjectPath, ticketId: TicketId) =>
@@ -41,7 +50,8 @@ export const relayQueryKeys = {
   gitMetadata: (projectPath: ProjectPath) => ["relay", "git-metadata", projectPath ?? null] as const,
   runEvents: (projectPath: ProjectPath, ticketId: TicketId, runId: RunId) =>
     ["relay", "run-events", projectPath ?? null, ticketId ?? null, runId ?? null] as const,
-  runSummary: (projectPath: ProjectPath, ticketId: TicketId) => ["relay", "run-summary", projectPath ?? null, ticketId ?? null] as const
+  runSummary: (projectPath: ProjectPath, ticketId: TicketId) => ["relay", "run-summary", projectPath ?? null, ticketId ?? null] as const,
+  repositoryChat: (projectPath: ProjectPath) => ["relay", "repository-chat", projectPath ?? null] as const
 };
 
 export const relayErrorMessage = (error: unknown, fallback: string): string => (error instanceof Error ? error.message : fallback);
@@ -68,10 +78,81 @@ const invalidateTicketData = async (queryClient: QueryClient, projectPath: strin
 export const invalidateRelayProjectData = invalidateProjectData;
 export const invalidateRelayTicketData = invalidateTicketData;
 
+const invalidateTicketQueries = async (
+  queryClient: QueryClient,
+  projectPath: string,
+  ticketId?: string | null
+): Promise<void> => {
+  await Promise.all([
+    ticketId ? queryClient.invalidateQueries({ queryKey: relayQueryKeys.ticket(projectPath, ticketId) }) : Promise.resolve(),
+    ticketId
+      ? queryClient.invalidateQueries({ queryKey: relayQueryKeys.ticketClarifications(projectPath, ticketId) })
+      : Promise.resolve(),
+    ticketId ? queryClient.invalidateQueries({ queryKey: relayQueryKeys.runSummary(projectPath, ticketId) }) : Promise.resolve(),
+    ticketId ? queryClient.invalidateQueries({ queryKey: ["relay", "run-events", projectPath, ticketId] }) : Promise.resolve()
+  ]);
+};
+
+const relayTicketInvalidateTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Coalesce rapid SSE invalidations (e.g. many status_changed events during a run). */
+export const debouncedInvalidateRelayTicketData = (
+  queryClient: QueryClient,
+  projectPath: string,
+  ticketId?: string | null,
+  delayMs = 200
+): void => {
+  const key = `${projectPath}:${ticketId ?? ""}`;
+  const existing = relayTicketInvalidateTimers.get(key);
+  if (existing) clearTimeout(existing);
+  relayTicketInvalidateTimers.set(
+    key,
+    setTimeout(() => {
+      relayTicketInvalidateTimers.delete(key);
+      void invalidateTicketData(queryClient, projectPath, ticketId);
+    }, delayMs)
+  );
+};
+
+/** After extend_feature (or similar) removes a draft placeholder, refresh the real ticket without refetching the deleted id. */
+export const handleDraftPlaceholderResolved = async (
+  queryClient: QueryClient,
+  projectPath: string,
+  placeholderTicketId: string,
+  resolvedTicketId: string
+): Promise<void> => {
+  await invalidateRelayTicketData(queryClient, projectPath, resolvedTicketId);
+  await Promise.all([
+    queryClient.removeQueries({ queryKey: relayQueryKeys.ticket(projectPath, placeholderTicketId) }),
+    queryClient.removeQueries({ queryKey: relayQueryKeys.ticketClarifications(projectPath, placeholderTicketId) }),
+    queryClient.removeQueries({ queryKey: relayQueryKeys.runSummary(projectPath, placeholderTicketId) }),
+    queryClient.removeQueries({ queryKey: ["relay", "run-events", projectPath, placeholderTicketId] })
+  ]);
+};
+
 export const useProjectsQuery = () =>
   useQuery({
     queryKey: relayQueryKeys.projects,
     queryFn: () => relayApi.projects.list()
+  });
+
+export const useProviderInventoryQuery = () =>
+  useQuery({
+    queryKey: relayQueryKeys.providerInventory,
+    queryFn: () => relayApi.agents.providers(),
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 4_000)
+  });
+
+export const useVoiceInputStatusQuery = () =>
+  useQuery({
+    queryKey: relayQueryKeys.voiceInputStatus,
+    queryFn: () => relayApi.agents.voiceInputStatus(),
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+    retry: 1
   });
 
 export const useBoardQuery = (projectPath: ProjectPath) =>
@@ -179,13 +260,77 @@ export const useRefreshCodexStatusMutation = () => {
   });
 };
 
+export const setProviderInventoryQueryData = (queryClient: QueryClient, inventory: AgentProviderInventory): void => {
+  queryClient.setQueryData(relayQueryKeys.providerInventory, inventory);
+};
+
+export const syncProviderInventoryAfterSwitch = (queryClient: QueryClient, result: AgentProviderSwitchResult): void => {
+  if (!result.ok) return;
+  setProviderInventoryQueryData(queryClient, result.inventory);
+};
+
+export const useSwitchAgentProviderMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (providerId: AgentProviderInventory["selectedProviderId"]) => relayApi.agents.switchProvider({ providerId }),
+    onSuccess: async (result) => {
+      syncProviderInventoryAfterSwitch(queryClient, result);
+      await queryClient.invalidateQueries({ queryKey: relayQueryKeys.providerInventory });
+    }
+  });
+};
+
+export const setVoiceInputStatusQueryData = (queryClient: QueryClient, status: LocalVoiceInputStatus): void => {
+  queryClient.setQueryData(relayQueryKeys.voiceInputStatus, status);
+};
+
+export const useTranscribeVoiceInputMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { readonly audioBase64: string }) => relayApi.agents.transcribeVoiceInput(input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: relayQueryKeys.voiceInputStatus });
+    }
+  });
+};
+
+export const useConfigureVoiceInputMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { readonly commandPath: string }) => relayApi.agents.configureVoiceInput(input),
+    onSuccess: (status) => {
+      setVoiceInputStatusQueryData(queryClient, status);
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: relayQueryKeys.voiceInputStatus });
+    }
+  });
+};
+
 export const useMoveTicketMutation = () => {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: TicketMoveInput) => relayApi.tickets.move(input),
     onSuccess: async (board, input) => {
       queryClient.setQueryData(relayQueryKeys.board(input.projectPath), board);
-      await invalidateTicketData(queryClient, input.projectPath, input.ticketId);
+      await invalidateTicketQueries(queryClient, input.projectPath, input.ticketId);
+    }
+  });
+};
+
+export const useArchiveTicketMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: TicketArchiveInput) => relayApi.tickets.archive(input),
+    onSuccess: async (result, input) => {
+      queryClient.setQueryData(relayQueryKeys.board(input.projectPath), result.board);
+      queryClient.setQueryData(relayQueryKeys.ticket(input.projectPath, result.ticket.frontMatter.id), result.ticket);
+      const ticketIds =
+        input.ticketIds?.filter((ticketId) => ticketId.trim().length > 0) ??
+        (input.ticketId?.trim() ? [input.ticketId.trim()] : [result.ticket.frontMatter.id]);
+      await Promise.all(
+        ticketIds.map((ticketId) => invalidateTicketQueries(queryClient, input.projectPath, ticketId))
+      );
     }
   });
 };
@@ -365,9 +510,33 @@ export const useRepositoryChatMutation = () =>
     mutationFn: (input: RepositoryChatInput) => relayApi.codex.sendRepositoryChatMessage(input)
   });
 
-export const useRunEventSubscription = (listener: (event: RendererRunEvent) => void): (() => void) => relayApi.subscribeRunEvents(listener);
+export const useRepositoryChatQuery = (projectPath: string | null | undefined) =>
+  useQuery({
+    queryKey: relayQueryKeys.repositoryChat(projectPath),
+    queryFn: () => relayApi.projects.readRepositoryChat({ projectPath: projectPath! }),
+    enabled: Boolean(projectPath)
+  });
 
-export type BoardMoveInput = DragEndEvent;
+export const useSaveRepositoryChatMutation = () =>
+  useMutation({
+    mutationFn: (input: RepositoryChatSaveInput) => relayApi.projects.saveRepositoryChat(input)
+  });
+
+export const useClearRepositoryChatMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (projectPath: string) => relayApi.projects.clearRepositoryChat({ projectPath }),
+    onSuccess: (store, projectPath) => {
+      queryClient.setQueryData(relayQueryKeys.repositoryChat(projectPath), store);
+    }
+  });
+};
+
+export const useRunEventSubscription = (listener: (event: RendererRunEvent) => void): (() => void) => relayApi.subscribeRunEvents(listener);
+export const useRepositoryChatEventSubscription = (listener: (event: RepositoryChatStreamEvent) => void): (() => void) =>
+  relayApi.subscribeRepositoryChatEvents(listener);
+
+export type BoardMoveInput = TicketMoveInput;
 export type TicketMutationResult = TicketRecord | BoardSnapshot | void;
 export type GitMetadataQueryData = GitMetadata;
 export type RunSummaryQueryData = RunSummary | null;

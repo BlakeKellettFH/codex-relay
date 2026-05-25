@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks7danct6qhgam83b7qa4f43",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks7dand93t0q183ks5eja51x",
+  "runId": "run_01ks7danct6qhgam83b7qa4f43",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks7dand93t0q183ks5eja51x:run_01ks7danct6qhgam83b7qa4f43",
+  "status": "failed",
+  "attempts": 1,
+  "createdAt": "2026-05-22T08:37:44.512Z",
+  "updatedAt": "2026-05-22T08:44:43.024Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks7danec05zdwj752fperx6x",
+    "leaseToken": "lease_01ks7danecn9q50st504e8z5vt",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-22T08:37:44.524Z",
+    "heartbeatAt": "2026-05-22T08:37:44.527Z",
+    "startedAt": "2026-05-22T08:37:44.527Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "So this chat isnt workign.\nThe response goes into a \"read repository context\" with a spinner. and then it stays like that untill the full response.\n\nIm currently working on the cursor cli trying to get it to work.\n\nIm expecting a shorter \"thinking...\" then soon as response stream comes in then i want to start showing the response typing out.\n\nalso currently at the end when the response comes its not showing the response at all its just not there",
+    "priority": "medium",
+    "agentModel": "auto",
+    "preferredTicketType": "feature",
+    "draftScope": "product_feature",
+    "runIntake": true,
+    "runId": "run_01ks7danct6qhgam83b7qa4f43",
+    "ticketId": "tkt_01ks7dand93t0q183ks5eja51x"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "The agent returned an invalid ticket draft. Your rough idea is still available; retry the agent when ready.",
+  "error": {
+    "code": "invalid_response",
+    "message": "The agent returned an invalid ticket draft. Your rough idea is still available; retry the agent when ready.",
+    "recoverable": true,
+    "requestId": "tdr_01ks7dg1bjy52vh60h030jszk4",
+    "durationMs": 242447,
+    "reason": "invalid_agent_response"
+  }
+}

@@ -68,34 +68,49 @@ export const ticketRoutes = [
       return yield* BoardWorkflows.readBoard(input.projectPath);
     })
   ),
+  route(ticketEndpoints.archive, (input) =>
+    Effect.gen(function*() {
+      const bundleIds = input.ticketIds?.filter((ticketId) => ticketId.trim().length > 0) ?? [];
+      if (bundleIds.length > 0) {
+        return yield* TicketWorkflows.archiveTicketBundle(input.projectPath, bundleIds);
+      }
+      const ticketId = input.ticketId?.trim();
+      if (!ticketId) {
+        return yield* Effect.fail(new Error("Provide ticketId or ticketIds to archive."));
+      }
+      return yield* TicketWorkflows.archiveTicket(input.projectPath, ticketId);
+    })
+  ),
   route(ticketEndpoints.clarifications, ({ projectPath, ticketId }) =>
     TicketWorkflows.listClarifications(projectPath, ticketId)
   ),
   route(ticketEndpoints.answerClarification, (input) =>
     Effect.gen(function*() {
       const answer = yield* TicketWorkflows.answerClarification(input);
-      void maybeFinalizeImplementationScopeAfterClarification(input.projectPath, input.ticketId)
-        .then((ticket) => {
-          if (ticket?.frontMatter.status === "ready") {
-            return notifyTicketReadyForScheduling(input.projectPath, input.ticketId);
-          }
-        })
-        .catch((error) =>
-          logError("codex:run", "finalize implementation scope after clarification failed", error, {
+      setImmediate(() => {
+        void maybeFinalizeImplementationScopeAfterClarification(input.projectPath, input.ticketId)
+          .then((ticket) => {
+            if (ticket?.frontMatter.status === "ready") {
+              return notifyTicketReadyForScheduling(input.projectPath, input.ticketId);
+            }
+          })
+          .catch((error) =>
+            logError("codex:run", "finalize implementation scope after clarification failed", error, {
+              projectPath: input.projectPath,
+              ticketId: input.ticketId,
+              questionId: input.questionId
+            })
+          );
+        void maybeResumeTicketDraftAfterClarification(input.projectPath, input.ticketId, {
+          runEventSink: httpRunEventSink()
+        }).catch((error) =>
+          logError("codex:draft", "auto-resume after clarification failed", error, {
             projectPath: input.projectPath,
             ticketId: input.ticketId,
             questionId: input.questionId
           })
         );
-      void maybeResumeTicketDraftAfterClarification(input.projectPath, input.ticketId, {
-        runEventSink: httpRunEventSink()
-      }).catch((error) =>
-        logError("codex:draft", "auto-resume after clarification failed", error, {
-          projectPath: input.projectPath,
-          ticketId: input.ticketId,
-          questionId: input.questionId
-        })
-      );
+      });
       return answer;
     })
   ),

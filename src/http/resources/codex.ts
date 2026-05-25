@@ -11,6 +11,7 @@ import {
   sendRepositoryChatMessage,
   startCodexRun
 } from "../../services/codex";
+import { publishRelayHttpRepositoryChatEvent } from "../RelayHttpEvents";
 import { httpRunEventSink } from "./runEventSink";
 import { route, type HttpResourceRoute } from "./types";
 
@@ -23,7 +24,13 @@ export const codexRoutes = [
   route(codexEndpoints.approveAction, ({ approvalId, decision }) =>
     fromPromise(() => approveCodexAction(approvalId, decision))
   ),
-  route(codexEndpoints.sendRepositoryChatMessage, (input) => fromPromise(() => sendRepositoryChatMessage(input))),
+  route(codexEndpoints.sendRepositoryChatMessage, (input) =>
+    fromPromise(() =>
+      sendRepositoryChatMessage(input, {
+        onStreamEvent: publishRelayHttpRepositoryChatEvent
+      })
+    )
+  ),
   route(codexEndpoints.readRunEvents, ({ projectPath, ticketId, runId }) =>
     fromPromise(() => readCodexRunEvents(projectPath, ticketId, runId))
   ),

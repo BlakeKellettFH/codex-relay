@@ -40,7 +40,8 @@ export type CodexCancelRunResult = SchemaType<typeof codexCancelRunResultSchema>
 export const repositoryChatInputSchema = passthroughStruct({
   projectPath: Schema.String,
   message: Schema.String,
-  threadId: Schema.optional(Schema.NullOr(Schema.String))
+  threadId: Schema.optional(Schema.NullOr(Schema.String)),
+  requestId: Schema.optional(Schema.NullOr(Schema.String))
 });
 export type RepositoryChatInput = SchemaType<typeof repositoryChatInputSchema>;
 
@@ -49,6 +50,35 @@ export const repositoryChatResponseSchema = Schema.Struct({
   message: Schema.String
 });
 export type RepositoryChatResponse = SchemaType<typeof repositoryChatResponseSchema>;
+
+export const repositoryChatStreamEventSchema = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("started"),
+    requestId: Schema.String,
+    projectPath: Schema.String,
+    threadId: Schema.NullOr(Schema.String)
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delta"),
+    requestId: Schema.String,
+    projectPath: Schema.String,
+    text: Schema.String
+  }),
+  Schema.Struct({
+    type: Schema.Literal("completed"),
+    requestId: Schema.String,
+    projectPath: Schema.String,
+    threadId: Schema.String,
+    message: Schema.String
+  }),
+  Schema.Struct({
+    type: Schema.Literal("failed"),
+    requestId: Schema.String,
+    projectPath: Schema.String,
+    message: Schema.String
+  })
+]);
+export type RepositoryChatStreamEvent = SchemaType<typeof repositoryChatStreamEventSchema>;
 
 export const relayApprovalDecisionSchema = Schema.Literals([
   "accept",
@@ -165,6 +195,8 @@ const relayCodexEventMembers = [
   Schema.Struct({
     type: Schema.Literal("run.completed"),
     finalResponse: Schema.String,
+    /** When a draft placeholder ticket is removed (e.g. extend_feature), the ticket to open instead. */
+    resolvedTicketId: Schema.optional(Schema.String),
     usage: Schema.optional(Schema.Unknown),
     finalStatus: Schema.optional(runStatusSchema),
     timestamp: isoString
@@ -218,6 +250,16 @@ export const runUsageSummarySchema = Schema.Struct({
 });
 export type RunUsageSummary = SchemaType<typeof runUsageSummarySchema>;
 
+export const runChangedFileSchema = Schema.Struct({
+  path: Schema.String,
+  eventCount: numberSchema,
+  kinds: mutableArray(Schema.String),
+  firstChangedAt: isoString,
+  lastChangedAt: isoString,
+  lastSummary: Schema.NullOr(Schema.String)
+});
+export type RunChangedFile = SchemaType<typeof runChangedFileSchema>;
+
 export const runSummarySchema = Schema.Struct({
   schemaVersion: numberSchema,
   ticketId: Schema.String,
@@ -228,6 +270,7 @@ export const runSummarySchema = Schema.Struct({
   durationMs: Schema.NullOr(numberSchema),
   finalStatus: Schema.NullOr(runStatusSchema),
   usage: Schema.NullOr(runUsageSummarySchema),
+  changedFiles: mutableArray(runChangedFileSchema),
   eventCount: numberSchema,
   latestEventAt: Schema.NullOr(isoString)
 });

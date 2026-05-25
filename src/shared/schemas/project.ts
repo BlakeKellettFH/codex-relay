@@ -11,7 +11,7 @@ const agentConcurrencySchema = withDefault(
       Number.isInteger(value) && value >= 1 ? undefined : "Expected an integer greater than or equal to 1"
     )
   ),
-  () => 1
+  () => 3
 );
 
 export const projectSettingsSchema = Schema.Struct({

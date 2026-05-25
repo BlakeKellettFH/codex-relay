@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ksez0ny1wyhmzt5kfgfbd764",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ksez0nykeeqpkqty81dcnm03",
+  "runId": "run_01ksez0ny1wyhmzt5kfgfbd764",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ksez0nykeeqpkqty81dcnm03:run_01ksez0ny1wyhmzt5kfgfbd764",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-25T07:01:32.763Z",
+  "updatedAt": "2026-05-25T07:12:43.917Z",
+  "lastAppliedEventSequence": 5,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ksez0nz3rwmqxdqb4ekn8ecv",
+    "leaseToken": "lease_01ksez0nz357r67r4hcqd9rtjn",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-25T07:01:32.771Z",
+    "heartbeatAt": "2026-05-25T07:01:32.773Z",
+    "startedAt": "2026-05-25T07:01:32.773Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "Repository chat context:\nUser: When creating the tasks under the feature i want to give them like a priority in terms of dependancy, as some tickets in the feature will be dependant on other tasks. and some will be isolated. Then what will happen is when we perform a task and its in review, any other tasks that are dependant on that task finishing should wait in ready untill the dependant tasks are complete\n\nCreate a ticket from this latest user request:\nUser: When creating the tasks under the feature i want to give them like a priority in terms of dependancy, as some tickets in the feature will be dependant on other tasks. and some will be isolated. Then what will happen is when we perform a task and its in review, any other tasks that are dependant on that task finishing should wait in ready untill the dependant tasks are complete",
+    "priority": "medium",
+    "agentModel": "auto",
+    "preferredTicketType": "feature",
+    "draftScope": "product_feature",
+    "runIntake": true,
+    "runId": "run_01ksez0ny1wyhmzt5kfgfbd764",
+    "ticketId": "tkt_01ksez0nykeeqpkqty81dcnm03"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket draft completed.",
+  "result": {
+    "ticketId": "tkt_01ksez0nykeeqpkqty81dcnm03",
+    "title": "Feature lean-task dependencies and Ready-wait behavior"
+  }
+}

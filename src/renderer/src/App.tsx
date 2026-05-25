@@ -10,12 +10,16 @@ import {
   Copy,
   ArrowLeft,
   Eye,
+  FileText,
   Folder,
   FolderOpen,
   FolderPlus,
   Loader2,
   Maximize2,
+  Ban,
+  CircleHelp,
   MessageCircle,
+  Mic,
   Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
@@ -27,6 +31,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  Square,
   Trash2,
   Undo2,
   X
@@ -45,16 +50,23 @@ import {
   RELAY_ARCHIVE_STATUS,
   RELAY_COMPLETED_STATUS,
   RELAY_IN_PROGRESS_STATUS,
+  RELAY_NEEDS_CLARIFICATION_STATUS,
   RELAY_NOT_DOING_STATUS,
   RELAY_READY_STATUS,
   RELAY_REVIEW_STATUS,
   RELAY_TODO_STATUS
 } from "@shared/schemas";
 import type {
+  AgentProviderInventory,
+  AgentProviderRecord,
+  AgentTicketUpdateInput,
+  AgentTicketUpdateStartResult,
   BoardSnapshot,
   ClarificationQuestion,
   CodexStatus,
+  AgentProviderId,
   CreateDraftInput,
+  CursorAgentModel,
   CodexRunPreflightResult,
   DraftIntakeQuestion,
   DraftIntakeResult,
@@ -72,6 +84,7 @@ import type {
   TicketEffort,
   TicketPriority,
   TicketReferenceCandidate,
+  RepositoryChatMessage,
   TicketRecord,
   TicketSummary,
   TicketType
@@ -87,18 +100,29 @@ import { ClarificationPanel } from "./components/ClarificationPanel";
 import { GitMetadataPill, loadingGitMetadata } from "./components/GitMetadata";
 import { MarkdownBlock } from "./components/MarkdownBlock";
 import { Button, Dialog, DialogBackdrop, Dropdown, DropdownSelect, Field, IconButton, Input, Select, Textarea, Tooltip } from "./components/ui";
+import type { LucideIcon } from "lucide-react";
 import { activeRunElapsedLabel, formatElapsedDuration, isAgentSessionActive, mergeRunEvents } from "./lib/agentProgress";
 import { stripPlannedFileScopeSection, ticketRecordPreviewSummary } from "./lib/markdown";
+import {
+  createRepositoryChatPersist,
+  repositoryChatStoreSignature,
+  type RepositoryChatPersistController
+} from "./lib/repositoryChatPersist";
 
 export { activeRunElapsedLabel } from "./lib/agentProgress";
 import { BoardHierarchyVisualProvider } from "./components/BoardHierarchyVisualContext";
 import { TicketDetailTypeIndicator } from "./components/TicketDetailTypeIndicator";
 import {
+  ARCHIVE_TICKET_UPDATE_REQUEST,
   archiveBundleForEpic,
   archiveBundleForFeature,
   epicCanArchive,
-  featureCanArchive
+  featureCanArchive,
+  showTaskArchive,
+  sortArchiveBundleIds,
+  taskCanArchive
 } from "./lib/boardArchive";
+import { relayApi } from "./lib/relayApi";
 import { BoardTaskCardLeading } from "./components/BoardTaskCardLeading";
 import {
   BoardDragProvider,
@@ -110,6 +134,8 @@ import {
 import { EpicBoardGroup } from "./components/EpicBoardGroup";
 import { FeatureBoardGroup } from "./components/FeatureBoardGroup";
 import { TicketCardContent } from "./components/TicketCardContent";
+import { RepositoryChatComposer } from "./components/RepositoryChatComposer";
+import { RepositoryChatTranscript } from "./components/RepositoryChatTranscript";
 
 export { TicketCardContent } from "./components/TicketCardContent";
 import { isImplementationContinuation } from "@shared/implementationRun";
@@ -117,8 +143,15 @@ import {
   countColumnTicketsForDisplay,
   flattenBoardColumnsTicketIds,
   isTaskProcessable,
+  isTaskReadyPlaceable,
   organizeColumnBoardItems
 } from "./lib/boardColumnLayout";
+import {
+  boardColumnAcceptsActiveDrag,
+  boardColumnGridTemplateColumns,
+  boardColumnGridTrack,
+  shouldMinifyBoardColumn
+} from "./lib/boardColumnDisplay";
 import {
   boardDragAllowsNotDoingDrop,
   boardDragId,
@@ -152,8 +185,9 @@ import {
   type ShortcutDirection
 } from "./lib/keyboardShortcuts";
 import {
+  debouncedInvalidateRelayTicketData,
+  handleDraftPlaceholderResolved,
   invalidateRelayProjectData,
-  invalidateRelayTicketData,
   relayErrorMessage,
   relayOpenProjectInEditor,
   useAddProjectMutation,
@@ -162,7 +196,7 @@ import {
   useBoardQuery,
   useCancelRunMutation,
   useCancelTicketUpdateMutation,
-  useCodexStatusQuery,
+  useConfigureVoiceInputMutation,
   useCreateDraftMutation,
   useCreateSubticketMutation,
   useDeleteTicketMutation,
@@ -173,9 +207,14 @@ import {
   usePreflightRunMutation,
   useProjectGitMetadataQuery,
   useProjectsQuery,
+  useProviderInventoryQuery,
+  useClearRepositoryChatMutation,
+  useRepositoryChatEventSubscription,
   useRemoveProjectMutation,
   useRedraftTicketMutation,
   useRepositoryChatMutation,
+  useRepositoryChatQuery,
+  useSaveRepositoryChatMutation,
   useRevealProjectMutation,
   useRevealTicketFileMutation,
   useRunEventSubscription,
@@ -185,12 +224,15 @@ import {
   useSaveTicketMutation,
   useStartRunMutation,
   useStartTicketUpdateMutation,
+  useSwitchAgentProviderMutation,
   useTicketClarificationsQuery,
   useTicketQuery,
   useTicketReferencesQuery,
+  useTranscribeVoiceInputMutation,
   useUnlinkSubticketMutation,
   useCreateTaskUnderFeatureMutation,
-  useLinkFeatureSubticketMutation
+  useLinkFeatureSubticketMutation,
+  useVoiceInputStatusQuery
 } from "./lib/relayQueries";
 import {
   filterTicketReferenceCandidates,
@@ -202,10 +244,32 @@ import {
 export type Toast = { kind: "info" | "error" | "success"; message: string } | null;
 type TicketMarkdownMode = "preview" | "edit";
 type CodexRailTone = "loading" | "ok" | "warning" | "error";
-export type RepositoryChatMessage = { id: string; role: "user" | "assistant"; text: string };
+export type { RepositoryChatMessage };
+
+export const REPOSITORY_CHAT_COMPOSER_PLACEHOLDER =
+  "Press Enter to chat, when ready click Draft ticket";
 export type RepositoryChatShellState = {
   repositoryChatActive: boolean;
   repositoryChatPanelVisible: boolean;
+};
+
+const repositoryChatMessageHasVisibleText = (message: RepositoryChatMessage | undefined): boolean =>
+  Boolean(message && message.text.trim().length > 0);
+
+const repositoryChatDraftIdeaFromConversation = (
+  messages: readonly RepositoryChatMessage[],
+  nextUserPrompt: string
+): string => {
+  const trimmedPrompt = nextUserPrompt.trim();
+  const transcript = messages
+    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.text.trim()}`)
+    .filter((entry) => entry.length > 0)
+    .join("\n\n");
+  if (!transcript) return trimmedPrompt;
+  if (!trimmedPrompt) {
+    return `Repository chat context:\n${transcript}\n\nCreate a ticket from this repository chat conversation.`;
+  }
+  return `Repository chat context:\n${transcript}\n\nCreate a ticket from this latest user request:\nUser: ${trimmedPrompt}`;
 };
 
 export function getRepositoryChatShellState({
@@ -227,6 +291,61 @@ type DraftMessageKind = "info" | "error";
 type ActiveTicketReferenceMention = {
   token: TicketMentionToken;
 };
+
+export const repositoryChatMessageSequence = (messages: readonly RepositoryChatMessage[]): number => {
+  let max = 0;
+  for (const message of messages) {
+    const match = /^(?:user|assistant)-(\d+)$/.exec(message.id);
+    if (match) max = Math.max(max, Number.parseInt(match[1]!, 10));
+  }
+  return max;
+};
+
+export type RepositoryChatHydrationAction = "already_hydrated" | "apply_store" | "skip_local";
+
+export const shouldMarkRepositoryChatUserEditedBeforeHydration = (input: {
+  persistReady: boolean;
+  querySuccess: boolean;
+}): boolean => !input.persistReady && input.querySuccess;
+
+export const resolveRepositoryChatHydrationAction = (input: {
+  hydratedProjectPath: string | null;
+  projectPath: string;
+  querySuccess: boolean;
+  userEditedBeforeHydration: boolean;
+  streaming: boolean;
+  messageCount: number;
+  threadId: string | null;
+}): RepositoryChatHydrationAction => {
+  if (!input.querySuccess) return "already_hydrated";
+  if (input.hydratedProjectPath === input.projectPath) return "already_hydrated";
+  if (
+    input.streaming ||
+    input.messageCount > 0 ||
+    input.threadId ||
+    input.userEditedBeforeHydration
+  ) {
+    return "skip_local";
+  }
+  return "apply_store";
+};
+
+const emptyRepositoryChatPanelState = (): {
+  threadId: null;
+  messages: RepositoryChatMessage[];
+  draft: string;
+  messageSequence: number;
+} => ({
+  threadId: null,
+  messages: [],
+  draft: "",
+  messageSequence: 0
+});
+
+const nextRepositoryChatRequestId = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `rch_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
 type TicketReferenceMenuRect = {
   left: number;
@@ -323,8 +442,8 @@ export const getTicketReferenceMenuLayout = ({
 
 const priorityOptions: TicketPriority[] = ["low", "medium", "high", "urgent"];
 const ticketEffortOptions: TicketEffort[] = ["low", "medium", "high", "xhigh"];
-export type FloatingComposerDraftType = "auto" | "epic" | "feature";
-const floatingComposerDraftTypeOptions: FloatingComposerDraftType[] = ["auto", "epic", "feature"];
+export type FloatingComposerDraftType = "epic" | "feature";
+const floatingComposerDraftTypeOptions: FloatingComposerDraftType[] = ["epic", "feature"];
 const draftScopeLabel = (scope: "auto" | DraftScope): string => {
   switch (scope) {
     case "auto":
@@ -344,8 +463,6 @@ const draftScopeLabel = (scope: "auto" | DraftScope): string => {
 
 const floatingComposerDraftTypeLabel = (value: FloatingComposerDraftType): string => {
   switch (value) {
-    case "auto":
-      return "Auto";
     case "epic":
       return "Epic";
     case "feature":
@@ -358,28 +475,29 @@ export const getFloatingComposerDraftInput = ({
   idea,
   priority,
   effort,
+  agentModel,
+  selectedProviderId,
   draftType
 }: {
   projectPath: string;
   idea: string;
   priority: TicketPriority;
-  effort: TicketEffort;
+  effort?: TicketEffort;
+  agentModel?: CursorAgentModel;
+  selectedProviderId: AgentProviderId;
   draftType: FloatingComposerDraftType;
 }): CreateDraftInput => {
   const baseInput = {
     projectPath,
     idea,
     priority,
-    effort,
-    runIntake: true
-  } satisfies Pick<CreateDraftInput, "projectPath" | "idea" | "priority" | "effort" | "runIntake">;
+    runIntake: true,
+    ...(selectedProviderId === "cursor"
+      ? { agentModel: agentModel ?? "auto" }
+      : { effort: effort ?? "medium" })
+  } satisfies CreateDraftInput;
 
   switch (draftType) {
-    case "auto":
-      return {
-        ...baseInput,
-        autoHierarchy: true
-      };
     case "epic":
       return {
         ...baseInput,
@@ -887,20 +1005,119 @@ export const codexStatusConnected = (tone: CodexRailTone): boolean => tone === "
 /** @deprecated Use {@link getCodexStatusDisplay}. */
 export const getCodexStatusRailDisplay = getCodexStatusDisplay;
 
+type ProviderInventoryDisplayOptions = {
+  readonly isLoading?: boolean;
+  readonly isError?: boolean;
+};
+
+const providerOrder = ["codex", "cursor", "claude"] as const;
+
+const orderedProviderRecords = (inventory: AgentProviderInventory | undefined): AgentProviderRecord[] => {
+  if (!inventory) return [];
+  const byId = new Map(inventory.providers.map((provider) => [provider.id, provider] as const));
+  return providerOrder.map((providerId) => byId.get(providerId)).filter((provider): provider is AgentProviderRecord => Boolean(provider));
+};
+
+const selectedProviderRecord = (inventory: AgentProviderInventory | undefined): AgentProviderRecord | undefined =>
+  inventory?.providers.find((provider) => provider.id === inventory.selectedProviderId);
+
+const providerDisplayTone = (provider: AgentProviderRecord): CodexRailTone => {
+  if (provider.status === "ready") return "ok";
+  if (provider.installState === "not_installed" || provider.status === "unavailable") return "error";
+  if (provider.authState === "unauthenticated" || provider.status === "unauthenticated") return "warning";
+  return "warning";
+};
+
+const providerConnectedLabel = (provider: AgentProviderRecord): string => {
+  if (provider.status === "ready") return "Connected";
+  if (provider.installState === "not_installed" || provider.status === "unavailable") return "Not installed";
+  if (provider.authState === "unauthenticated" || provider.status === "unauthenticated") return "Not connected";
+  return "Status unknown";
+};
+
+const providerSelectorStatusCopy = (provider: AgentProviderRecord): string => {
+  if (provider.status === "ready") return "Installed and connected";
+  if (provider.installState === "not_installed") return "Not installed";
+  if (provider.authState === "unauthenticated" || provider.status === "unauthenticated") return "Installed, sign in required";
+  if (provider.installState === "installed" && provider.status === "unknown") return "Installed, status unknown";
+  if (provider.installState === "unknown") return "Install status unknown";
+  return "Status unavailable";
+};
+
+const isBoilerplateProviderMessage = (provider: AgentProviderRecord): boolean => {
+  const { message, label, status } = provider;
+  if (status === "ready" && message === `${label} is available.`) return true;
+  if (status === "unavailable" && (message === `${label} is not installed.` || message.includes("not found on PATH"))) return true;
+  if (status === "unauthenticated" && message.includes("could not find authentication")) return true;
+  if (status === "unknown" && message === `${label} status could not be determined.`) return true;
+  return false;
+};
+
+const providerSelectorDetailMessage = (provider: AgentProviderRecord): string | null => {
+  const message = provider.message.trim();
+  if (!message || isBoilerplateProviderMessage(provider)) return null;
+  if (message === providerSelectorStatusCopy(provider)) return null;
+  return message;
+};
+
+const providerDisabledReason = (
+  inventory: AgentProviderInventory,
+  provider: AgentProviderRecord,
+  isSelected: boolean
+): string | null => {
+  if (isSelected) return null;
+  if (!inventory.switchability.canSwitch) {
+    return inventory.switchability.message ?? "Finish active provider work before switching CLIs.";
+  }
+  if (provider.canSelect) return null;
+  switch (provider.blockedReasonCode) {
+    case "provider_unauthenticated":
+      return "Sign in before Relay can use this CLI.";
+    case "provider_unavailable":
+      return `${provider.label} must be installed before Relay can use it.`;
+    case "provider_status_unknown":
+      return `${provider.label} status could not be verified.`;
+    case "busy":
+      return provider.blockedReasonMessage ?? "Finish active provider work before switching CLIs.";
+    default:
+      return provider.blockedReasonMessage ?? null;
+  }
+};
+
+export const getProviderInventoryDisplay = (
+  inventory: AgentProviderInventory | undefined,
+  options: ProviderInventoryDisplayOptions = {}
+): { tone: CodexRailTone; label: string } => {
+  const isLoading = options.isLoading ?? false;
+  const isError = options.isError ?? false;
+  const selectedProvider = selectedProviderRecord(inventory);
+
+  if (!selectedProvider) {
+    if (isLoading) return { tone: "loading", label: "CLI: Checking..." };
+    if (isError) return { tone: "error", label: "CLI: Unavailable" };
+    return { tone: "loading", label: "CLI: Checking..." };
+  }
+
+  return {
+    tone: providerDisplayTone(selectedProvider),
+    label: `${selectedProvider.label}: ${providerConnectedLabel(selectedProvider)}`
+  };
+};
+
 export function CodexCollapsedStatusIndicator({
-  codexStatus,
+  providerInventory,
   isLoading = false,
   isError = false,
   isRefreshing = false,
-  onRefresh
+  onOpenSelector
 }: {
-  codexStatus: CodexStatus | undefined;
+  providerInventory: AgentProviderInventory | undefined;
   isLoading?: boolean;
   isError?: boolean;
   isRefreshing?: boolean;
-  onRefresh: () => void;
+  onOpenSelector: () => void;
 }): ReactElement {
-  const display = getCodexStatusDisplay(codexStatus, { isLoading, isError });
+  const display = getProviderInventoryDisplay(providerInventory, { isLoading, isError });
   const connected = codexStatusConnected(display.tone);
   const busy = isLoading || isRefreshing;
 
@@ -912,7 +1129,7 @@ export function CodexCollapsedStatusIndicator({
         "sidebar-codex-indicator-button",
         connected ? "connected" : "disconnected"
       )}
-      onClick={onRefresh}
+      onClick={onOpenSelector}
       aria-label={display.label}
       title={display.label}
       aria-busy={busy || undefined}
@@ -923,41 +1140,131 @@ export function CodexCollapsedStatusIndicator({
 }
 
 export function CodexSidebarStatus({
-  codexStatus,
+  providerInventory,
   isLoading = false,
   isError = false,
   isRefreshing = false,
-  onRefresh
+  onOpenSelector
 }: {
-  codexStatus: CodexStatus | undefined;
+  providerInventory: AgentProviderInventory | undefined;
   isLoading?: boolean;
   isError?: boolean;
   isRefreshing?: boolean;
-  onRefresh: () => void;
+  onOpenSelector: () => void;
 }): ReactElement {
-  const display = getCodexStatusDisplay(codexStatus, { isLoading, isError });
+  const display = getProviderInventoryDisplay(providerInventory, { isLoading, isError });
   const connected = codexStatusConnected(display.tone);
 
   return (
-    <div className={clsx("sidebar-codex-status", display.tone, connected && "connected")}>
+    <Button
+      type="button"
+      className={clsx("sidebar-codex-status", display.tone, connected && "connected")}
+      onClick={onOpenSelector}
+      aria-label={`Open CLI selector. ${display.label}`}
+      title={display.label}
+      aria-busy={isRefreshing || undefined}
+    >
       <span className="sidebar-codex-status-label">{display.label}</span>
-      <Button
-        type="button"
-        className="sidebar-codex-status-refresh"
-        onClick={onRefresh}
-        aria-label="Refresh Codex status"
-        title="Refresh Codex status"
-        aria-busy={isRefreshing || undefined}
-        disabled={isRefreshing}
-      >
-        {isRefreshing ? <Loader2 className="spin" size={12} /> : <RefreshCw size={12} />}
-      </Button>
-    </div>
+      {isRefreshing ? <Loader2 className="spin" size={12} /> : <Plug size={12} />}
+    </Button>
   );
 }
 
 /** @deprecated Use {@link CodexSidebarStatus}. */
 export const CodexStatusRail = CodexSidebarStatus;
+
+export function CliProviderSelectorModal({
+  inventory,
+  isLoading = false,
+  isError = false,
+  isSwitching = false,
+  onClose,
+  onSelectProvider
+}: {
+  inventory: AgentProviderInventory | undefined;
+  isLoading?: boolean;
+  isError?: boolean;
+  isSwitching?: boolean;
+  onClose: () => void;
+  onSelectProvider: (providerId: AgentProviderRecord["id"]) => void;
+}): ReactElement {
+  useShortcutOverlay({
+    id: "provider-selector",
+    priority: 25,
+    onEscape: () => {
+      onClose();
+      return true;
+    }
+  });
+
+  const providers = orderedProviderRecords(inventory);
+
+  return (
+    <DialogBackdrop
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <Dialog className="modal provider-selector-modal" aria-labelledby="provider-selector-title">
+        <header>
+          <div>
+            <h2 id="provider-selector-title">Choose agent CLI</h2>
+            <p>Select which installed CLI Relay should use for agent runs.</p>
+          </div>
+          <div className="provider-selector-header-actions">
+            <IconButton type="button" className="icon-button" onClick={onClose} aria-label="Close CLI selector" title="Close CLI selector">
+              <X size={16} />
+            </IconButton>
+          </div>
+        </header>
+        {!inventory?.switchability.canSwitch && inventory?.switchability.message ? (
+          <div className="provider-selector-banner" role="status">
+            {inventory.switchability.message}
+          </div>
+        ) : null}
+        {inventory ? (
+          <div className="provider-selector-list" role="list" aria-label="CLI providers">
+            {providers.map((provider) => {
+              const isSelected = inventory.selectedProviderId === provider.id;
+              const disabledReason = providerDisabledReason(inventory, provider, isSelected);
+              const detailMessage = providerSelectorDetailMessage(provider);
+              const actionDisabled = isSelected || Boolean(disabledReason) || isSwitching;
+
+              return (
+                <section className={clsx("provider-selector-row", isSelected && "selected")} key={provider.id} role="listitem">
+                  <div className="provider-selector-copy">
+                    <div className="provider-selector-heading">
+                      <h3>{provider.label}</h3>
+                      {provider.version ? <span className="provider-selector-version">{provider.version}</span> : null}
+                    </div>
+                    <p className="provider-selector-status">{providerSelectorStatusCopy(provider)}</p>
+                    {detailMessage ? <p className="provider-selector-message">{detailMessage}</p> : null}
+                    {disabledReason ? <p className="provider-selector-disabled-reason">{disabledReason}</p> : null}
+                  </div>
+                  <div className="provider-selector-action">
+                    <Button
+                      type="button"
+                      className={clsx(isSelected && "primary-button")}
+                      disabled={actionDisabled}
+                      aria-current={isSelected ? "true" : undefined}
+                      onClick={() => onSelectProvider(provider.id)}
+                    >
+                      {isSelected ? "In use" : "Use CLI"}
+                    </Button>
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="provider-selector-empty" role="status">
+            {isError ? "Unable to load CLI status. Refresh and try again." : isLoading ? "Checking available CLIs..." : "No CLI status available."}
+          </div>
+        )}
+      </Dialog>
+    </DialogBackdrop>
+  );
+}
 
 // Markdown audit: create-ticket drafts, ticket detail bodies, clarification text,
 // and generated Codex completion/final-response console events use MarkdownBlock.
@@ -1024,11 +1331,11 @@ export function ProjectSidebar({
   onReveal,
   onToggleVisibility,
   toggleShortcutLabel,
-  codexStatus,
-  codexStatusLoading,
-  codexStatusError,
-  codexStatusRefreshing,
-  onRefreshCodexStatus,
+  providerInventory,
+  providerInventoryLoading,
+  providerInventoryError,
+  providerInventoryRefreshing,
+  onOpenProviderSelector,
   defaultExpandedProjectPaths = []
 }: {
   projects: ProjectSummary[];
@@ -1040,11 +1347,11 @@ export function ProjectSidebar({
   onReveal: (projectPath: string) => void;
   onToggleVisibility: () => void;
   toggleShortcutLabel: string;
-  codexStatus: CodexStatus | undefined;
-  codexStatusLoading: boolean;
-  codexStatusError: boolean;
-  codexStatusRefreshing: boolean;
-  onRefreshCodexStatus: () => void;
+  providerInventory: AgentProviderInventory | undefined;
+  providerInventoryLoading: boolean;
+  providerInventoryError: boolean;
+  providerInventoryRefreshing: boolean;
+  onOpenProviderSelector: () => void;
   defaultExpandedProjectPaths?: string[];
 }): ReactElement {
   const [expandedProjectPaths, setExpandedProjectPaths] = useState<Set<string>>(
@@ -1200,14 +1507,117 @@ export function ProjectSidebar({
 
       <div className="sidebar-footer">
         <CodexSidebarStatus
-          codexStatus={codexStatus}
-          isLoading={codexStatusLoading}
-          isError={codexStatusError}
-          isRefreshing={codexStatusRefreshing}
-          onRefresh={onRefreshCodexStatus}
+          providerInventory={providerInventory}
+          isLoading={providerInventoryLoading}
+          isError={providerInventoryError}
+          isRefreshing={providerInventoryRefreshing}
+          onOpenSelector={onOpenProviderSelector}
         />
       </div>
     </aside>
+  );
+}
+
+const boardColumnStageIcons: Partial<Record<string, LucideIcon>> = {
+  [RELAY_READY_STATUS]: Play,
+  [RELAY_IN_PROGRESS_STATUS]: Loader2,
+  [RELAY_NEEDS_CLARIFICATION_STATUS]: CircleHelp,
+  [RELAY_REVIEW_STATUS]: Eye,
+  [RELAY_NOT_DOING_STATUS]: Ban
+};
+
+function BoardColumnsGrid({
+  boardRef,
+  className,
+  tabIndex,
+  ariaDescribedBy,
+  ariaKeyshortcuts,
+  visibleColumns,
+  allTickets,
+  columns,
+  selectedTicketId,
+  onOpen,
+  onTicketFocus,
+  onTicketButtonRef,
+  onArchiveEpic,
+  onArchiveFeature,
+  onArchiveTask,
+  archivingContainerIds,
+  now
+}: {
+  boardRef: RefObject<HTMLDivElement | null>;
+  className?: string;
+  tabIndex?: number;
+  ariaDescribedBy?: string;
+  ariaKeyshortcuts?: string;
+  visibleColumns: readonly RelayColumn[];
+  allTickets: readonly TicketSummary[];
+  columns: readonly RelayColumn[];
+  selectedTicketId: string | null;
+  onOpen: (ticketId: string) => void;
+  onTicketFocus: (ticketId: string) => void;
+  onTicketButtonRef: (ticketId: string, node: HTMLButtonElement | null) => void;
+  onArchiveEpic?: (epicId: string) => void;
+  onArchiveFeature?: (featureId: string) => void;
+  onArchiveTask?: (taskId: string) => void;
+  archivingContainerIds?: ReadonlySet<string>;
+  now: number;
+}): ReactElement {
+  const { activeDrag, dragSourceColumn } = useBoardDragContext();
+  const dragging = activeDrag !== null;
+
+  const columnLayouts = useMemo(
+    () =>
+      visibleColumns.map((column) => {
+        const ticketCount = countColumnTicketsForDisplay(column.id, allTickets);
+        const isDropTarget = boardColumnAcceptsActiveDrag(column.id, activeDrag, dragSourceColumn);
+        const minified = shouldMinifyBoardColumn(column.id, ticketCount, { dragging, isDropTarget });
+        return {
+          column,
+          ticketCount,
+          minified,
+          gridTrack: boardColumnGridTrack(minified)
+        };
+      }),
+    [activeDrag, allTickets, dragSourceColumn, dragging, visibleColumns]
+  );
+
+  const gridTemplateColumns = useMemo(
+    () => boardColumnGridTemplateColumns(columnLayouts.map((layout) => layout.gridTrack)),
+    [columnLayouts]
+  );
+
+  return (
+    <div
+      ref={boardRef}
+      className={clsx("board", dragging && "board-drag-active", className)}
+      style={{ gridTemplateColumns }}
+      tabIndex={tabIndex}
+      aria-describedby={ariaDescribedBy}
+      aria-keyshortcuts={ariaKeyshortcuts}
+    >
+      {columnLayouts.map(({ column, ticketCount, minified }) => (
+        <BoardColumn
+          key={column.id}
+          column={column}
+          allTickets={allTickets}
+          columns={columns}
+          selectedTicketId={selectedTicketId}
+          onOpen={onOpen}
+          onOpenFeature={onOpen}
+          onOpenEpic={onOpen}
+          onTicketFocus={onTicketFocus}
+          onTicketButtonRef={onTicketButtonRef}
+          onArchiveEpic={onArchiveEpic}
+          onArchiveFeature={onArchiveFeature}
+          onArchiveTask={onArchiveTask}
+          archivingContainerIds={archivingContainerIds}
+          now={now}
+          minified={minified}
+          ticketCount={ticketCount}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -1223,8 +1633,11 @@ function BoardColumn({
   onTicketButtonRef,
   onArchiveEpic,
   onArchiveFeature,
+  onArchiveTask,
   archivingContainerIds,
-  now
+  now,
+  minified = false,
+  ticketCount
 }: {
   column: RelayColumn;
   allTickets: TicketSummary[];
@@ -1232,25 +1645,41 @@ function BoardColumn({
   selectedTicketId: string | null;
   onOpen: (ticketId: string) => void;
   onOpenFeature: (ticketId: string) => void;
-  onOpenEpic: (ticketId: string) => void;
+  onOpenEpic: (epicId: string) => void;
   onTicketFocus: (ticketId: string) => void;
   onTicketButtonRef: (ticketId: string, node: HTMLButtonElement | null) => void;
   onArchiveEpic?: (epicId: string) => void;
   onArchiveFeature?: (featureId: string) => void;
+  onArchiveTask?: (taskId: string) => void;
   archivingContainerIds?: ReadonlySet<string>;
   now: number;
+  minified?: boolean;
+  ticketCount: number;
 }): ReactElement {
   const emptyMessage = emptyColumnMessage(column.name);
   const boardItems = useMemo(() => organizeColumnBoardItems(column.id, allTickets), [allTickets, column.id]);
-  const visibleTicketCount = useMemo(() => countColumnTicketsForDisplay(column.id, allTickets), [allTickets, column.id]);
+  const visibleTicketCount = ticketCount;
   const { setNodeRef, dropTargetClassName, isDropTarget } = useBoardColumnDropTarget(column.id);
+  const StageIcon = boardColumnStageIcons[column.id] ?? null;
 
   return (
     <section
       ref={setNodeRef}
-      className={clsx("board-column", dropTargetClassName)}
+      className={clsx("board-column", minified && "board-column-minified", dropTargetClassName)}
       aria-dropeffect={isDropTarget ? "move" : undefined}
+      aria-label={minified ? `${column.name}, ${visibleTicketCount} tickets` : undefined}
     >
+      {minified ? (
+        <div className="board-column-minified-body">
+          <Tooltip label={column.name} placement="below">
+            <div className="board-column-minified-icon" aria-hidden="true">
+              {StageIcon ? <StageIcon size={20} strokeWidth={1.75} /> : <span className="board-column-minified-fallback">{column.name.slice(0, 1)}</span>}
+              <span className="board-column-minified-count">{visibleTicketCount}</span>
+            </div>
+          </Tooltip>
+        </div>
+      ) : (
+        <>
       <header className="column-header">
         <h2>{column.name}</h2>
         <span>{visibleTicketCount}</span>
@@ -1310,6 +1739,8 @@ function BoardColumn({
               onOpen={onOpen}
               onFocus={onTicketFocus}
               onTicketButtonRef={onTicketButtonRef}
+              onArchiveTask={onArchiveTask}
+              archivingContainerIds={archivingContainerIds}
               now={now}
             />
           );
@@ -1321,6 +1752,8 @@ function BoardColumn({
           </div>
         )}
       </div>
+        </>
+      )}
     </section>
   );
 }
@@ -1334,6 +1767,8 @@ function BoardTicketCard({
   onOpen,
   onFocus,
   onTicketButtonRef,
+  onArchiveTask,
+  archivingContainerIds,
   now
 }: {
   ticket: TicketSummary;
@@ -1344,9 +1779,13 @@ function BoardTicketCard({
   onOpen: (ticketId: string) => void;
   onFocus: (ticketId: string) => void;
   onTicketButtonRef: (ticketId: string, node: HTMLButtonElement | null) => void;
+  onArchiveTask?: (taskId: string) => void;
+  archivingContainerIds?: ReadonlySet<string>;
   now: number;
 }): ReactElement {
   const draggable = ticket.ticketType === "task" && boardColumnDraggable(columnId);
+  const showArchive = showTaskArchive(ticket, columnId);
+  const archiveBusy = archivingContainerIds?.has(ticket.id) ?? false;
   const { dragSourceColumn } = useBoardDragContext();
   const taskDragItem = { kind: "task" as const, ticketId: ticket.id };
   const { setNodeRef, setActivatorNodeRef, attributes, listeners, isDragging } = useBoardDraggable(
@@ -1371,6 +1810,9 @@ function BoardTicketCard({
         <BoardTaskCardLeading
           ticket={ticket}
           draggable={draggable}
+          showArchive={showArchive}
+          archiveBusy={archiveBusy}
+          onArchive={onArchiveTask ? () => onArchiveTask(ticket.id) : undefined}
           moveAriaLabel={boardDragMoveAriaLabel(ticket.title, taskDragItem, dragSourceColumn)}
           setActivatorNodeRef={setActivatorNodeRef}
           dragAttributes={attributes}
@@ -1508,6 +1950,8 @@ export type TicketReviewActionState = {
   showAcceptReject: boolean;
 };
 
+const REVIEW_ACCEPT_REJECT_TICKET_TYPES = new Set<TicketType>(["task", "feature", "epic"]);
+
 export function getTicketReviewActionState({
   ticketType,
   status,
@@ -1519,15 +1963,85 @@ export function getTicketReviewActionState({
 }): TicketReviewActionState {
   const completedStatusAvailable = columns.some((column) => column.id === RELAY_COMPLETED_STATUS);
   return {
-    showAcceptReject: ticketType === "task" && status === RELAY_REVIEW_STATUS && completedStatusAvailable
+    showAcceptReject:
+      REVIEW_ACCEPT_REJECT_TICKET_TYPES.has(ticketType) &&
+      status === RELAY_REVIEW_STATUS &&
+      completedStatusAvailable
   };
+}
+
+export function getContainerTicketStatusNote(ticketType: "epic" | "feature", status: string): string {
+  if (status === RELAY_REVIEW_STATUS) {
+    if (ticketType === "epic") {
+      return "This epic is in Review. Accept or Reject moves only this epic to Completed; child features and tasks stay as they are.";
+    }
+    return "This feature is in Review. Accept or Reject moves only this feature to Completed; child tasks stay as they are.";
+  }
+  return ticketType === "epic"
+    ? "Epics follow child task columns. Open tasks below to move work across the board."
+    : "Features follow child task columns. Open tasks below to move work across the board.";
+}
+
+const ARCHIVE_POLL_INTERVAL_MS = 500;
+const ARCHIVE_POLL_TIMEOUT_MS = 120_000;
+
+async function waitForTicketArchived(
+  projectPath: string,
+  ticketId: string,
+  readBoard: () => Promise<BoardSnapshot>,
+  onRefresh: () => void | Promise<void>
+): Promise<void> {
+  const deadline = Date.now() + ARCHIVE_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await Promise.resolve(onRefresh());
+    const snapshot = await readBoard();
+    const summary = snapshot.tickets.find((ticket) => ticket.id === ticketId);
+    if (summary?.status === RELAY_ARCHIVE_STATUS) return;
+    if (summary && summary.status !== RELAY_COMPLETED_STATUS) {
+      throw new Error(`Archive did not complete for ${summary.title}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_INTERVAL_MS));
+  }
+  throw new Error("Archive timed out waiting for the agent to finish.");
+}
+
+async function archiveTicketIdsWithAgent({
+  projectPath,
+  bundleIds,
+  allTickets,
+  archiveStatusAvailable,
+  startTicketUpdate,
+  readBoard,
+  onRefresh
+}: {
+  projectPath: string;
+  bundleIds: string[];
+  allTickets: TicketSummary[];
+  archiveStatusAvailable: boolean;
+  startTicketUpdate: (input: AgentTicketUpdateInput) => Promise<AgentTicketUpdateStartResult>;
+  readBoard: () => Promise<BoardSnapshot>;
+  onRefresh: () => void | Promise<void>;
+}): Promise<void> {
+  const ticketIds = sortArchiveBundleIds(bundleIds, allTickets);
+  if (ticketIds.length === 0) return;
+  if (!archiveStatusAvailable) {
+    throw new Error("Archive status is not configured for this project.");
+  }
+
+  for (const ticketId of ticketIds) {
+    await startTicketUpdate({
+      projectPath,
+      ticketId,
+      request: ARCHIVE_TICKET_UPDATE_REQUEST,
+      purpose: "archive"
+    });
+    await waitForTicketArchived(projectPath, ticketId, readBoard, onRefresh);
+  }
 }
 
 export function BoardView({
   board,
   projectPath,
-  defaultEffort,
-  composerRef,
   onCreated,
   query,
   ticketNavigationEnabled,
@@ -1541,8 +2055,6 @@ export function BoardView({
 }: {
   board: BoardSnapshot;
   projectPath: string;
-  defaultEffort: TicketEffort;
-  composerRef?: RefObject<HTMLTextAreaElement | null>;
   onCreated: () => void | Promise<void>;
   query: string;
   ticketNavigationEnabled: boolean;
@@ -1563,16 +2075,17 @@ export function BoardView({
   const startRunMutation = useStartRunMutation();
   const cancelRunMutation = useCancelRunMutation();
   const moveTicketMutation = useMoveTicketMutation();
+  const startTicketUpdateMutation = useStartTicketUpdateMutation();
   const [archivingContainerIds, setArchivingContainerIds] = useState<Set<string>>(() => new Set());
   const archiveStatusAvailable = useMemo(
     () => board.columns.some((column) => column.id === RELAY_ARCHIVE_STATUS),
     [board.columns]
   );
   const visibleColumns = useMemo(() => boardVisibleColumns(board.columns), [board.columns]);
+  const readBoardSnapshot = useCallback(() => relayApi.board.read({ projectPath }), [projectPath]);
   const archiveBundle = useCallback(
     async (containerId: string, bundleIds: string[], successMessage: string): Promise<void> => {
-      const uniqueIds = [...new Set(bundleIds)];
-      if (uniqueIds.length === 0) return;
+      if (bundleIds.length === 0) return;
       if (!archiveStatusAvailable) {
         setToast({ kind: "error", message: "Archive status is not configured for this project." });
         return;
@@ -1580,9 +2093,15 @@ export function BoardView({
 
       setArchivingContainerIds((current) => new Set(current).add(containerId));
       try {
-        for (const ticketId of uniqueIds) {
-          await moveTicketMutation.mutateAsync({ projectPath, ticketId, targetStatus: RELAY_ARCHIVE_STATUS });
-        }
+        await archiveTicketIdsWithAgent({
+          projectPath,
+          bundleIds,
+          allTickets: board.tickets,
+          archiveStatusAvailable,
+          startTicketUpdate: (input) => startTicketUpdateMutation.mutateAsync(input),
+          readBoard: readBoardSnapshot,
+          onRefresh: onCreated
+        });
         setToast({ kind: "success", message: successMessage });
         await Promise.resolve(onCreated());
       } catch (error) {
@@ -1595,7 +2114,27 @@ export function BoardView({
         });
       }
     },
-    [archiveStatusAvailable, moveTicketMutation, onCreated, projectPath, setToast]
+    [
+      archiveStatusAvailable,
+      board.tickets,
+      onCreated,
+      projectPath,
+      readBoardSnapshot,
+      setToast,
+      startTicketUpdateMutation
+    ]
+  );
+  const archiveTask = useCallback(
+    async (taskId: string): Promise<void> => {
+      const task = board.tickets.find((entry) => entry.id === taskId);
+      if (!task || task.ticketType !== "task") return;
+      if (!taskCanArchive(task)) {
+        setToast({ kind: "info", message: "Only completed tasks can be archived." });
+        return;
+      }
+      await archiveBundle(taskId, [taskId], `Archived ${task.title}.`);
+    },
+    [archiveBundle, board.tickets, setToast]
   );
   const archiveFeature = useCallback(
     async (featureId: string): Promise<void> => {
@@ -1647,7 +2186,23 @@ export function BoardView({
   const queueTaskForReady = useCallback(
     async (ticketId: string, options?: { quiet?: boolean }): Promise<boolean> => {
       const task = board.tickets.find((entry) => entry.id === ticketId);
-      if (!task || !isTaskProcessable(task, board.columns, board.tickets)) return false;
+      if (!task || !isTaskReadyPlaceable(task, board.columns, board.tickets)) return false;
+
+      const blockers = resolveTicketBlockers(task, board.tickets, board.columns);
+      if (blockers.isBlocked) {
+        await moveTicketMutation.mutateAsync({
+          projectPath,
+          ticketId,
+          targetStatus: RELAY_READY_STATUS
+        });
+        if (!options?.quiet) {
+          setToast({
+            kind: "info",
+            message: `${task.title} moved to ready (waiting on blockers).`
+          });
+        }
+        return true;
+      }
 
       const preflight = await preflightRunMutation.mutateAsync({ projectPath, ticketId, freshThread: false });
       if (!preflight.ok) {
@@ -1670,7 +2225,7 @@ export function BoardView({
       }
       return true;
     },
-    [board.columns, board.tickets, preflightRunMutation, projectPath, setToast, startRunMutation]
+    [board.columns, board.tickets, moveTicketMutation, preflightRunMutation, projectPath, setToast, startRunMutation]
   );
 
   const handleDragEndDrop = useCallback(
@@ -1903,45 +2458,27 @@ export function BoardView({
             columns={board.columns}
             now={now}
           >
-            <div
-              ref={boardRef}
-              className={clsx("board", selectedTicketId && "board-has-focus")}
+            <BoardColumnsGrid
+              boardRef={boardRef}
+              className={selectedTicketId ? "board-has-focus" : undefined}
               tabIndex={orderedTicketIds.length > 0 ? 0 : undefined}
-              aria-describedby="ticket-navigation-shortcuts"
-              aria-keyshortcuts="ArrowDown ArrowUp ArrowRight ArrowLeft J K"
-              title={`Move between tickets: ${ticketNavigationShortcutLabel}. Tab moves through controls normally.`}
-            >
-              {visibleColumns.map((column) => (
-                <BoardColumn
-                  key={column.id}
-                  column={column}
-                  allTickets={board.tickets}
-                  columns={board.columns}
-                  selectedTicketId={selectedTicketId}
-                  onOpen={onOpenTicket}
-                  onOpenFeature={onOpenTicket}
-                  onOpenEpic={onOpenTicket}
-                  onTicketFocus={setSelectedTicketId}
-                  onTicketButtonRef={setTicketButtonRef}
-                  onArchiveEpic={(epicId) => void archiveEpic(epicId)}
-                  onArchiveFeature={(featureId) => void archiveFeature(featureId)}
-                  archivingContainerIds={archivingContainerIds}
-                  now={now}
-                />
-              ))}
-            </div>
+              ariaDescribedBy="ticket-navigation-shortcuts"
+              ariaKeyshortcuts="ArrowDown ArrowUp ArrowRight ArrowLeft J K"
+              visibleColumns={visibleColumns}
+              allTickets={board.tickets}
+              columns={board.columns}
+              selectedTicketId={selectedTicketId}
+              onOpen={onOpenTicket}
+              onTicketFocus={setSelectedTicketId}
+              onTicketButtonRef={setTicketButtonRef}
+              onArchiveEpic={(epicId) => void archiveEpic(epicId)}
+              onArchiveFeature={(featureId) => void archiveFeature(featureId)}
+              onArchiveTask={(taskId) => void archiveTask(taskId)}
+              archivingContainerIds={archivingContainerIds}
+              now={now}
+            />
           </BoardDragProvider>
         </BoardHierarchyVisualProvider>
-        <div className="workspace-composer-region">
-          <FloatingTicketComposer
-            key={projectPath}
-            projectPath={projectPath}
-            defaultEffort={defaultEffort}
-            composerRef={composerRef}
-            onCreated={onCreated}
-            setToast={setToast}
-          />
-        </div>
       </div>
     </main>
   );
@@ -1951,36 +2488,71 @@ export function RepositoryChatPanelContent({
   projectName,
   messages,
   draft,
-  pending,
+  pendingChat,
+  pendingThinking,
+  pendingDraft,
   errorMessage,
+  usesCursorAgent,
+  draftType,
+  priority,
+  effort,
+  cursorAgentModel,
+  recording,
+  transcribing,
+  voiceSetupRequired,
+  voiceButtonLabel,
+  voiceButtonTooltip,
+  voiceButtonDisabled,
   onDraftChange,
-  onSubmit,
+  onDraftBlur,
+  onSubmitChat,
+  onSubmitDraft,
+  onDraftTypeChange,
+  onPriorityChange,
+  onEffortChange,
+  onCursorAgentModelChange,
+  onVoiceInput,
   onClose,
+  onClearChat,
+  clearChatDisabled,
   onAnswerCopied,
-  onAnswerCopyError
+  onAnswerCopyError,
+  composerRef
 }: {
   projectName: string;
   messages: RepositoryChatMessage[];
   draft: string;
-  pending: boolean;
+  pendingChat: boolean;
+  pendingThinking: boolean;
+  pendingDraft: boolean;
   errorMessage: string | null;
+  usesCursorAgent: boolean;
+  draftType: FloatingComposerDraftType;
+  priority: TicketPriority;
+  effort: TicketEffort;
+  cursorAgentModel: CursorAgentModel;
+  recording: boolean;
+  transcribing: boolean;
+  voiceSetupRequired: boolean;
+  voiceButtonLabel: string;
+  voiceButtonTooltip: string;
+  voiceButtonDisabled: boolean;
   onDraftChange: (value: string) => void;
-  onSubmit: () => void;
+  onDraftBlur: () => void;
+  onSubmitChat: () => void;
+  onSubmitDraft: () => void;
+  onDraftTypeChange: (value: FloatingComposerDraftType) => void;
+  onPriorityChange: (value: TicketPriority) => void;
+  onEffortChange: (value: TicketEffort) => void;
+  onCursorAgentModelChange: (value: CursorAgentModel) => void;
+  onVoiceInput: () => void;
   onClose: () => void;
+  onClearChat: () => void;
+  clearChatDisabled: boolean;
   onAnswerCopied?: (kind: "markdown" | "code") => void;
   onAnswerCopyError?: (error: unknown) => void;
+  composerRef?: RefObject<HTMLTextAreaElement | null>;
 }): ReactElement {
-  const canSend = draft.trim().length > 0 && !pending;
-  const handleSubmit = (): void => {
-    if (!canSend) return;
-    onSubmit();
-  };
-  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-    event.preventDefault();
-    handleSubmit();
-  };
-
   return (
     <aside className="repository-chat-panel" id="repository-chat-panel" aria-label={`Repository chat for ${projectName}`}>
       <header className="repository-chat-header">
@@ -1988,79 +2560,61 @@ export function RepositoryChatPanelContent({
           <span>Repository Chat</span>
           <h2 title={projectName}>{projectName}</h2>
         </div>
-        <Button type="button" className="icon-button" onClick={onClose} aria-label="Close repository chat" title="Close repository chat">
-          <X size={18} />
-        </Button>
+        <div className="repository-chat-header-actions">
+          <Button
+            type="button"
+            className="icon-button"
+            onClick={onClearChat}
+            disabled={clearChatDisabled}
+            aria-label="Clear repository chat"
+            title="Clear chat"
+          >
+            <Trash2 size={18} />
+          </Button>
+          <Button type="button" className="icon-button" onClick={onClose} aria-label="Close repository chat" title="Close repository chat">
+            <X size={18} />
+          </Button>
+        </div>
       </header>
 
-      <div className="repository-chat-transcript" aria-live="polite">
-        {messages.length === 0 && !pending ? (
-          <div className="repository-chat-empty" role="status">
-            Ask a read-only question about this repository.
-          </div>
-        ) : (
-          messages.map((message) => (
-            <article className={clsx("repository-chat-message", message.role)} key={message.id}>
-              <span>{message.role === "user" ? "You" : "Agent"}</span>
-              {message.role === "assistant" ? (
-                <MarkdownBlock
-                  className="repository-chat-answer"
-                  source={message.text}
-                  compact
-                  onCopied={onAnswerCopied}
-                  onCopyError={onAnswerCopyError}
-                />
-              ) : (
-                <p>{message.text}</p>
-              )}
-            </article>
-          ))
-        )}
+      <RepositoryChatTranscript
+        messages={messages}
+        pendingChat={pendingChat}
+        pendingThinking={pendingThinking}
+        pendingDraft={pendingDraft}
+        errorMessage={errorMessage}
+        onAnswerCopied={onAnswerCopied}
+        onAnswerCopyError={onAnswerCopyError}
+      />
 
-        {pending && (
-          <div className="repository-chat-message assistant pending" role="status" aria-busy="true">
-            <span>Agent</span>
-            <p>
-              <Loader2 className="spin" size={14} />
-              Reading repository context.
-            </p>
-          </div>
-        )}
-
-        {errorMessage && (
-          <div className="repository-chat-error" role="alert">
-            <AlertTriangle size={15} />
-            <span>{errorMessage}</span>
-          </div>
-        )}
-      </div>
-
-      <form
-        className="repository-chat-composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          handleSubmit();
-        }}
-      >
-        <Textarea
-          value={draft}
-          onChange={(event) => onDraftChange(event.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask about this repository"
-          aria-label="Repository chat question"
-          rows={3}
-          disabled={pending}
-        />
-        <Button
-          type="submit"
-          className="primary-button repository-chat-send"
-          disabled={!canSend}
-          aria-label="Send repository chat question"
-          title="Send repository chat question"
-        >
-          {pending ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-        </Button>
-      </form>
+      <RepositoryChatComposer
+        messages={messages}
+        draft={draft}
+        pendingChat={pendingChat}
+        pendingDraft={pendingDraft}
+        usesCursorAgent={usesCursorAgent}
+        draftType={draftType}
+        priority={priority}
+        effort={effort}
+        cursorAgentModel={cursorAgentModel}
+        recording={recording}
+        transcribing={transcribing}
+        voiceSetupRequired={voiceSetupRequired}
+        voiceButtonLabel={voiceButtonLabel}
+        voiceButtonTooltip={voiceButtonTooltip}
+        voiceButtonDisabled={voiceButtonDisabled}
+        composerPlaceholder={REPOSITORY_CHAT_COMPOSER_PLACEHOLDER}
+        onDraftChange={onDraftChange}
+        onDraftBlur={onDraftBlur}
+        onSubmitChat={onSubmitChat}
+        onSubmitDraft={onSubmitDraft}
+        onDraftTypeChange={onDraftTypeChange}
+        onPriorityChange={onPriorityChange}
+        onEffortChange={onEffortChange}
+        onCursorAgentModelChange={onCursorAgentModelChange}
+        onVoiceInput={onVoiceInput}
+        composerRef={composerRef}
+      />
     </aside>
   );
 }
@@ -2068,20 +2622,191 @@ export function RepositoryChatPanelContent({
 function RepositoryChatPanel({
   projectPath,
   projectName,
+  defaultEffort,
+  selectedProviderId,
+  composerRef,
   onClose,
+  onCreated,
   setToast
 }: {
   projectPath: string;
   projectName: string;
+  defaultEffort: TicketEffort;
+  selectedProviderId: AgentProviderId;
+  composerRef?: RefObject<HTMLTextAreaElement | null>;
   onClose: () => void;
+  onCreated: () => void | Promise<void>;
   setToast: (toast: Toast) => void;
 }): ReactElement {
+  const usesCursorAgent = selectedProviderId === "cursor";
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<RepositoryChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [hasStreamedAssistant, setHasStreamedAssistant] = useState(false);
+  const [draftType, setDraftType] = useState<FloatingComposerDraftType>("feature");
+  const [priority, setPriority] = useState<TicketPriority>("medium");
+  const [effort, setEffort] = useState<TicketEffort>(defaultEffort);
+  const [cursorAgentModel, setCursorAgentModel] = useState<CursorAgentModel>("auto");
+  const [voiceState, setVoiceState] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [voiceSetupOpen, setVoiceSetupOpen] = useState(false);
+  const [voiceCommandPath, setVoiceCommandPath] = useState("");
+  const [voiceSetupMessage, setVoiceSetupMessage] = useState<string | null>(null);
   const messageSequenceRef = useRef(0);
+  const streamingRequestIdRef = useRef<string | null>(null);
+  const streamingAssistantMessageIdRef = useRef<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const shouldTranscribeOnStopRef = useRef(false);
+  const userEditedBeforeHydrationRef = useRef(false);
+  const repositoryChatPersistReadyRef = useRef(false);
   const repositoryChatMutation = useRepositoryChatMutation();
+  const repositoryChatQuery = useRepositoryChatQuery(projectPath);
+  const saveRepositoryChatMutation = useSaveRepositoryChatMutation();
+  const clearRepositoryChatMutation = useClearRepositoryChatMutation();
+  const createDraftMutation = useCreateDraftMutation();
+  const voiceInputStatusQuery = useVoiceInputStatusQuery();
+  const configureVoiceInputMutation = useConfigureVoiceInputMutation();
+  const transcribeVoiceInputMutation = useTranscribeVoiceInputMutation();
+  const saveRepositoryChatMutateRef = useRef(saveRepositoryChatMutation.mutate);
+  saveRepositoryChatMutateRef.current = saveRepositoryChatMutation.mutate;
+  const repositoryChatPersistRef = useRef<RepositoryChatPersistController | null>(null);
+  if (!repositoryChatPersistRef.current) {
+    repositoryChatPersistRef.current = createRepositoryChatPersist({
+      mutate: (payload, options) => saveRepositoryChatMutateRef.current(payload, options)
+    });
+  }
+  const repositoryChatPersist = repositoryChatPersistRef.current;
+
+  const applyEmptyRepositoryChatState = useCallback((): void => {
+    const empty = emptyRepositoryChatPanelState();
+    setThreadId(empty.threadId);
+    setMessages(empty.messages);
+    setDraft(empty.draft);
+    messageSequenceRef.current = empty.messageSequence;
+    streamingRequestIdRef.current = null;
+    streamingAssistantMessageIdRef.current = null;
+    setHasStreamedAssistant(false);
+    setErrorMessage(null);
+  }, []);
+
+  const clearChat = useCallback((): void => {
+    if (repositoryChatMutation.isPending || createDraftMutation.isPending) return;
+    applyEmptyRepositoryChatState();
+    repositoryChatPersist.setRuntime({ lastPersistedSignature: null });
+    repositoryChatPersist.syncSnapshot({
+      projectPath,
+      threadId: null,
+      messages: [],
+      draft: ""
+    });
+    repositoryChatPersist.flushRepositoryChatPersist();
+    void clearRepositoryChatMutation.mutateAsync(projectPath).catch((error) => {
+      setToast({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Unable to clear repository chat."
+      });
+    });
+  }, [
+    applyEmptyRepositoryChatState,
+    clearRepositoryChatMutation,
+    createDraftMutation.isPending,
+    projectPath,
+    repositoryChatMutation.isPending,
+    repositoryChatPersist,
+    setToast
+  ]);
+
+  useEffect(() => {
+    userEditedBeforeHydrationRef.current = false;
+    repositoryChatPersistReadyRef.current = false;
+    repositoryChatPersist.setRuntime({
+      hydratedProjectPath: null,
+      ready: false,
+      lastPersistedSignature: null
+    });
+    repositoryChatPersist.cancelScheduledRepositoryChatPersist();
+    applyEmptyRepositoryChatState();
+  }, [applyEmptyRepositoryChatState, projectPath, repositoryChatPersist]);
+
+  useEffect(() => {
+    if (!repositoryChatQuery.isSuccess) return;
+    const hydrationAction = resolveRepositoryChatHydrationAction({
+      hydratedProjectPath: repositoryChatPersist.getRuntime().hydratedProjectPath,
+      projectPath,
+      querySuccess: repositoryChatQuery.isSuccess,
+      userEditedBeforeHydration: userEditedBeforeHydrationRef.current,
+      streaming: Boolean(streamingRequestIdRef.current),
+      messageCount: messages.length,
+      threadId
+    });
+    if (hydrationAction === "already_hydrated") return;
+    if (hydrationAction === "skip_local") {
+      repositoryChatPersistReadyRef.current = true;
+      repositoryChatPersist.setRuntime({
+        hydratedProjectPath: projectPath,
+        ready: true,
+        lastPersistedSignature: repositoryChatStoreSignature({
+          projectPath,
+          threadId,
+          messages,
+          draft
+        })
+      });
+      return;
+    }
+    const store = repositoryChatQuery.data;
+    setThreadId(store.threadId ?? null);
+    setMessages(store.messages);
+    setDraft(store.draft ?? "");
+    messageSequenceRef.current = repositoryChatMessageSequence(store.messages);
+    repositoryChatPersistReadyRef.current = true;
+    repositoryChatPersist.setRuntime({
+      hydratedProjectPath: projectPath,
+      ready: true,
+      lastPersistedSignature: repositoryChatStoreSignature({
+        projectPath,
+        threadId: store.threadId ?? null,
+        messages: store.messages,
+        draft: store.draft ?? ""
+      })
+    });
+  }, [projectPath, repositoryChatPersist, repositoryChatQuery.data, repositoryChatQuery.isSuccess]);
+
+  const handleDraftChange = useCallback(
+    (value: string) => {
+      if (
+        shouldMarkRepositoryChatUserEditedBeforeHydration({
+          persistReady: repositoryChatPersistReadyRef.current,
+          querySuccess: repositoryChatQuery.isSuccess
+        })
+      ) {
+        userEditedBeforeHydrationRef.current = true;
+      }
+      setDraft(value);
+    },
+    [repositoryChatQuery.isSuccess]
+  );
+
+  useEffect(() => {
+    repositoryChatPersist.syncSnapshot({ projectPath, threadId, messages, draft });
+  }, [draft, messages, projectPath, repositoryChatPersist, threadId]);
+
+  useEffect(() => {
+    repositoryChatPersist.scheduleRepositoryChatPersist();
+    return () => {
+      repositoryChatPersist.cancelScheduledRepositoryChatPersist();
+    };
+  }, [draft, messages, projectPath, repositoryChatPersist, threadId]);
+
+  useEffect(
+    () => () => {
+      repositoryChatPersist.flushRepositoryChatPersist();
+      repositoryChatPersist.dispose();
+    },
+    [repositoryChatPersist]
+  );
 
   useShortcutOverlay({
     id: `repository-chat:${projectPath}`,
@@ -2097,68 +2822,668 @@ function RepositoryChatPanel({
     return `${role}-${messageSequenceRef.current}`;
   }, []);
 
+  useEffect(() => {
+    setEffort(defaultEffort);
+  }, [defaultEffort]);
+
+  useEffect(
+    () =>
+      useRepositoryChatEventSubscription((event) => {
+        if (event.projectPath !== projectPath) return;
+        if (event.requestId !== streamingRequestIdRef.current) return;
+
+        if (event.type === "started") {
+          if (event.threadId) setThreadId(event.threadId);
+          return;
+        }
+
+        if (event.type === "delta") {
+          setHasStreamedAssistant(true);
+          setMessages((current) => {
+            const messageId = streamingAssistantMessageIdRef.current;
+            if (!messageId) {
+              const nextId = nextMessageId("assistant");
+              streamingAssistantMessageIdRef.current = nextId;
+              return [...current, { id: nextId, role: "assistant", text: event.text }];
+            }
+            return current.map((message) =>
+              message.id === messageId ? { ...message, text: `${message.text}${event.text}` } : message
+            );
+          });
+          return;
+        }
+
+        if (event.type === "completed") {
+          streamingRequestIdRef.current = null;
+          const messageId = streamingAssistantMessageIdRef.current;
+          setHasStreamedAssistant(Boolean(messageId) || event.message.trim().length > 0);
+          setThreadId(event.threadId);
+          setMessages((current) => {
+            if (!messageId) {
+              if (!event.message.trim()) return current;
+              const nextId = nextMessageId("assistant");
+              streamingAssistantMessageIdRef.current = nextId;
+              return [...current, { id: nextId, role: "assistant", text: event.message }];
+            }
+            if (!event.message.trim()) return current;
+            return current.map((message) => (message.id === messageId ? { ...message, text: event.message } : message));
+          });
+          window.setTimeout(() => {
+            repositoryChatPersist.flushRepositoryChatPersist();
+          }, 0);
+          return;
+        }
+
+        if (event.type === "failed") {
+          streamingRequestIdRef.current = null;
+          streamingAssistantMessageIdRef.current = null;
+          setHasStreamedAssistant(false);
+          setErrorMessage(event.message);
+          setToast({ kind: "error", message: event.message });
+          window.setTimeout(() => {
+            repositoryChatPersist.flushRepositoryChatPersist();
+          }, 0);
+        }
+      }),
+    [nextMessageId, projectPath, repositoryChatPersist, setToast]
+  );
+
+  useEffect(
+    () => () => {
+      shouldTranscribeOnStopRef.current = false;
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current = null;
+      mediaStreamRef.current = null;
+    },
+    []
+  );
+
+  const voiceInputStatus = voiceInputStatusQuery.data;
+  const voiceInputEnabled = voiceInputStatus?.available === true;
+  const defaultVoiceCommandPath = voiceInputStatus?.configuredCommandPath ?? voiceInputStatus?.defaultCommandPath ?? "~/whisper.cpp/build/bin/whisper-cli";
+  const voiceStatusMessage = voiceInputStatusQuery.error
+    ? relayErrorMessage(voiceInputStatusQuery.error, "Unable to check local Whisper availability.")
+    : voiceInputStatus?.message ?? "Checking local Whisper availability.";
+  const recording = voiceState === "recording";
+  const transcribing = voiceState === "transcribing";
+
+  useEffect(() => {
+    if (!voiceSetupOpen) {
+      setVoiceCommandPath(defaultVoiceCommandPath);
+      setVoiceSetupMessage(null);
+    }
+  }, [defaultVoiceCommandPath, voiceSetupOpen]);
+
   const submit = useCallback((): void => {
     const question = draft.trim();
-    if (!question || repositoryChatMutation.isPending) return;
+    if (!question || repositoryChatMutation.isPending || createDraftMutation.isPending) return;
+    const requestId = nextRepositoryChatRequestId();
+    const assistantPlaceholderId = nextMessageId("assistant");
+    const userMessageId = nextMessageId("user");
+    const nextMessages = [
+      ...messages,
+      { id: userMessageId, role: "user" as const, text: question },
+      { id: assistantPlaceholderId, role: "assistant" as const, text: "" }
+    ];
 
-    setMessages((current) => [...current, { id: nextMessageId("user"), role: "user", text: question }]);
+    streamingRequestIdRef.current = requestId;
+    streamingAssistantMessageIdRef.current = assistantPlaceholderId;
+    setHasStreamedAssistant(false);
+    setMessages(nextMessages);
     setDraft("");
     setErrorMessage(null);
+    repositoryChatPersist.syncSnapshot({
+      projectPath,
+      threadId,
+      messages: nextMessages,
+      draft: ""
+    });
+    repositoryChatPersist.flushRepositoryChatPersist();
 
     void repositoryChatMutation
-      .mutateAsync({ projectPath, message: question, threadId })
+      .mutateAsync({ projectPath, message: question, threadId, requestId })
       .then((response) => {
+        const finalMessage = response.message.trim();
         setThreadId(response.threadId);
-        setMessages((current) => [...current, { id: nextMessageId("assistant"), role: "assistant", text: response.message }]);
+        setMessages((current) => {
+          const messageId = streamingAssistantMessageIdRef.current;
+          if (!messageId) {
+            if (!finalMessage) return current;
+            const nextId = nextMessageId("assistant");
+            streamingAssistantMessageIdRef.current = nextId;
+            return [...current, { id: nextId, role: "assistant", text: response.message }];
+          }
+          if (!current.some((message) => message.id === messageId)) {
+            if (!finalMessage) return current;
+            return [...current, { id: messageId, role: "assistant", text: response.message }];
+          }
+          if (!finalMessage) return current;
+          return current.map((message) => (message.id === messageId ? { ...message, text: response.message } : message));
+        });
+        streamingRequestIdRef.current = null;
+        streamingAssistantMessageIdRef.current = null;
+        setHasStreamedAssistant((current) => current || finalMessage.length > 0);
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : "Unable to send repository chat message.";
+        streamingRequestIdRef.current = null;
+        streamingAssistantMessageIdRef.current = null;
+        setHasStreamedAssistant(false);
         setDraft(question);
         setErrorMessage(message);
         setToast({ kind: "error", message });
       });
-  }, [draft, nextMessageId, projectPath, repositoryChatMutation, setToast, threadId]);
+  }, [
+    createDraftMutation.isPending,
+    draft,
+    messages,
+    nextMessageId,
+    projectPath,
+    repositoryChatMutation,
+    repositoryChatPersist,
+    setToast,
+    threadId
+  ]);
+
+  const handleDraftBlur = useCallback((): void => {
+    repositoryChatPersist.flushRepositoryChatPersist();
+  }, [repositoryChatPersist]);
+
+  const handleClose = useCallback((): void => {
+    repositoryChatPersist.flushRepositoryChatPersist();
+    onClose();
+  }, [onClose, repositoryChatPersist]);
+
+  const releaseVoiceStream = (): void => {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  };
+
+  const finalizeRecordedAudio = useCallback(
+    async (mimeType: string): Promise<void> => {
+      releaseVoiceStream();
+      mediaRecorderRef.current = null;
+      const audioBlob = new Blob(recordedChunksRef.current, { type: mimeType || "audio/webm" });
+      recordedChunksRef.current = [];
+      if (!shouldTranscribeOnStopRef.current) {
+        setVoiceState("idle");
+        return;
+      }
+      shouldTranscribeOnStopRef.current = false;
+      setVoiceState("transcribing");
+      try {
+        const audioBase64 = await recordedBlobToWavBase64(audioBlob);
+        const result = await transcribeVoiceInputMutation.mutateAsync({ audioBase64 });
+        setDraft((current) => appendTranscriptToIdea(current, result.transcript));
+        window.requestAnimationFrame(() => composerRef?.current?.focus());
+      } catch (error) {
+        setToast({
+          kind: "error",
+          message: error instanceof Error ? error.message : "Unable to transcribe voice input locally."
+        });
+      } finally {
+        setVoiceState("idle");
+      }
+    },
+    [composerRef, setToast, transcribeVoiceInputMutation]
+  );
+
+  const startVoiceRecording = useCallback(async (): Promise<void> => {
+    if (repositoryChatMutation.isPending || createDraftMutation.isPending || transcribing || recording) return;
+    if (!voiceInputEnabled) {
+      setVoiceSetupOpen(true);
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setToast({ kind: "error", message: "This environment does not support microphone recording." });
+      return;
+    }
+    if (typeof MediaRecorder === "undefined") {
+      setToast({ kind: "error", message: "This environment does not support MediaRecorder." });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recordedChunksRef.current = [];
+      shouldTranscribeOnStopRef.current = true;
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        shouldTranscribeOnStopRef.current = false;
+        releaseVoiceStream();
+        mediaRecorderRef.current = null;
+        setVoiceState("idle");
+        setToast({ kind: "error", message: "Microphone recording failed." });
+      };
+      recorder.onstop = () => {
+        void finalizeRecordedAudio(recorder.mimeType);
+      };
+      recorder.start();
+      setVoiceState("recording");
+    } catch (error) {
+      setVoiceState("idle");
+      setToast({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Unable to access the microphone."
+      });
+    }
+  }, [
+    createDraftMutation.isPending,
+    finalizeRecordedAudio,
+    recording,
+    repositoryChatMutation.isPending,
+    setToast,
+    transcribing,
+    voiceInputEnabled
+  ]);
+
+  const stopVoiceRecording = useCallback((): void => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") return;
+    setVoiceState("transcribing");
+    recorder.requestData();
+    recorder.stop();
+  }, []);
+
+  const handleVoiceInput = useCallback((): void => {
+    if (recording) {
+      stopVoiceRecording();
+      return;
+    }
+    void startVoiceRecording();
+  }, [recording, startVoiceRecording, stopVoiceRecording]);
+
+  const saveVoiceCommandPath = useCallback((): void => {
+    const commandPath = voiceCommandPath.trim();
+    if (!commandPath) {
+      setVoiceSetupMessage("Enter a Whisper CLI path before saving.");
+      return;
+    }
+    setVoiceSetupMessage(null);
+    void configureVoiceInputMutation
+      .mutateAsync({ commandPath })
+      .then((status) => {
+        setVoiceSetupMessage(status.message);
+        if (!status.available) return;
+        setVoiceSetupOpen(false);
+        setToast({ kind: "info", message: "Local Whisper voice input is ready." });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Unable to save the Whisper CLI path.";
+        setVoiceSetupMessage(message);
+        setToast({ kind: "error", message });
+      });
+  }, [configureVoiceInputMutation, setToast, voiceCommandPath]);
+
+  const submitDraft = useCallback((): void => {
+    const idea = draft.trim();
+    if ((!idea && messages.length === 0) || repositoryChatMutation.isPending || createDraftMutation.isPending) return;
+
+    const conversationForDraft =
+      idea.length > 0
+        ? [...messages, { id: nextMessageId("user"), role: "user" as const, text: idea }]
+        : messages;
+    const draftInput = getFloatingComposerDraftInput({
+      projectPath,
+      idea: repositoryChatDraftIdeaFromConversation(conversationForDraft, idea),
+      priority,
+      effort,
+      agentModel: cursorAgentModel,
+      selectedProviderId,
+      draftType
+    });
+
+    applyEmptyRepositoryChatState();
+    void clearRepositoryChatMutation.mutateAsync(projectPath).catch(() => undefined);
+
+    void createDraftMutation
+      .mutateAsync(draftInput)
+      .then((result) => {
+        if (!result.ok) {
+          setToast({ kind: "error", message: result.error.message });
+          return;
+        }
+        setToast({ kind: "info", message: `Agent draft started for ${result.ticket.frontMatter.title}.` });
+        void Promise.resolve(onCreated()).catch((error) => {
+          setToast({ kind: "error", message: error instanceof Error ? error.message : "Unable to refresh board." });
+        });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Ticket drafting failed.";
+        setToast({ kind: "error", message });
+      });
+  }, [
+    applyEmptyRepositoryChatState,
+    clearRepositoryChatMutation,
+    createDraftMutation,
+    cursorAgentModel,
+    draft,
+    draftType,
+    effort,
+    messages,
+    nextMessageId,
+    onCreated,
+    priority,
+    projectPath,
+    repositoryChatMutation.isPending,
+    selectedProviderId,
+    setToast
+  ]);
+
+  const voiceButtonLabel = recording
+    ? "Stop recording and transcribe"
+    : transcribing
+      ? "Transcribing voice input locally"
+      : "Record idea with voice";
+  const voiceButtonTooltip = recording
+    ? "Stop recording and transcribe"
+    : transcribing
+      ? "Transcribing audio locally..."
+      : voiceInputEnabled
+        ? "Record voice idea"
+        : "Set up local Whisper path";
+  const voiceSetupRequired = !voiceInputEnabled;
+  const voiceButtonDisabled =
+    recording ? false : repositoryChatMutation.isPending || createDraftMutation.isPending || transcribing || configureVoiceInputMutation.isPending;
+  const clearChatDisabled =
+    repositoryChatMutation.isPending ||
+    createDraftMutation.isPending ||
+    (messages.length === 0 && draft.trim().length === 0);
+  const handleAnswerCopied = useCallback(
+    (kind: "markdown" | "code") => {
+      setToast(copyToast(kind));
+    },
+    [setToast]
+  );
+  const handleAnswerCopyError = useCallback(
+    (error: unknown) => {
+      setToast({ kind: "error", message: error instanceof Error ? error.message : "Unable to copy." });
+    },
+    [setToast]
+  );
 
   return (
-    <RepositoryChatPanelContent
-      projectName={projectName}
-      messages={messages}
-      draft={draft}
-      pending={repositoryChatMutation.isPending}
-      errorMessage={errorMessage}
-      onDraftChange={setDraft}
-      onSubmit={submit}
-      onClose={onClose}
-      onAnswerCopied={(kind) => setToast(copyToast(kind))}
-      onAnswerCopyError={(error) => setToast({ kind: "error", message: error instanceof Error ? error.message : "Unable to copy." })}
-    />
+    <>
+      <RepositoryChatPanelContent
+        projectName={projectName}
+        messages={messages}
+        draft={draft}
+        pendingChat={repositoryChatMutation.isPending}
+        pendingThinking={repositoryChatMutation.isPending && !hasStreamedAssistant}
+        pendingDraft={createDraftMutation.isPending}
+        errorMessage={errorMessage}
+        usesCursorAgent={usesCursorAgent}
+        draftType={draftType}
+        priority={priority}
+        effort={effort}
+        cursorAgentModel={cursorAgentModel}
+        recording={recording}
+        transcribing={transcribing}
+        voiceSetupRequired={voiceSetupRequired}
+        voiceButtonLabel={voiceButtonLabel}
+        voiceButtonTooltip={voiceButtonTooltip}
+        voiceButtonDisabled={voiceButtonDisabled}
+        onDraftChange={handleDraftChange}
+        onDraftBlur={handleDraftBlur}
+        onSubmitChat={submit}
+        onSubmitDraft={submitDraft}
+        onDraftTypeChange={setDraftType}
+        onPriorityChange={setPriority}
+        onEffortChange={setEffort}
+        onCursorAgentModelChange={setCursorAgentModel}
+        onVoiceInput={handleVoiceInput}
+        onClose={handleClose}
+        onClearChat={clearChat}
+        clearChatDisabled={clearChatDisabled}
+        onAnswerCopied={handleAnswerCopied}
+        onAnswerCopyError={handleAnswerCopyError}
+        composerRef={composerRef}
+      />
+      {voiceSetupOpen ? (
+        <VoiceInputSetupModal
+          commandPath={voiceCommandPath}
+          statusMessage={voiceSetupMessage ?? voiceStatusMessage}
+          onCommandPathChange={setVoiceCommandPath}
+          onClose={() => {
+            if (configureVoiceInputMutation.isPending) return;
+            setVoiceSetupOpen(false);
+          }}
+          onSave={saveVoiceCommandPath}
+          savePending={configureVoiceInputMutation.isPending}
+        />
+      ) : null}
+    </>
+  );
+}
+
+const cursorAgentModelOptions: CursorAgentModel[] = ["auto"];
+
+const cursorAgentModelLabel = (model: CursorAgentModel): string => {
+  switch (model) {
+    case "auto":
+      return "Auto";
+    default:
+      return model;
+  }
+};
+
+const appendTranscriptToIdea = (current: string, transcript: string): string => {
+  const normalizedTranscript = transcript.trim();
+  if (!normalizedTranscript) return current;
+  const normalizedCurrent = current.trimEnd();
+  if (!normalizedCurrent) return normalizedTranscript;
+  return /\s$/.test(current) ? `${current}${normalizedTranscript}` : `${current} ${normalizedTranscript}`;
+};
+
+const base64FromBytes = (bytes: Uint8Array): string => {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + chunkSize));
+    binary += String.fromCharCode(...chunk);
+  }
+  return window.btoa(binary);
+};
+
+const audioBufferToWavBytes = (audioBuffer: AudioBuffer): Uint8Array => {
+  const channelCount = audioBuffer.numberOfChannels;
+  const sampleCount = audioBuffer.length;
+  const bytesPerSample = 2;
+  const blockAlign = channelCount * bytesPerSample;
+  const byteRate = audioBuffer.sampleRate * blockAlign;
+  const pcmByteLength = sampleCount * blockAlign;
+  const buffer = new ArrayBuffer(44 + pcmByteLength);
+  const view = new DataView(buffer);
+  const writeAscii = (offset: number, value: string): void => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + pcmByteLength, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channelCount, true);
+  view.setUint32(24, audioBuffer.sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, "data");
+  view.setUint32(40, pcmByteLength, true);
+
+  let offset = 44;
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+      const sample = audioBuffer.getChannelData(channelIndex)[sampleIndex] ?? 0;
+      const normalized = Math.max(-1, Math.min(1, sample));
+      view.setInt16(offset, normalized < 0 ? normalized * 0x8000 : normalized * 0x7fff, true);
+      offset += 2;
+    }
+  }
+
+  return new Uint8Array(buffer);
+};
+
+const recordedBlobToWavBase64 = async (blob: Blob): Promise<string> => {
+  if (typeof window.AudioContext === "undefined") {
+    throw new Error("This browser cannot decode recorded audio for local transcription.");
+  }
+  const sourceBuffer = await blob.arrayBuffer();
+  const audioContext = new window.AudioContext();
+  try {
+    const decoded = await audioContext.decodeAudioData(sourceBuffer.slice(0));
+    return base64FromBytes(audioBufferToWavBytes(decoded));
+  } finally {
+    await audioContext.close();
+  }
+};
+
+const voiceInputInstallCommandBlock = `# Install whisper.cpp under your home directory
+cd ~
+if [ ! -d "whisper.cpp" ]; then
+  git clone https://github.com/ggml-org/whisper.cpp.git
+fi
+
+cd ~/whisper.cpp
+
+# macOS
+brew install cmake ffmpeg
+
+# Ubuntu
+sudo apt update
+sudo apt install -y build-essential cmake ffmpeg
+
+cmake -B build
+cmake --build build -j
+./models/download-ggml-model.sh base.en
+
+ls -lh build/bin/whisper-cli
+ls -lh models/ggml-base.en.bin
+
+./build/bin/whisper-cli \\
+  -m models/ggml-base.en.bin \\
+  -f samples/jfk.wav`;
+
+export function VoiceInputSetupModal({
+  commandPath,
+  statusMessage,
+  onCommandPathChange,
+  onClose,
+  onSave,
+  savePending
+}: {
+  commandPath: string;
+  statusMessage: string | null;
+  onCommandPathChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+  savePending: boolean;
+}): ReactElement {
+  return (
+    <DialogBackdrop
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <Dialog className="modal voice-input-setup-modal" aria-labelledby="voice-input-setup-title">
+        <header>
+          <div>
+            <h2 id="voice-input-setup-title">Set up local Whisper</h2>
+            <p>Point Relay at your local `whisper-cli` binary to enable voice input for ticket drafting.</p>
+          </div>
+          <div className="provider-selector-header-actions">
+            <IconButton type="button" className="icon-button" onClick={onClose} aria-label="Close voice input setup" title="Close voice input setup">
+              <X size={16} />
+            </IconButton>
+          </div>
+        </header>
+        <div className="voice-input-setup-body">
+          <Field className="voice-input-path-field">
+            <span>Whisper CLI path</span>
+            <Input
+              value={commandPath}
+              onChange={(event) => onCommandPathChange(event.target.value)}
+              placeholder="~/whisper.cpp/build/bin/whisper-cli"
+              aria-label="Whisper CLI path"
+              autoFocus
+            />
+          </Field>
+          {statusMessage ? (
+            <div className="voice-input-setup-status" role="status">
+              {statusMessage}
+            </div>
+          ) : null}
+          <div className="voice-input-setup-copy">
+            <p>Relay checks `~/whisper.cpp/build/bin/whisper-cli` by default. If you installed whisper.cpp elsewhere, paste that path above and save.</p>
+            <p>Reference install steps for macOS and Ubuntu:</p>
+          </div>
+          <pre className="voice-input-setup-code">
+            <code>{voiceInputInstallCommandBlock}</code>
+          </pre>
+        </div>
+        <footer className="modal-footer">
+          <Button type="button" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="button" className="primary-button" onClick={onSave} disabled={savePending || commandPath.trim().length === 0}>
+            {savePending ? "Checking..." : "Save path"}
+          </Button>
+        </footer>
+      </Dialog>
+    </DialogBackdrop>
   );
 }
 
 export function FloatingTicketComposer({
   projectPath,
   defaultEffort,
+  selectedProviderId,
   composerRef,
   onCreated,
   setToast
 }: {
   projectPath: string;
   defaultEffort: TicketEffort;
+  selectedProviderId: AgentProviderId;
   composerRef?: RefObject<HTMLTextAreaElement | null>;
   onCreated: () => void | Promise<void>;
   setToast: (toast: Toast) => void;
 }): ReactElement {
+  const usesCursorAgent = selectedProviderId === "cursor";
   const [idea, setIdea] = useState("");
-  const [draftType, setDraftType] = useState<FloatingComposerDraftType>("auto");
+  const [draftType, setDraftType] = useState<FloatingComposerDraftType>("feature");
   const [priority, setPriority] = useState<TicketPriority>("medium");
   const [effort, setEffort] = useState<TicketEffort>(defaultEffort);
+  const [cursorAgentModel, setCursorAgentModel] = useState<CursorAgentModel>("auto");
   const [ticketReferenceMention, setTicketReferenceMention] = useState<ActiveTicketReferenceMention | null>(null);
   const [ticketReferenceMenuStyle, setTicketReferenceMenuStyle] = useState<CSSProperties | null>(null);
   const [activeTicketReferenceIndex, setActiveTicketReferenceIndex] = useState(0);
+  const [voiceState, setVoiceState] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [voiceSetupOpen, setVoiceSetupOpen] = useState(false);
+  const [voiceCommandPath, setVoiceCommandPath] = useState("");
+  const [voiceSetupMessage, setVoiceSetupMessage] = useState<string | null>(null);
   const draftRequestRef = useRef(0);
   const localComposerRef = useRef<HTMLTextAreaElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const shouldTranscribeOnStopRef = useRef(false);
   const ideaEditorRef = composerRef ?? localComposerRef;
   const ticketReferencesQuery = useTicketReferencesQuery(projectPath);
+  const voiceInputStatusQuery = useVoiceInputStatusQuery();
+  const configureVoiceInputMutation = useConfigureVoiceInputMutation();
+  const transcribeVoiceInputMutation = useTranscribeVoiceInputMutation();
   const createDraftMutation = useCreateDraftMutation();
   const ticketReferences = ticketReferencesQuery.data ?? [];
   const ticketReferencesLoading = ticketReferencesQuery.isLoading;
@@ -2170,10 +3495,31 @@ export function FloatingTicketComposer({
   const ideaTicketReferenceMenuOpen = ticketReferenceMention !== null;
   const busy = createDraftMutation.isPending;
   const canSubmit = !busy && idea.trim().length > 0;
+  const voiceInputStatus = voiceInputStatusQuery.data;
+  const voiceInputEnabled = voiceInputStatus?.available === true;
+  const defaultVoiceCommandPath = voiceInputStatus?.configuredCommandPath ?? voiceInputStatus?.defaultCommandPath ?? "~/whisper.cpp/build/bin/whisper-cli";
+  const voiceStatusMessage = voiceInputStatusQuery.error
+    ? relayErrorMessage(voiceInputStatusQuery.error, "Unable to check local Whisper availability.")
+    : voiceInputStatus?.message ?? "Checking local Whisper availability.";
+  const recording = voiceState === "recording";
+  const transcribing = voiceState === "transcribing";
 
   useEffect(() => {
     setEffort(defaultEffort);
   }, [defaultEffort]);
+
+  useEffect(
+    () => () => {
+      shouldTranscribeOnStopRef.current = false;
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaRecorderRef.current = null;
+      mediaStreamRef.current = null;
+    },
+    []
+  );
 
   useEffect(() => {
     setActiveTicketReferenceIndex((current) => {
@@ -2181,6 +3527,13 @@ export function FloatingTicketComposer({
       return Math.min(current, filteredTicketReferences.length - 1);
     });
   }, [filteredTicketReferences.length]);
+
+  useEffect(() => {
+    if (!voiceSetupOpen) {
+      setVoiceCommandPath(defaultVoiceCommandPath);
+      setVoiceSetupMessage(null);
+    }
+  }, [defaultVoiceCommandPath, voiceSetupOpen]);
 
   useEffect(() => {
     const editor = ideaEditorRef.current;
@@ -2245,6 +3598,134 @@ export function FloatingTicketComposer({
     setTicketReferenceMenuStyle(null);
   };
 
+  const releaseVoiceStream = (): void => {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  };
+
+  const finalizeRecordedAudio = useCallback(
+    async (mimeType: string): Promise<void> => {
+      releaseVoiceStream();
+      mediaRecorderRef.current = null;
+      const audioBlob = new Blob(recordedChunksRef.current, { type: mimeType || "audio/webm" });
+      recordedChunksRef.current = [];
+      if (!shouldTranscribeOnStopRef.current) {
+        setVoiceState("idle");
+        return;
+      }
+      shouldTranscribeOnStopRef.current = false;
+      setVoiceState("transcribing");
+      try {
+        const audioBase64 = await recordedBlobToWavBase64(audioBlob);
+        const result = await transcribeVoiceInputMutation.mutateAsync({ audioBase64 });
+        setIdea((current) => appendTranscriptToIdea(current, result.transcript));
+        window.requestAnimationFrame(() => ideaEditorRef.current?.focus());
+      } catch (error) {
+        setToast({
+          kind: "error",
+          message: error instanceof Error ? error.message : "Unable to transcribe voice input locally."
+        });
+      } finally {
+        setVoiceState("idle");
+      }
+    },
+    [ideaEditorRef, setToast, transcribeVoiceInputMutation]
+  );
+
+  const startVoiceRecording = useCallback(async (): Promise<void> => {
+    if (busy || transcribing || recording) return;
+    if (!voiceInputEnabled) {
+      setToast({ kind: "error", message: voiceStatusMessage });
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setToast({ kind: "error", message: "This environment does not support microphone recording." });
+      return;
+    }
+    if (typeof MediaRecorder === "undefined") {
+      setToast({ kind: "error", message: "This environment does not support MediaRecorder." });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recordedChunksRef.current = [];
+      shouldTranscribeOnStopRef.current = true;
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        shouldTranscribeOnStopRef.current = false;
+        releaseVoiceStream();
+        mediaRecorderRef.current = null;
+        setVoiceState("idle");
+        setToast({ kind: "error", message: "Microphone recording failed." });
+      };
+      recorder.onstop = () => {
+        void finalizeRecordedAudio(recorder.mimeType);
+      };
+      recorder.start();
+      setVoiceState("recording");
+    } catch (error) {
+      setVoiceState("idle");
+      setToast({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Unable to access the microphone."
+      });
+    }
+  }, [busy, finalizeRecordedAudio, recording, setToast, transcribing, voiceInputEnabled, voiceStatusMessage]);
+
+  const stopVoiceRecording = useCallback((): void => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") return;
+    setVoiceState("transcribing");
+    recorder.requestData();
+    recorder.stop();
+  }, []);
+
+  const openVoiceSetup = useCallback((): void => {
+    setVoiceCommandPath(defaultVoiceCommandPath);
+    setVoiceSetupMessage(null);
+    setVoiceSetupOpen(true);
+  }, [defaultVoiceCommandPath]);
+
+  const handleVoiceInput = useCallback((): void => {
+    if (recording) {
+      stopVoiceRecording();
+      return;
+    }
+    if (!voiceInputEnabled) {
+      openVoiceSetup();
+      return;
+    }
+    void startVoiceRecording();
+  }, [openVoiceSetup, recording, startVoiceRecording, stopVoiceRecording, voiceInputEnabled]);
+
+  const saveVoiceCommandPath = useCallback((): void => {
+    const commandPath = voiceCommandPath.trim();
+    if (!commandPath) {
+      setVoiceSetupMessage("Enter a Whisper CLI path before saving.");
+      return;
+    }
+    setVoiceSetupMessage(null);
+    void configureVoiceInputMutation
+      .mutateAsync({ commandPath })
+      .then((status) => {
+        setVoiceSetupMessage(status.message);
+        if (!status.available) return;
+        setVoiceSetupOpen(false);
+        setToast({ kind: "info", message: "Local Whisper voice input is ready." });
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Unable to save the Whisper CLI path.";
+        setVoiceSetupMessage(message);
+        setToast({ kind: "error", message });
+      });
+  }, [configureVoiceInputMutation, setToast, voiceCommandPath]);
+
   const insertTicketReference = (candidate: TicketReferenceCandidate): void => {
     const editor = ideaEditorRef.current;
     const currentMention =
@@ -2273,6 +3754,8 @@ export function FloatingTicketComposer({
           idea: ideaSnapshot,
           priority,
           effort,
+          agentModel: cursorAgentModel,
+          selectedProviderId,
           draftType
         })
       );
@@ -2374,80 +3857,135 @@ export function FloatingTicketComposer({
     );
   };
 
+  const voiceButtonLabel = recording
+    ? "Stop recording and transcribe"
+    : transcribing
+      ? "Transcribing voice input locally"
+      : "Record ticket idea with voice";
+  const voiceButtonTooltip = recording
+    ? "Stop recording and transcribe"
+    : transcribing
+      ? "Transcribing audio locally..."
+      : voiceInputEnabled
+        ? "Record voice idea"
+        : "Set up local Whisper path";
+  const voiceButtonDisabled = recording ? false : busy || transcribing || configureVoiceInputMutation.isPending;
+
   return (
-    <section className="floating-ticket-composer" aria-label="Draft ticket idea">
-      <div className="floating-ticket-input-row">
-        <div className="ticket-reference-editor floating-ticket-reference-editor">
-          <Textarea
-            ref={ideaEditorRef}
-            value={idea}
-            rows={1}
-            placeholder="Draft a ticket idea..."
-            aria-label="Ticket idea"
-            aria-autocomplete="list"
-            aria-controls="floating-ticket-reference-menu"
-            aria-expanded={ideaTicketReferenceMenuOpen}
-            onChange={(event) => {
-              setIdea(event.target.value);
-              updateTicketReferenceMention(event.target.value, event.target.selectionStart, event.target.selectionEnd);
-            }}
-            onFocus={(event) =>
-              updateTicketReferenceMention(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)
-            }
-            onSelect={(event) =>
-              updateTicketReferenceMention(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)
-            }
-            onKeyDown={handleTicketReferenceKeyDown}
-            onBlur={() => {
-              window.setTimeout(closeTicketReferenceMenu, 120);
-            }}
-          />
-          {renderTicketReferenceMenu("floating-ticket-reference-menu")}
+    <>
+      <section className="floating-ticket-composer" aria-label="Draft ticket idea">
+        <div className="floating-ticket-input-row">
+          <div className="ticket-reference-editor floating-ticket-reference-editor">
+            <Textarea
+              ref={ideaEditorRef}
+              value={idea}
+              rows={1}
+              placeholder="Draft a ticket idea..."
+              aria-label="Ticket idea"
+              aria-autocomplete="list"
+              aria-controls="floating-ticket-reference-menu"
+              aria-expanded={ideaTicketReferenceMenuOpen}
+              onChange={(event) => {
+                setIdea(event.target.value);
+                updateTicketReferenceMention(event.target.value, event.target.selectionStart, event.target.selectionEnd);
+              }}
+              onFocus={(event) =>
+                updateTicketReferenceMention(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)
+              }
+              onSelect={(event) =>
+                updateTicketReferenceMention(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)
+              }
+              onKeyDown={handleTicketReferenceKeyDown}
+              onBlur={() => {
+                window.setTimeout(closeTicketReferenceMenu, 120);
+              }}
+            />
+            {renderTicketReferenceMenu("floating-ticket-reference-menu")}
+          </div>
+          <Tooltip label={voiceButtonTooltip}>
+            <Button
+              type="button"
+              className={clsx("floating-ticket-voice", recording && "recording", !voiceInputEnabled && "setup-required")}
+              onClick={handleVoiceInput}
+              disabled={voiceButtonDisabled}
+              aria-label={voiceButtonLabel}
+              title={voiceButtonLabel}
+              aria-pressed={recording || undefined}
+            >
+              {transcribing ? <Loader2 className="spin" size={16} /> : recording ? <Square size={16} /> : <Mic size={16} />}
+            </Button>
+          </Tooltip>
+          <Button
+            type="button"
+            className="floating-ticket-submit"
+            onClick={() => void submitDraft()}
+            disabled={!canSubmit}
+            aria-label="Draft ticket with agent"
+            title="Draft ticket with agent"
+          >
+            {busy ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
+          </Button>
         </div>
-        <Button
-          type="button"
-          className="floating-ticket-submit"
-          onClick={() => void submitDraft()}
-          disabled={!canSubmit}
-          aria-label="Draft ticket with agent"
-          title="Draft ticket with agent"
-        >
-          {busy ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
-        </Button>
-      </div>
-      <div className="floating-ticket-controls" aria-label="Ticket draft options">
-        <label>
-          <span>Type</span>
-          <Select value={draftType} onChange={(event) => setDraftType(event.target.value as FloatingComposerDraftType)}>
-            {floatingComposerDraftTypeOptions.map((option) => (
-              <option value={option} key={option}>
-                {floatingComposerDraftTypeLabel(option)}
-              </option>
-            ))}
-          </Select>
-        </label>
-        <label>
-          <span>Priority</span>
-          <Select value={priority} onChange={(event) => setPriority(event.target.value as TicketPriority)}>
-            {priorityOptions.map((option) => (
-              <option value={option} key={option}>
-                {option}
-              </option>
-            ))}
-          </Select>
-        </label>
-        <label>
-          <span>Effort</span>
-          <Select value={effort} onChange={(event) => setEffort(event.target.value as TicketEffort)}>
-            {ticketEffortOptions.map((option) => (
-              <option value={option} key={option}>
-                {ticketEffortLabel(option)}
-              </option>
-            ))}
-          </Select>
-        </label>
-      </div>
-    </section>
+        <div className="floating-ticket-controls" aria-label="Ticket draft options">
+          <label>
+            <span>Type</span>
+            <Select value={draftType} onChange={(event) => setDraftType(event.target.value as FloatingComposerDraftType)}>
+              {floatingComposerDraftTypeOptions.map((option) => (
+                <option value={option} key={option}>
+                  {floatingComposerDraftTypeLabel(option)}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <label>
+            <span>Priority</span>
+            <Select value={priority} onChange={(event) => setPriority(event.target.value as TicketPriority)}>
+              {priorityOptions.map((option) => (
+                <option value={option} key={option}>
+                  {option}
+                </option>
+              ))}
+            </Select>
+          </label>
+          {usesCursorAgent ? (
+            <label>
+              <span>Model</span>
+              <Select value={cursorAgentModel} onChange={(event) => setCursorAgentModel(event.target.value as CursorAgentModel)}>
+                {cursorAgentModelOptions.map((option) => (
+                  <option value={option} key={option}>
+                    {cursorAgentModelLabel(option)}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          ) : (
+            <label>
+              <span>Effort</span>
+              <Select value={effort} onChange={(event) => setEffort(event.target.value as TicketEffort)}>
+                {ticketEffortOptions.map((option) => (
+                  <option value={option} key={option}>
+                    {ticketEffortLabel(option)}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          )}
+        </div>
+      </section>
+      {voiceSetupOpen ? (
+        <VoiceInputSetupModal
+          commandPath={voiceCommandPath}
+          statusMessage={voiceSetupMessage ?? voiceStatusMessage}
+          onCommandPathChange={setVoiceCommandPath}
+          onClose={() => {
+            if (configureVoiceInputMutation.isPending) return;
+            setVoiceSetupOpen(false);
+          }}
+          onSave={saveVoiceCommandPath}
+          savePending={configureVoiceInputMutation.isPending}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -2620,6 +4158,16 @@ function TicketDetail({
   }, [projectPath, ticketId]);
 
   useEffect(() => {
+    const terminalDraftEvent = [...events]
+      .reverse()
+      .find(
+        (event): event is Extract<RendererRunEvent, { type: "run.completed" }> =>
+          event.ticketId === ticketId && event.type === "run.completed"
+      );
+    if (terminalDraftEvent?.resolvedTicketId && terminalDraftEvent.resolvedTicketId !== ticketId) {
+      onOpenTicket(terminalDraftEvent.resolvedTicketId);
+      return;
+    }
     if (
       events.some(
         (event) =>
@@ -2631,9 +4179,8 @@ function TicketDetail({
       )
     ) {
       void refreshDetail();
-      void Promise.resolve(onChanged());
     }
-  }, [events, onChanged, refreshDetail, ticketId]);
+  }, [events, onOpenTicket, refreshDetail, ticketId]);
 
   const currentRunEvents = useMemo(() => {
     const liveRunEvents = runId ? events.filter((event) => event.runId === runId) : [];
@@ -2658,6 +4205,10 @@ function TicketDetail({
       ? "refining"
       : ticket.frontMatter.authoringState
     : null;
+  const showDetailAuthoringState =
+    Boolean(detailAuthoringState) &&
+    detailAuthoringState !== "rough" &&
+    (ticket?.frontMatter.runStatus === "idle" || ticketUpdateActive);
   const linkedChildTickets = useMemo(() => {
     if (!ticket || (ticket.frontMatter.ticketType !== "epic" && ticket.frontMatter.ticketType !== "feature")) return [];
     const byId = new Map(board.tickets.map((item) => [item.id, item]));
@@ -2751,7 +4302,7 @@ function TicketDetail({
   const ticketIsCompleted = ticket?.frontMatter.status === "completed";
   const archiveStatusAvailable = board.columns.some((column) => column.id === RELAY_ARCHIVE_STATUS);
   const detailArchiveTarget = useMemo(() => {
-    if (!ticket || !archiveStatusAvailable) return null;
+    if (!ticket || !archiveStatusAvailable || !ticketIsCompleted) return null;
     if (ticket.frontMatter.ticketType === "feature") {
       const summary = board.tickets.find((entry) => entry.id === ticket.frontMatter.id);
       if (!summary) return null;
@@ -2760,7 +4311,8 @@ function TicketDetail({
         bundleIds: archiveBundleForFeature(ticket.frontMatter.id, board.tickets),
         blockedMessage: summary.parentEpicId
           ? "Complete every task under this feature and epic before archiving."
-          : "Complete every task under this feature before archiving."
+          : "Complete every task under this feature before archiving.",
+        successMessage: "Container and child tickets archived."
       };
     }
     if (ticket.frontMatter.ticketType === "epic") {
@@ -2769,11 +4321,22 @@ function TicketDetail({
       return {
         canArchive: epicCanArchive(summary, board.tickets),
         bundleIds: archiveBundleForEpic(ticket.frontMatter.id, board.tickets),
-        blockedMessage: "Complete every task under this epic before archiving."
+        blockedMessage: "Complete every task under this epic before archiving.",
+        successMessage: "Container and child tickets archived."
+      };
+    }
+    if (ticket.frontMatter.ticketType === "task") {
+      const summary = board.tickets.find((entry) => entry.id === ticket.frontMatter.id);
+      if (!summary) return null;
+      return {
+        canArchive: taskCanArchive(summary),
+        bundleIds: [ticket.frontMatter.id],
+        blockedMessage: "Only completed tasks can be archived.",
+        successMessage: `Archived ${summary.title}.`
       };
     }
     return null;
-  }, [archiveStatusAvailable, board.tickets, ticket]);
+  }, [archiveStatusAvailable, board.tickets, ticket, ticketIsCompleted]);
 
   useEffect(() => {
     if (!ticketUpdateRunId || ticketUpdateEndedAt) return;
@@ -3114,7 +4677,7 @@ function TicketDetail({
       const result = await createDraftMutation.mutateAsync({
         projectPath,
         idea: `Create a follow-up ticket related to ${ticket.frontMatter.id} (${ticket.frontMatter.title}).\n\nFollow-up request:\n${request}`,
-        preferredTicketType: "task",
+        preferredTicketType: "feature",
         relatedTicketIds: [ticket.frontMatter.id],
         runIntake: true
       });
@@ -3494,7 +5057,9 @@ function TicketDetail({
               boardTickets={board.tickets}
             >
               <TicketRunStatusPill status={ticket.frontMatter.runStatus} />
-              {detailAuthoringState && <TicketAuthoringStatePill state={detailAuthoringState} />}
+              {showDetailAuthoringState && detailAuthoringState ? (
+                <TicketAuthoringStatePill state={detailAuthoringState} />
+              ) : null}
               {ticket.checklist.total > 0 && <TicketChecklistPill completed={ticket.checklist.completed} total={ticket.checklist.total} />}
               {blockerResolution?.isBlocked && (
                 <span className="ticket-blocker-pill active" title={blockerResolution.activeBlockers.map(resolvedBlockerLabel).join("; ")}>
@@ -3646,13 +5211,7 @@ function TicketDetail({
                 </Tooltip>
               )}
               {detailArchiveTarget && (
-                <Tooltip
-                  label={
-                    detailArchiveTarget.canArchive
-                      ? "Archive this container and all child tickets"
-                      : detailArchiveTarget.blockedMessage
-                  }
-                >
+                <Tooltip label="Archive">
                   <Button
                     type="button"
                     className="icon-button"
@@ -3664,14 +5223,16 @@ function TicketDetail({
                       void (async () => {
                         setBusy(true);
                         try {
-                          for (const ticketId of detailArchiveTarget.bundleIds) {
-                            await moveTicketMutation.mutateAsync({
-                              projectPath,
-                              ticketId,
-                              targetStatus: RELAY_ARCHIVE_STATUS
-                            });
-                          }
-                          setToast({ kind: "success", message: "Container and child tickets archived." });
+                          await archiveTicketIdsWithAgent({
+                            projectPath,
+                            bundleIds: detailArchiveTarget.bundleIds,
+                            allTickets: board.tickets,
+                            archiveStatusAvailable,
+                            startTicketUpdate: (input) => startTicketUpdateMutation.mutateAsync(input),
+                            readBoard: () => relayApi.board.read({ projectPath }),
+                            onRefresh: onChanged
+                          });
+                          setToast({ kind: "success", message: detailArchiveTarget.successMessage });
                           await Promise.resolve(onChanged());
                           await refreshDetail();
                         } catch (error) {
@@ -3685,10 +5246,9 @@ function TicketDetail({
                       })();
                     }}
                     disabled={busy || ticketUpdateActive || draftInProgress}
-                    aria-label="Archive container and child tickets"
+                    aria-label="Archive"
                   >
                     <Archive size={16} aria-hidden="true" />
-                    Archive
                   </Button>
                 </Tooltip>
               )}
@@ -3905,8 +5465,7 @@ function TicketDetail({
                   <Field className="sidebar-metadata-field">
                     <span>Status</span>
                     <p className="ticket-detail-container-status-note">
-                      {ticket.frontMatter.ticketType === "epic" ? "Epics" : "Features"} follow child task columns. Open
-                      tasks below to move work across the board.
+                      {getContainerTicketStatusNote(ticket.frontMatter.ticketType, ticket.frontMatter.status)}
                     </p>
                   </Field>
                 ) : (
@@ -4369,19 +5928,21 @@ function RelayApp(): ReactElement {
   const [repositoryChatOpen, setRepositoryChatOpen] = useState(false);
   const [openTicketId, setOpenTicketId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [providerSelectorOpen, setProviderSelectorOpen] = useState(false);
   const [events, setEvents] = useState<RendererRunEvent[]>([]);
-  const floatingComposerRef = useRef<HTMLTextAreaElement | null>(null);
+  const repositoryChatComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const sidebarShortcutLabel = useMemo(() => sidebarToggleShortcutLabel(), []);
   const queryClient = useQueryClient();
   const projectsQuery = useProjectsQuery();
   const projects = projectsQuery.data ?? [];
   const boardQuery = useBoardQuery(selectedPath);
   const board = boardQuery.data ?? null;
-  const codexStatusQuery = useCodexStatusQuery();
-  const codexStatus = codexStatusQuery.data;
-  const codexStatusLoading = !codexStatus && (codexStatusQuery.isPending || codexStatusQuery.isFetching);
-  const codexStatusError = codexStatusQuery.isError && !codexStatus;
-  const codexStatusRefreshing = codexStatusQuery.isFetching && Boolean(codexStatus);
+  const providerInventoryQuery = useProviderInventoryQuery();
+  const providerInventory = providerInventoryQuery.data;
+  const providerInventoryLoading = !providerInventory && (providerInventoryQuery.isPending || providerInventoryQuery.isFetching);
+  const providerInventoryError = providerInventoryQuery.isError && !providerInventory;
+  const providerInventoryRefreshing = providerInventoryQuery.isFetching && Boolean(providerInventory);
+  const switchAgentProviderMutation = useSwitchAgentProviderMutation();
   const gitMetadataQuery = useProjectGitMetadataQuery(board?.project.path ?? selectedPath, { force: true });
   const selectedGitMetadata = gitMetadataQuery.data ?? (gitMetadataQuery.error ? gitMetadataError(relayErrorMessage(gitMetadataQuery.error, "Unable to load Git metadata.")) : undefined);
   const addProjectMutation = useAddProjectMutation();
@@ -4412,6 +5973,14 @@ function RelayApp(): ReactElement {
     setSidebarCollapsed((collapsed) => !collapsed);
   }, []);
 
+  const openProviderSelector = useCallback((): void => {
+    setProviderSelectorOpen(true);
+  }, []);
+
+  const closeProviderSelector = useCallback((): void => {
+    setProviderSelectorOpen(false);
+  }, []);
+
   useEffect(() => {
     setSelectedPath((current) => current ?? projects[0]?.path ?? null);
   }, [projects]);
@@ -4439,6 +6008,16 @@ function RelayApp(): ReactElement {
   useEffect(() => {
     return useRunEventSubscription((event) => {
       setEvents((current) => [...current.slice(-400), event]);
+      if (event.type === "run.completed" && event.resolvedTicketId) {
+        setOpenTicketId((current) => (current === event.ticketId ? event.resolvedTicketId! : current));
+        void handleDraftPlaceholderResolved(
+          queryClient,
+          event.projectPath,
+          event.ticketId,
+          event.resolvedTicketId
+        );
+        return;
+      }
       if (
         event.type === "run.started" ||
         event.type === "run.completed" ||
@@ -4446,7 +6025,7 @@ function RelayApp(): ReactElement {
         event.type === "clarification.requested" ||
         event.type === "ticket.status_changed"
       ) {
-        void invalidateRelayTicketData(queryClient, event.projectPath, event.ticketId);
+        debouncedInvalidateRelayTicketData(queryClient, event.projectPath, event.ticketId);
       }
     });
   }, [queryClient]);
@@ -4463,10 +6042,9 @@ function RelayApp(): ReactElement {
     }
   };
 
-  const refreshAll = async (): Promise<void> => {
+  const refreshAll = useCallback(async (): Promise<void> => {
     await invalidateRelayProjectData(queryClient, selectedPath);
-    await Promise.all([projectsQuery.refetch(), selectedPath ? boardQuery.refetch() : Promise.resolve()]);
-  };
+  }, [queryClient, selectedPath]);
 
   const selectedEvents = useMemo(
     () => events.filter((event) => event.projectPath === selectedPath && event.ticketId === openTicketId),
@@ -4476,7 +6054,7 @@ function RelayApp(): ReactElement {
     () => getRepositoryChatShellState({ board, selectedPath, repositoryChatOpen }),
     [board, repositoryChatOpen, selectedPath]
   );
-  const createShortcutEnabled = Boolean(board && selectedPath && !repositoryChatShellState.repositoryChatActive && !openTicketId);
+  const createShortcutEnabled = Boolean(board && selectedPath && !openTicketId);
   const openRepositoryChat = useCallback((): void => {
     if (!board || !selectedPath) return;
     setRepositoryChatOpen(true);
@@ -4508,7 +6086,8 @@ function RelayApp(): ReactElement {
     allowInTextEntry: true,
     matcher: isCreateTicketShortcut,
     handler: () => {
-      floatingComposerRef.current?.focus();
+      openRepositoryChat();
+      window.setTimeout(() => repositoryChatComposerRef.current?.focus(), 0);
       return true;
     }
   });
@@ -4519,6 +6098,7 @@ function RelayApp(): ReactElement {
         "app-shell",
         sidebarCollapsed && "sidebar-collapsed",
         openTicketId && "detail-open",
+        providerSelectorOpen && "modal-open",
         repositoryChatShellState.repositoryChatActive && "chat-open"
       )}
     >
@@ -4535,11 +6115,11 @@ function RelayApp(): ReactElement {
         onReveal={(projectPath) => void revealProjectMutation.mutate(projectPath)}
         onToggleVisibility={toggleSidebar}
         toggleShortcutLabel={sidebarShortcutLabel}
-        codexStatus={codexStatus}
-        codexStatusLoading={codexStatusLoading}
-        codexStatusError={codexStatusError}
-        codexStatusRefreshing={codexStatusRefreshing}
-        onRefreshCodexStatus={() => void codexStatusQuery.refetch()}
+        providerInventory={providerInventory}
+        providerInventoryLoading={providerInventoryLoading}
+        providerInventoryError={providerInventoryError}
+        providerInventoryRefreshing={providerInventoryRefreshing}
+        onOpenProviderSelector={openProviderSelector}
       />
 
       {sidebarCollapsed && (
@@ -4556,11 +6136,11 @@ function RelayApp(): ReactElement {
             <PanelLeftOpen size={17} />
           </Button>
           <CodexCollapsedStatusIndicator
-            codexStatus={codexStatus}
-            isLoading={codexStatusLoading}
-            isError={codexStatusError}
-            isRefreshing={codexStatusRefreshing}
-            onRefresh={() => void codexStatusQuery.refetch()}
+            providerInventory={providerInventory}
+            isLoading={providerInventoryLoading}
+            isError={providerInventoryError}
+            isRefreshing={providerInventoryRefreshing}
+            onOpenSelector={openProviderSelector}
           />
         </>
       )}
@@ -4569,8 +6149,6 @@ function RelayApp(): ReactElement {
         <BoardView
           board={board}
           projectPath={selectedPath}
-          defaultEffort={board.config?.settings.defaultTicketEffort ?? "medium"}
-          composerRef={floatingComposerRef}
           onCreated={refreshAll}
           query={query}
           ticketNavigationEnabled={!openTicketId}
@@ -4598,8 +6176,40 @@ function RelayApp(): ReactElement {
           key={selectedPath}
           projectPath={selectedPath}
           projectName={board.project.name}
+          defaultEffort={board.config?.settings.defaultTicketEffort ?? "medium"}
+          selectedProviderId={providerInventory?.selectedProviderId ?? "codex"}
+          composerRef={repositoryChatComposerRef}
           onClose={closeRepositoryChat}
+          onCreated={refreshAll}
           setToast={setToast}
+        />
+      )}
+
+      {providerSelectorOpen && (
+        <CliProviderSelectorModal
+          inventory={providerInventory}
+          isLoading={providerInventoryLoading}
+          isError={providerInventoryError}
+          isSwitching={switchAgentProviderMutation.isPending}
+          onClose={closeProviderSelector}
+          onSelectProvider={(providerId) => {
+            if (!providerInventory) return;
+            if (providerId === providerInventory.selectedProviderId || switchAgentProviderMutation.isPending) return;
+            void switchAgentProviderMutation
+              .mutateAsync(providerId)
+              .then((result) => {
+                if (result.ok) {
+                  const providerLabel = result.inventory.providers.find((provider) => provider.id === result.selectedProviderId)?.label ?? "selected";
+                  setToast({ kind: "success", message: `Relay is now using ${providerLabel}.` });
+                  closeProviderSelector();
+                  return;
+                }
+                setToast({ kind: "error", message: result.message });
+              })
+              .catch((error) => {
+                setToast({ kind: "error", message: relayErrorMessage(error, "Unable to switch CLI provider.") });
+              });
+          }}
         />
       )}
 

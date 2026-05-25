@@ -11,8 +11,8 @@
   "status": "blocked",
   "attempts": 1,
   "createdAt": "2026-05-21T09:47:37.049Z",
-  "updatedAt": "2026-05-21T09:58:08.528Z",
-  "lastAppliedEventSequence": 6,
+  "updatedAt": "2026-05-25T07:22:41.277Z",
+  "lastAppliedEventSequence": 39,
   "executor": "agent",
   "providerId": "codex",
   "requiredCapabilities": [

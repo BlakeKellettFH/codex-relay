@@ -1,6 +1,7 @@
 import { Context, Effect, Layer, Path, Schedule } from "effect";
 import { Codex, type CodexOptions, type Input, type Thread, type ThreadEvent, type ThreadItem, type ThreadOptions } from "@openai/codex-sdk";
 import {
+  type AgentProviderId,
   type AgentTicketUpdate,
   type AgentTicketUpdateInput,
   type AgentTicketUpdateStartResult,
@@ -10,6 +11,7 @@ import {
   type CodexStatus,
   type CancelRunInput,
   type CreateDraftInput,
+  type CursorAgentModel,
   type DraftIntakeAnswer,
   type DraftIntakeInput,
   type DraftIntakeQuestion,
@@ -17,6 +19,7 @@ import {
   type DraftPlanKind,
   type DraftScope,
   type HierarchyDraftPlan,
+  RELAY_ARCHIVE_STATUS,
   RELAY_COMPLETED_STATUS,
   RELAY_IN_PROGRESS_STATUS,
   RELAY_NEEDS_CLARIFICATION_STATUS,
@@ -26,10 +29,12 @@ import {
   type RelayCodexEvent,
   type RepositoryChatInput,
   type RepositoryChatResponse,
+  type RepositoryChatStreamEvent,
   type RendererRunEvent,
   type RunSummary,
   type RunStatus,
   type StartRunInput,
+  type BoardSnapshot,
   type TicketAuthoringState,
   type TicketCreateInput,
   type TicketDraft,
@@ -49,7 +54,7 @@ import {
   MISSING_PLANNED_SCOPE_MARKER,
   normalizePlannedScope as normalizeSharedPlannedScope
 } from "@shared/plannedScope";
-import { normalizeRepoPath, normalizeRepoPathList } from "@shared/pathScope";
+import { isRelayManagedPath, normalizeRepoPath, normalizeRepoPathList } from "@shared/pathScope";
 import {
   pathLockConflictsFor,
   releasePathLocksForRun,
@@ -57,7 +62,7 @@ import {
   type PathLockConflict
 } from "../path-lock";
 import { resolvedBlockerLabel, resolveTicketBlockers } from "@shared/blockers";
-import { resolveDraftPreferredTicketType } from "@shared/draftTicket";
+import { effectiveDraftPreferredTicketType, resolveDraftPreferredTicketType } from "@shared/draftTicket";
 import {
   agentTicketUpdateSchema,
   draftIntakeResultSchema,
@@ -83,6 +88,7 @@ import { ElectronApp } from "../../platform";
 import {
   markWorkRunStatus,
   claimImplementationWork,
+  readWorkRunSnapshot,
   submitTicketImplementationWork,
   submitTicketDraftWork,
   submitTicketRedraftWork,
@@ -97,11 +103,24 @@ import {
   type WorkTicketUpdateBeginResult
 } from "../work";
 import {
-  parseStructuredAgentJsonResponse,
+  type AgentProvider,
   type AgentWebSearchMode,
+  type AgentWorkKind,
   type StructuredAgentProvider,
-  type StructuredAgentRequest
+  type StructuredAgentRequest,
+  type StructuredAgentResult,
+  type TextAgentResult
 } from "../agents";
+import { persistAgentStructuredRunResponse, type AgentRunArtifactContext } from "../agents/agentRunDebug";
+import { createClaudeAgentProvider } from "../agents/claudeProvider";
+import { createCodexAgentProvider, type CodexProviderClient } from "../agents/codexProvider";
+import { createCursorAgentProvider, CursorIncompleteResultError } from "../agents/cursorProvider";
+import {
+  decodeProviderSessionId,
+  encodeProviderSessionRef,
+  resolveAgentProviderForNewWork,
+  type AgentProviderResolverDependencies
+} from "../agents/providers";
 import { captureRunGitBaseline, revertRunGitChanges } from "../git/GitRunBaseline";
 import { resolveAvailableCodexCli, type CodexCliResolution } from "./cli";
 import { getCodexStatus } from "./status";
@@ -134,14 +153,36 @@ import {
   writeTicket
 } from "../../storage";
 import { slashPath } from "../../storage/paths";
+import { formatProjectContextPromptSection } from "../project-context";
+import { appendCursorTicketDraftPromptGuidance } from "../provider-prompts/cursor";
+import { ARCHIVE_TICKET_UPDATE_REQUEST, sortArchiveBundleIds } from "@renderer/lib/boardArchive";
 
 export { getCodexStatus } from "./status";
+
+const PROJECT_CONTEXT_FOLLOW_GUIDANCE =
+  "Follow project context unless this ticket explicitly overrides it.";
+const REPOSITORY_CHAT_CONTEXT_FILENAME = "chat.md";
+const REPOSITORY_CHAT_REASONING_EFFORT: TicketEffort = "low";
+
+export const resolveProjectContextPromptSection = (projectPath: string): Promise<string> =>
+  formatProjectContextPromptSection(projectPath);
+
+const resolveRepositoryChatContextPromptSection = (projectPath: string): Promise<string> =>
+  formatProjectContextPromptSection(projectPath, {
+    filenames: [REPOSITORY_CHAT_CONTEXT_FILENAME],
+    header: `Repository chat rules (from .relay/context/${REPOSITORY_CHAT_CONTEXT_FILENAME}):`
+  });
+
+const formatProjectContextBlock = (projectContextSection: string): string => {
+  const trimmed = projectContextSection.trim();
+  if (!trimmed) return "";
+  return `${trimmed}\n\n${PROJECT_CONTEXT_FOLLOW_GUIDANCE}\n\n`;
+};
 
 type QueuedRunIntent = Omit<WorkQueuedImplementationIntent, "dependencies"> & {
   dependencies: CodexRunDependencies;
 };
 
-const IMPLEMENTATION_WORKER_CONCURRENCY = 1;
 const backendPath = (): Promise<Path.Path> => runBackendEffect(Path.Path.use((path) => Effect.succeed(path)));
 const resolveBackendPath = async (...parts: string[]): Promise<string> => (await backendPath()).resolve(...parts);
 
@@ -150,7 +191,7 @@ const nowIso = (): string => new Date().toISOString();
 const markWorkRunStatusSafely = async (
   projectPath: string,
   runId: string,
-  status: WorkExecutionStatus,
+  status: WorkExecutionStatus | "suspended",
   options?: Parameters<typeof markWorkRunStatus>[3]
 ): Promise<WorkRunSnapshot | null> => {
   try {
@@ -216,8 +257,8 @@ const DRAFT_SCOPE_PROFILES: Record<DraftScope, DraftScopeProfile> = {
 const defaultDraftScopeForInput = (input: Pick<CreateDraftInput, "draftScope" | "preferredTicketType">): DraftScope => {
   if (input.draftScope) return input.draftScope;
   if (input.preferredTicketType === "epic") return "epic";
-  if (input.preferredTicketType === "feature") return "product_feature";
-  return "task";
+  if (input.preferredTicketType === "feature" || input.preferredTicketType === "task") return "product_feature";
+  return "product_feature";
 };
 
 const registry = <A>(
@@ -335,7 +376,7 @@ const wakeProjectSchedulerSoon = (projectPath: string): void => {
   );
 };
 
-export const wakeRecoveredCodexWork = async (reports: readonly WorkRecoveryReport[]): Promise<void> => {
+export const wakeRecoveredWork = async (reports: readonly WorkRecoveryReport[]): Promise<void> => {
   const projectPaths = new Set<string>();
   for (const report of reports) {
     for (const projectPath of report.wakeProjectPaths ?? []) {
@@ -348,7 +389,9 @@ export const wakeRecoveredCodexWork = async (reports: readonly WorkRecoveryRepor
 };
 
 const drainProjectScheduler = async (projectPath: string): Promise<void> => {
-  while ((await activeImplementationRunCountForProject(projectPath)) < IMPLEMENTATION_WORKER_CONCURRENCY) {
+  const config = await readProjectConfig(projectPath);
+  const implementationWorkerConcurrency = Math.max(1, config.settings.agentConcurrency);
+  while ((await activeImplementationRunCountForProject(projectPath)) < implementationWorkerConcurrency) {
     let next: Awaited<ReturnType<typeof listQueuedReadyTickets>>[number] | undefined;
     for (const ticket of await listQueuedReadyTickets(projectPath)) {
       const runId = ticket.lastRunId;
@@ -410,8 +453,12 @@ export type CodexRunClient = {
 };
 
 export type CodexRunDependencies = {
+  agentProvider?: AgentProvider;
+  createAgentProvider?: (providerId: AgentProviderId) => AgentProvider | Promise<AgentProvider>;
   createCodexClient?: () => CodexRunClient;
   createRunId?: () => string;
+  selectedProviderId?: AgentProviderId;
+  readSelectedProviderId?: () => Promise<AgentProviderId>;
   runEventSink?: RendererRunEventSink;
 };
 
@@ -420,15 +467,19 @@ type CodexRunDependencyServices = Context.Service.Identifier<typeof CodexRunDepe
 const codexRunDependencyLayer = (dependencies: CodexRunDependencies = {}): Layer.Layer<CodexRunDependencyServices> =>
   Layer.succeed(CodexRunDependencyService)(dependencies);
 
-export type TicketUpdateThread = Pick<Thread, "id" | "runStreamed">;
+export type TicketUpdateThread = Pick<Thread, "id" | "run">;
 
 export type TicketUpdateCodexClient = {
   startThread: (options: ThreadOptions) => TicketUpdateThread;
 };
 
 export type TicketUpdateDependencies = {
+  agentProvider?: AgentProvider;
   createCodexClient?: () => TicketUpdateCodexClient;
+  createAgentProvider?: (providerId: AgentProviderId) => AgentProvider | Promise<AgentProvider>;
   createRunId?: () => string;
+  selectedProviderId?: AgentProviderId;
+  readSelectedProviderId?: () => Promise<AgentProviderId>;
   runEventSink?: RendererRunEventSink;
   reconcileTicketQueueState?: typeof reconcileTicketQueueState;
 };
@@ -483,16 +534,8 @@ const implementationThreadOptionsForProject = async (projectPath: string, ticket
   };
 };
 
-const ticketUpdateThreadOptionsForProject = async (projectPath: string): Promise<ThreadOptions> => ({
-  ...(await boundedThreadOptionsForProject(projectPath)),
-  approvalPolicy: "never",
-  sandboxMode: "read-only",
-  networkAccessEnabled: false,
-  webSearchMode: "disabled"
-});
-
 const repositoryChatThreadOptionsForProject = async (projectPath: string): Promise<ThreadOptions> => ({
-  ...(await boundedThreadOptionsForProject(projectPath)),
+  ...(await boundedThreadOptionsForProject(projectPath, REPOSITORY_CHAT_REASONING_EFFORT)),
   approvalPolicy: "never",
   sandboxMode: "read-only",
   networkAccessEnabled: false,
@@ -563,7 +606,8 @@ const leanTaskDraftSchemaJson = {
     acceptanceCriteria: { type: "array", items: { type: "string" } },
     implementationPlan: { type: "array", items: { type: "string" } },
     assumptions: { type: "array", items: { type: "string" } },
-    plannedFiles: { type: "array", minItems: 1, items: { type: "string" } }
+    plannedFiles: { type: "array", minItems: 1, items: { type: "string" } },
+    blockedByTitles: { type: "array", items: { type: "string" } }
   }
 } as const;
 
@@ -744,6 +788,14 @@ const DEFAULT_REPOSITORY_CHAT_TIMEOUT_MS = 120_000;
 const DRAFT_AGENT_NETWORK_ACCESS_ENABLED = true;
 const DRAFT_AGENT_WEB_SEARCH_MODE: AgentWebSearchMode = "live";
 
+const draftAgentRunRequestExtras = (
+  effort: TicketEffort,
+  agentModel?: CursorAgentModel
+): { readonly effort: TicketEffort; readonly agentModel?: CursorAgentModel } => ({
+  effort,
+  ...(agentModel ? { agentModel } : {})
+});
+
 export type TicketDraftThread = Pick<Thread, "run"> & Partial<Pick<Thread, "id">>;
 
 export type TicketDraftCodexClient = {
@@ -754,12 +806,33 @@ export type TicketDraftDependencies = {
   getStatus?: () => Promise<CodexStatus>;
   agentProvider?: StructuredAgentProvider;
   createCodexClient?: () => TicketDraftCodexClient;
+  createAgentProvider?: (providerId: AgentProviderId) => AgentProvider | Promise<AgentProvider>;
   createRequestId?: () => string;
+  /** When set (e.g. startTicketDraftRun), agent CLI responses are saved under `.relay/runs/{ticketId}/`. */
+  runId?: string;
   nowMs?: () => number;
   abortController?: AbortController;
   onProgress?: TicketDraftProgressReporter;
   draftProgressIntervalMs?: number;
+  selectedProviderId?: AgentProviderId;
+  readSelectedProviderId?: () => Promise<AgentProviderId>;
 };
+
+const agentStructuredRunArtifactContext = (
+  projectPath: string,
+  kind: AgentWorkKind,
+  providerId: string,
+  requestId: string,
+  dependencies: TicketDraftDependencies,
+  ticketId?: string | null
+): AgentRunArtifactContext => ({
+  projectPath,
+  kind,
+  providerId,
+  ticketId: ticketId ?? null,
+  runId: dependencies.runId ?? null,
+  requestId
+});
 
 const structuredAgentThreadOptionsForProject = async (request: StructuredAgentRequest): Promise<ThreadOptions> => {
   const context = await projectThreadOptionsContext(request.projectPath);
@@ -785,33 +858,98 @@ const structuredAgentThreadOptionsForProject = async (request: StructuredAgentRe
 };
 
 const createCodexStructuredAgentProvider = (
-  dependencies: Pick<TicketDraftDependencies, "createCodexClient"> = {}
-): StructuredAgentProvider => ({
-  providerId: "codex",
-  runStructured: async <T = unknown>(request: StructuredAgentRequest) => {
-    const codex = dependencies.createCodexClient?.() ?? (await createCodex());
-    const thread = codex.startThread(await structuredAgentThreadOptionsForProject(request));
-    const turn = await thread.run(request.prompt, { outputSchema: request.outputSchema, signal: request.signal });
-    const providerSessionRef = thread.id
-      ? {
-        providerId: "codex",
-        externalId: thread.id,
-        parts: { threadId: thread.id }
-      }
-      : null;
-    return {
-      providerId: "codex",
-      output: parseStructuredAgentJsonResponse(turn.finalResponse) as T,
-      rawResponse: turn.finalResponse,
-      providerSessionRef
-    };
-  }
-});
+  dependencies: Pick<TicketDraftDependencies, "createCodexClient">
+): AgentProvider =>
+  createCodexAgentProvider({
+    createClient: async () => (dependencies.createCodexClient?.() as unknown as CodexProviderClient | undefined) ?? (await createCodex()),
+    structuredThreadOptionsForRequest: structuredAgentThreadOptionsForProject,
+    textThreadOptionsForRequest: async (request) =>
+      request.kind === "repository.chat"
+        ? repositoryChatThreadOptionsForProject(request.projectPath)
+        : structuredAgentThreadOptionsForProject({
+            kind: request.kind,
+            projectPath: request.projectPath,
+            prompt: request.prompt,
+            mode: request.mode,
+            effort: request.effort,
+            networkAccessEnabled: request.networkAccessEnabled,
+            webSearchMode: request.webSearchMode,
+            signal: request.signal,
+            outputSchema: null
+          })
+  });
 
 const structuredAgentProviderForDraft = (dependencies: TicketDraftDependencies): StructuredAgentProvider =>
   dependencies.agentProvider ?? createCodexStructuredAgentProvider({ createCodexClient: dependencies.createCodexClient });
 
-export type RepositoryChatThread = Pick<Thread, "run"> & Partial<Pick<Thread, "id">>;
+const defaultAgentProviderFactory = (
+  dependencies: Pick<TicketDraftDependencies & RepositoryChatDependencies & TicketUpdateDependencies, "createCodexClient">
+): AgentProviderResolverDependencies["createAgentProvider"] =>
+  (providerId) => {
+    switch (providerId) {
+      case "codex":
+        return createCodexStructuredAgentProvider({ createCodexClient: dependencies.createCodexClient as TicketDraftDependencies["createCodexClient"] });
+      case "cursor":
+        return createCursorAgentProvider();
+      case "claude":
+        return createClaudeAgentProvider();
+      default:
+        throw new Error(`Unsupported agent provider: ${providerId}`);
+    }
+  };
+
+type RuntimeAgentProviderDependencies = {
+  agentProvider?: StructuredAgentProvider | AgentProvider;
+  createAgentProvider?: (providerId: AgentProviderId) => AgentProvider | Promise<AgentProvider>;
+  createCodexClient?: unknown;
+  selectedProviderId?: AgentProviderId;
+  readSelectedProviderId?: () => Promise<AgentProviderId>;
+};
+
+const resolveRuntimeAgentProvider = async (dependencies: RuntimeAgentProviderDependencies): Promise<AgentProvider> => {
+  const explicitAgentProvider = dependencies.agentProvider;
+  if (explicitAgentProvider && "runText" in explicitAgentProvider && typeof explicitAgentProvider.runText === "function") {
+    return explicitAgentProvider as AgentProvider;
+  }
+  if (
+    !explicitAgentProvider &&
+    !dependencies.createAgentProvider &&
+    dependencies.selectedProviderId === undefined &&
+    !dependencies.readSelectedProviderId &&
+    dependencies.createCodexClient
+  ) {
+    return createCodexStructuredAgentProvider({
+      createCodexClient: (() => (dependencies.createCodexClient as (() => TicketDraftCodexClient) | undefined)?.()) as TicketDraftDependencies["createCodexClient"]
+    });
+  }
+  return resolveAgentProviderForNewWork({
+    agentProvider: explicitAgentProvider as AgentProvider | undefined,
+    selectedProviderId: dependencies.selectedProviderId,
+    readSelectedProviderId: dependencies.readSelectedProviderId,
+    createAgentProvider:
+      dependencies.createAgentProvider ??
+      defaultAgentProviderFactory({
+        createCodexClient: (() => (dependencies.createCodexClient as (() => TicketDraftCodexClient) | undefined)?.()) as TicketDraftDependencies["createCodexClient"]
+      })
+  });
+};
+
+const resolveImplementationProviderId = async (dependencies: CodexRunDependencies): Promise<AgentProviderId> => {
+  const provider = await resolveRuntimeAgentProvider(dependencies);
+  return provider.providerId as AgentProviderId;
+};
+
+export type RepositoryChatThread = Pick<Thread, "run"> &
+  Partial<Pick<Thread, "id">> & {
+    runStreamed?: (
+      input: string,
+      options?: {
+        readonly signal?: AbortSignal;
+      }
+    ) => Promise<{
+      readonly events: AsyncIterable<ThreadEvent>;
+    }>;
+  };
 
 export type RepositoryChatCodexClient = {
   startThread: (options: ThreadOptions) => RepositoryChatThread;
@@ -819,14 +957,19 @@ export type RepositoryChatCodexClient = {
 };
 
 export type RepositoryChatDependencies = {
+  agentProvider?: AgentProvider;
   getStatus?: () => Promise<CodexStatus>;
   createCodexClient?: () => RepositoryChatCodexClient;
+  createAgentProvider?: (providerId: AgentProviderId) => AgentProvider | Promise<AgentProvider>;
   createRequestId?: () => string;
+  selectedProviderId?: AgentProviderId;
+  readSelectedProviderId?: () => Promise<AgentProviderId>;
   nowMs?: () => number;
   abortController?: AbortController;
   chatTimeoutMs?: number;
   setTimeoutFn?: (callback: () => void, ms: number) => RepositoryChatTimeoutHandle;
   clearTimeoutFn?: (handle: RepositoryChatTimeoutHandle) => void;
+  onStreamEvent?: (event: RepositoryChatStreamEvent) => void | Promise<void>;
 };
 
 export type TicketDraftStartDependencies = TicketDraftDependencies & {
@@ -892,6 +1035,14 @@ const unrefTimerHandle = (handle: DraftProgressIntervalHandle): void => {
 
 const errorMessage = (error: unknown, fallback: string): string => (error instanceof Error ? error.message : fallback);
 
+const providerDisplayLabel = (providerId: string): string => {
+  if (providerId === "cursor") return "Cursor";
+  if (providerId === "claude") return "Claude";
+  return "Codex";
+};
+
+const agentLogScope = (providerId: string, feature: string): string => `${providerId}:${feature}`;
+
 const normalizeWhitespace = (value: string): string => value.replace(/\s+/g, " ").trim();
 
 const DRAFT_SUMMARY_MAX_CHARS = 720;
@@ -937,7 +1088,7 @@ const ensureTicketDraftAgentAvailable = async (
     readonly unauthenticated: string;
   }
 ): Promise<void> => {
-  if (dependencies.agentProvider && !dependencies.getStatus) return;
+  if (dependencies.agentProvider && dependencies.agentProvider.providerId !== "codex" && !dependencies.getStatus) return;
 
   const status = await (dependencies.getStatus ?? getCodexStatus)();
   if (!status.cliAvailable) {
@@ -967,13 +1118,23 @@ const normalizeTicketDraftError = (
       { cause: error }
     );
   }
+  if (error instanceof CursorIncompleteResultError) {
+    return ticketDraftError(
+      "cursor_incomplete_result",
+      context.requestId,
+      context.durationMs,
+      "Cursor finished without returning a final structured ticket draft. Retry when the final JSON result is available.",
+      "cursor_incomplete_result",
+      { cause: error }
+    );
+  }
   if (isRelaySchemaError(error) || error instanceof SyntaxError || errorMessage(error, "").includes("valid JSON")) {
     return ticketDraftError(
       "invalid_response",
       context.requestId,
       context.durationMs,
       "The agent returned an invalid ticket draft. Your rough idea is still available; retry the agent when ready.",
-      "invalid_codex_response",
+      "invalid_agent_response",
       { cause: error }
     );
   }
@@ -1236,6 +1397,33 @@ const formatBoardTicketsForSuggestionPrompt = (board: Awaited<ReturnType<typeof 
     .join("\n");
 };
 
+const formatRepositoryChatBoardContext = (board: Awaited<ReturnType<typeof readBoard>>): string => {
+  if (board.tickets.length === 0) return "Board summary: no tickets yet.";
+
+  const columnNameById = new Map(board.columns.map((column) => [column.id, column.name]));
+  const countsByColumn = board.columns
+    .map((column) => `${column.name}: ${board.tickets.filter((ticket) => ticket.status === column.id).length}`)
+    .join(", ");
+  const highlightedTickets = [...board.tickets]
+    .filter((ticket) => !board.columns.find((column) => column.id === ticket.status)?.terminal)
+    .sort((left, right) => left.position - right.position || left.title.localeCompare(right.title))
+    .slice(0, 8);
+  const ticketLines =
+    highlightedTickets.length === 0
+      ? "No active non-terminal tickets."
+      : highlightedTickets
+          .map((ticket) => {
+            const status = columnNameById.get(ticket.status) ?? ticket.status;
+            return `- ${ticket.id}: "${truncatePromptText(ticket.title, 96)}" | status: ${status} | type: ${ticket.ticketType}`;
+          })
+          .join("\n");
+
+  return `Board summary: ${board.tickets.length} total ticket(s). ${countsByColumn}
+
+Active tickets:
+${ticketLines}`;
+};
+
 const formatRelatedTicketsForPrompt = (board: Awaited<ReturnType<typeof readBoard>>, relatedTicketIds: readonly string[] | undefined): string => {
   const ids = new Set((relatedTicketIds ?? []).map((id) => id.trim()).filter(Boolean));
   if (ids.size === 0) return "No related tickets were selected by intake.";
@@ -1283,7 +1471,7 @@ const hasUserSuppliedIntakeContext = (input: CreateDraftInput): boolean =>
 const draftIntakeScopeOverrideForCreateInput = (input: CreateDraftInput): DraftScope | undefined => {
   if (input.draftScope) return input.draftScope;
   if (input.preferredTicketType === "epic") return "epic";
-  if (input.preferredTicketType === "feature") return "product_feature";
+  if (input.preferredTicketType === "feature" || input.preferredTicketType === "task") return "product_feature";
   return undefined;
 };
 
@@ -1294,7 +1482,8 @@ const preferredTicketTypeForDraftScope = (
   if (scope === "epic") return "epic";
   if (scope === "product_feature") return "feature";
   if (fallback === "epic" || fallback === "feature") return fallback;
-  return fallback;
+  if (fallback === "task") return "feature";
+  return "feature";
 };
 
 const draftIntakeQuestionToClarification = (question: DraftIntakeQuestion): string =>
@@ -1376,8 +1565,10 @@ const normalizeDraftIntakeResult = (
 const buildDraftIntakePrompt = (
   input: DraftIntakeInput,
   board: Awaited<ReturnType<typeof readBoard>>,
-  autoHierarchy = false
+  autoHierarchy = false,
+  projectContextSection = ""
 ): string => {
+  const projectContextBlock = formatProjectContextBlock(projectContextSection);
   const scopeOverride = input.scopeOverride;
   const scopeRules = Object.entries(DRAFT_SCOPE_PROFILES)
     .map(([scope, profile]) => `- ${scope}: ${profile.label}; max ${profile.maxQuestions} blocking question(s). ${profile.guidance}`)
@@ -1402,7 +1593,7 @@ Hierarchy planning (required when auto-planning):
 
   return `You are doing a fast intake pass before Relay drafts implementation tickets.
 
-Goal: decide how much ticket-drafting depth is needed and ask only blocking questions before the expensive full draft starts.
+${projectContextBlock}Goal: decide how much ticket-drafting depth is needed and ask only blocking questions before the expensive full draft starts.
 
 ${overrideGuidance}
 ${hierarchyRules}
@@ -1445,36 +1636,55 @@ export const createDraftIntake = async (
   const nowMs = dependencies.nowMs ?? Date.now;
   const durationMs = (): number => Math.max(0, nowMs() - startedAt);
   const abortController = dependencies.abortController ?? new AbortController();
-  const logBase = { requestId, projectPath, ideaLength: idea.length, scopeOverride: input.scopeOverride ?? null };
+  const provider = structuredAgentProviderForDraft(dependencies);
+  const intakeScope = agentLogScope(provider.providerId, "draft-intake");
+  const logBase = { requestId, projectPath, ideaLength: idea.length, scopeOverride: input.scopeOverride ?? null, providerId: provider.providerId };
 
-  await logInfo("codex:draft-intake", "starting draft intake", logBase);
+  await logInfo(intakeScope, "starting draft intake", logBase);
   try {
     await ensureTicketDraftAgentAvailable(dependencies, requestId, durationMs, {
-      unavailable: "Codex CLI was not found in the SDK bundle or on PATH. Install or expose Codex before drafting tickets.",
-      unauthenticated: "Codex is not authenticated. Run `codex login` in your terminal, then try drafting again."
+      unavailable: `${providerDisplayLabel(provider.providerId)} CLI was not found. Install or expose the agent CLI before drafting tickets.`,
+      unauthenticated: `${providerDisplayLabel(provider.providerId)} is not authenticated. Sign in to the agent CLI, then try drafting again.`
     });
 
     const [config, board] = await Promise.all([
       readProjectConfig(projectPath),
       readBoard(projectPath)
     ]);
-    const provider = structuredAgentProviderForDraft(dependencies);
     const autoHierarchy = input.autoHierarchy === true;
-    const prompt = buildDraftIntakePrompt({ ...input, projectPath, idea }, board, autoHierarchy);
+    const projectContextSection = await resolveProjectContextPromptSection(projectPath);
+    const prompt = buildDraftIntakePrompt({ ...input, projectPath, idea }, board, autoHierarchy, projectContextSection);
     const result = await provider.runStructured({
       kind: "ticket.draft_intake",
       projectPath,
       prompt,
       outputSchema: draftIntakeResultSchemaJson,
       mode: "read_only",
-      effort: input.effort ?? config.settings.defaultTicketEffort,
+      ...draftAgentRunRequestExtras(input.effort ?? config.settings.defaultTicketEffort, input.agentModel),
       networkAccessEnabled: DRAFT_AGENT_NETWORK_ACCESS_ENABLED,
       webSearchMode: DRAFT_AGENT_WEB_SEARCH_MODE,
       signal: abortController.signal
     });
-    const parsed = parseSchema(draftIntakeResultSchema, normalizeLegacyStandalonePlanPayload(result.output));
+    const intakeArtifactContext = agentStructuredRunArtifactContext(
+      projectPath,
+      "ticket.draft_intake",
+      provider.providerId,
+      requestId,
+      dependencies
+    );
+    await persistAgentStructuredRunResponse(intakeArtifactContext, result);
+    let parsed: DraftIntakeResult;
+    try {
+      parsed = parseSchema(draftIntakeResultSchema, normalizeLegacyStandalonePlanPayload(result.output));
+    } catch (error) {
+      await persistAgentStructuredRunResponse(intakeArtifactContext, result, {
+        phase: "validation_failed",
+        validationError: errorMessage(error, "unknown")
+      });
+      throw error;
+    }
     const intake = normalizeDraftIntakeResult(parsed, board, input.scopeOverride, autoHierarchy);
-    await logInfo("codex:draft-intake", "draft intake completed", {
+    await logInfo(intakeScope, "draft intake completed", {
       ...logBase,
       durationMs: durationMs(),
       scope: intake.scope,
@@ -1489,7 +1699,7 @@ export const createDraftIntake = async (
       durationMs: durationMs(),
       signalAborted: abortController.signal.aborted
     });
-    await logError("codex:draft-intake", "draft intake failed", intakeError, { ...logBase, ...intakeError.toPayload() });
+    await logError(intakeScope, "draft intake failed", intakeError, { ...logBase, ...intakeError.toPayload() });
     throw intakeError;
   }
 };
@@ -1498,27 +1708,41 @@ const buildRepositoryChatPrompt = (
   input: RepositoryChatInput,
   config: Awaited<ReturnType<typeof readProjectConfig>>,
   board: Awaited<ReturnType<typeof readBoard>>,
-  message: string
-): string => `You are Codex answering a quick read-only repository question inside Relay.
+  message: string,
+  projectContextSection = ""
+): string => {
+  const projectContextBlock = formatProjectContextBlock(projectContextSection);
+  return `You are in ask mode inside Relay, answering a quick read-only repository question.
 
-Answer concisely and directly for the selected local project.
+${projectContextBlock}Answer the user's exact question for the selected local project. Keep the response short and useful.
 
 Rules:
+- Treat this like a fast back-and-forth chat, not a report.
+- Default to 1-3 short sentences.
+- Use bullets only when they make the answer clearly easier to scan.
+- If the user only greets you or sends a very short social opener, reply with one short greeting and one short offer to help.
+- Do not proactively summarize the whole repository, board, or project state unless the user explicitly asked for that.
+- Focus on how the code works now, where something lives, or the most likely implementation direction the user asked about.
+- Mention specific files or components when helpful.
+- Return only the final user-facing answer.
+- Do not include analysis notes, working notes, or process narration.
+- Never say things like "The user asked", "I will check", "I need to verify", or "Tracing".
 - Do not create, edit, move, rename, or delete files.
 - Do not create, edit, move, rename, or delete Relay tickets or board cards.
 - Do not start implementation work, run ticket workflows, write logs, or emit Relay run events.
-- Network access and web search are disabled; rely on local repository files plus the board context below.
-- If the answer cannot be determined from the repository and board context, say what information is missing.
+- Network access and web search are disabled; rely on local repository files plus the compact context below.
+- If the answer is unclear from local context, say that briefly and name the missing file or fact.
+- Start with the answer, not with process narration.
 
 Project path: ${input.projectPath}
 Project name: ${config.name}
 Workflow columns: ${config.columns.map((column) => column.name).join(", ")}
 
-Current board tickets:
-${formatBoardTicketsForSuggestionPrompt(board)}
+${formatRepositoryChatBoardContext(board)}
 
 User question:
 ${message}`;
+};
 
 const runRepositoryChatTurn = async <T>(
   runPromise: Promise<T>,
@@ -1553,11 +1777,99 @@ const runRepositoryChatTurn = async <T>(
   }
 };
 
+const emitRepositoryChatStreamEvent = async (
+  publisher: RepositoryChatDependencies["onStreamEvent"],
+  event: RepositoryChatStreamEvent
+): Promise<void> => {
+  await publisher?.(event);
+};
+
+type RepositoryChatAnswerChunk = {
+  readonly text: string;
+  readonly mode: "fragment" | "cumulative";
+};
+
+const repositoryChatAllowsFragmentStreaming = (providerId: string): boolean => providerId === "codex" || providerId === "cursor";
+
+const repositoryChatLooksLikeProcessNarration = (text: string): boolean =>
+  /^(the user\b|i will\b|i need to\b|checking\b|tracing\b|key findings\b|regarding\b|upon reviewing\b|on opening a chat\b)/i.test(
+    text.trim()
+  );
+
+const repositoryChatShouldIgnoreRawProviderEvent = (event: Record<string, unknown>): boolean => {
+  const type = providerEventType(event);
+  if (/^reasoning(\.|$)/i.test(type)) return true;
+  if (stringValue(event.source)?.toLowerCase() === "reasoning") return true;
+  return false;
+};
+
+const repositoryChatAnswerTextFromRelayEvent = (event: RelayCodexEvent): RepositoryChatAnswerChunk | null => {
+  if (event.type === "agent.message.delta") {
+    return event.text.length > 0 ? { text: event.text, mode: "fragment" } : null;
+  }
+  if (event.type === "agent.message.completed") {
+    return event.text.length > 0 ? { text: event.text, mode: "cumulative" } : null;
+  }
+  return null;
+};
+
+const repositoryChatAnswerTextFromRawProviderEvent = (event: Record<string, unknown>): RepositoryChatAnswerChunk | null => {
+  const type = providerEventType(event);
+  if (/(command|todo|mcp|approval|search|file|edit|write|patch)/i.test(type) && !/(message|text|content|result|assistant)/i.test(type)) {
+    return null;
+  }
+  if (!/^(result|assistant)(\.|$)|final[_ .-]?text|message\.completed/i.test(type)) {
+    return null;
+  }
+  const text =
+    stringValue(event.result) ??
+    stringValue(event.output_text) ??
+    stringValue(event.text) ??
+    stringValue(event.message) ??
+    stringValue(event.content) ??
+    stringValue(event.delta);
+  return text ? { text, mode: "cumulative" } : null;
+};
+
+const repositoryChatStreamedAnswerSuffix = (streamed: string, incoming: string, mode: RepositoryChatAnswerChunk["mode"]): string | null => {
+  const text = incoming.trim();
+  if (!text) return null;
+  if (repositoryChatLooksLikeProcessNarration(text)) return null;
+  if (mode === "fragment") return text;
+  if (!streamed) return text;
+  if (text.startsWith(streamed)) {
+    const suffix = text.slice(streamed.length);
+    return suffix.length > 0 ? suffix : null;
+  }
+  if (streamed.startsWith(text)) return null;
+  return `\n${text}`;
+};
+
+const normalizeRepositoryChatFinalAnswer = (text: string): string => {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !repositoryChatLooksLikeProcessNarration(line));
+  const deduped: string[] = [];
+  for (const line of lines) {
+    if (deduped[deduped.length - 1] === line) continue;
+    deduped.push(line);
+  }
+  const joined = deduped.join("\n").trim();
+  if (!joined) return "";
+  const doubled = `${joined}\n${joined}`;
+  if (trimmed === doubled) return joined;
+  return joined;
+};
+
 export const sendRepositoryChatMessage = async (
   input: RepositoryChatInput,
   dependencies: RepositoryChatDependencies = {}
 ): Promise<RepositoryChatResponse> => {
-  const requestId = dependencies.createRequestId?.() ?? newId("rch");
+  const requestId = normalizeWhitespace(input.requestId ?? "") || dependencies.createRequestId?.() || newId("rch");
   const startedAt = dependencies.nowMs?.() ?? Date.now();
   const nowMs = dependencies.nowMs ?? Date.now;
   const durationMs = (): number => Math.max(0, nowMs() - startedAt);
@@ -1566,8 +1878,8 @@ export const sendRepositoryChatMessage = async (
   const setTimeoutFn = dependencies.setTimeoutFn ?? setTimeout;
   const clearTimeoutFn = dependencies.clearTimeoutFn ?? clearTimeout;
   const message = normalizeWhitespace(input.message);
-  const threadId = input.threadId?.trim() || null;
-  const logBase = { requestId, projectPath: input.projectPath, hasThreadId: Boolean(threadId) };
+  const sessionRef = decodeProviderSessionId(input.threadId);
+  const logBase = { requestId, projectPath: input.projectPath, hasThreadId: Boolean(input.threadId?.trim()) };
 
   if (!message) {
     throw new Error("Enter a repository question before sending.");
@@ -1576,37 +1888,109 @@ export const sendRepositoryChatMessage = async (
   await logInfo("codex:repository-chat", "starting repository chat turn", logBase);
 
   try {
-    const status = await (dependencies.getStatus ?? getCodexStatus)();
-    if (!status.cliAvailable) {
-      await logWarn("codex:repository-chat", "codex cli unavailable", { ...logBase, durationMs: durationMs(), status });
-      throw new Error("Codex CLI was not found in the SDK bundle or on PATH. Install or expose Codex before using repository chat.");
-    }
-    if (status.authenticated === false) {
-      await logWarn("codex:repository-chat", "codex auth unavailable", { ...logBase, durationMs: durationMs(), status });
-      throw new Error("Codex is not authenticated. Run `codex login` in your terminal, then try repository chat again.");
+    const provider = await resolveRuntimeAgentProvider(
+      sessionRef?.providerId
+        ? { ...dependencies, selectedProviderId: sessionRef.providerId as AgentProviderId }
+        : dependencies
+    );
+
+    if (provider.providerId === "codex") {
+      const status = await (dependencies.getStatus ?? getCodexStatus)();
+      if (!status.cliAvailable) {
+        await logWarn("codex:repository-chat", "codex cli unavailable", { ...logBase, durationMs: durationMs(), status });
+        throw new Error("Codex CLI was not found in the SDK bundle or on PATH. Install or expose Codex before using repository chat.");
+      }
+      if (status.authenticated === false) {
+        await logWarn("codex:repository-chat", "codex auth unavailable", { ...logBase, durationMs: durationMs(), status });
+        throw new Error("Codex is not authenticated. Run `codex login` in your terminal, then try repository chat again.");
+      }
     }
 
-    const [config, board, options] = await Promise.all([
+    const [config, board] = await Promise.all([
       readProjectConfig(input.projectPath),
-      readBoard(input.projectPath),
-      repositoryChatThreadOptionsForProject(input.projectPath)
+      readBoard(input.projectPath)
     ]);
-    const codex = dependencies.createCodexClient?.() ?? (await createCodex());
-    const thread = threadId ? codex.resumeThread(threadId, options) : codex.startThread(options);
-    const prompt = buildRepositoryChatPrompt(input, config, board, message);
-    const turn = await runRepositoryChatTurn(thread.run(prompt, { signal: abortController.signal }), abortController, {
-      timeoutMs: chatTimeoutMs,
-      setTimeoutFn,
-      clearTimeoutFn
+    const projectContextSection = await resolveRepositoryChatContextPromptSection(input.projectPath);
+    const prompt = buildRepositoryChatPrompt(input, config, board, message, projectContextSection);
+    const request = {
+      kind: "repository.chat" as const,
+      projectPath: input.projectPath,
+      prompt,
+      mode: "read_only" as const,
+      effort: REPOSITORY_CHAT_REASONING_EFFORT,
+      networkAccessEnabled: false,
+      webSearchMode: "disabled" as const,
+      signal: abortController.signal,
+      providerSessionRef: sessionRef
+    };
+    await emitRepositoryChatStreamEvent(dependencies.onStreamEvent, {
+      type: "started",
+      requestId,
+      projectPath: input.projectPath,
+      threadId: input.threadId?.trim() || null
     });
-    const responseMessage = turn.finalResponse.trim();
-    const responseThreadId = thread.id ?? threadId;
+
+    const result = await runRepositoryChatTurn(
+      (async () => {
+        if (provider.runTextStream) {
+          const streamed = await provider.runTextStream(request);
+          let latestSessionRef = streamed.completed.then((completed) => completed.providerSessionRef).catch(() => sessionRef ?? null);
+
+          let streamedAnswerText = "";
+          const emitRepositoryChatAnswerDelta = async (chunk: RepositoryChatAnswerChunk | null): Promise<void> => {
+            if (!chunk) return;
+            if (chunk.mode === "fragment" && !repositoryChatAllowsFragmentStreaming(provider.providerId)) return;
+            const delta = repositoryChatStreamedAnswerSuffix(streamedAnswerText, chunk.text, chunk.mode);
+            if (!delta) return;
+            streamedAnswerText += delta;
+            await emitRepositoryChatStreamEvent(dependencies.onStreamEvent, {
+              type: "delta",
+              requestId,
+              projectPath: input.projectPath,
+              text: delta
+            });
+          };
+
+          for await (const event of streamed.events) {
+            if (event.providerSessionRef) latestSessionRef = Promise.resolve(event.providerSessionRef);
+            if (!event.rawEvent) continue;
+            if (repositoryChatShouldIgnoreRawProviderEvent(event.rawEvent)) continue;
+            const relayEvents = normalizeProviderNativeEvent(event.rawEvent);
+            let relayHadAnswerText = false;
+            for (const relayEvent of relayEvents) {
+              const chunk = repositoryChatAnswerTextFromRelayEvent(relayEvent);
+              if (chunk) relayHadAnswerText = true;
+              await emitRepositoryChatAnswerDelta(chunk);
+            }
+            if (!relayHadAnswerText) {
+              await emitRepositoryChatAnswerDelta(repositoryChatAnswerTextFromRawProviderEvent(event.rawEvent));
+            }
+          }
+
+          const completed = await streamed.completed;
+          return {
+            ...completed,
+            providerSessionRef: completed.providerSessionRef ?? (await latestSessionRef)
+          };
+        }
+
+        return provider.runText(request);
+      })(),
+      abortController,
+      {
+        timeoutMs: chatTimeoutMs,
+        setTimeoutFn,
+        clearTimeoutFn
+      }
+    );
+    const responseMessage = normalizeRepositoryChatFinalAnswer(result.text);
+    const responseThreadId = result.providerSessionRef ? encodeProviderSessionRef(result.providerSessionRef) : null;
 
     if (!responseThreadId) {
-      throw new Error("Codex did not return a repository chat thread id.");
+      throw new Error(`${provider.providerId} did not return a repository chat session id.`);
     }
     if (!responseMessage) {
-      throw new Error("Codex did not return an answer.");
+      throw new Error(`${provider.providerId} did not return an answer.`);
     }
 
     await logInfo("codex:repository-chat", "repository chat turn completed", {
@@ -1615,11 +1999,25 @@ export const sendRepositoryChatMessage = async (
       threadId: responseThreadId
     });
 
+    await emitRepositoryChatStreamEvent(dependencies.onStreamEvent, {
+      type: "completed",
+      requestId,
+      projectPath: input.projectPath,
+      threadId: responseThreadId,
+      message: responseMessage
+    });
+
     return {
       threadId: responseThreadId,
       message: responseMessage
     };
   } catch (error) {
+    await emitRepositoryChatStreamEvent(dependencies.onStreamEvent, {
+      type: "failed",
+      requestId,
+      projectPath: input.projectPath,
+      message: errorMessage(error, "Repository chat failed.")
+    });
     await logError("codex:repository-chat", "repository chat turn failed", error, {
       ...logBase,
       durationMs: durationMs()
@@ -1642,7 +2040,8 @@ const normalizeLeanTaskDraft = (draft: HierarchyDraftPlan["leanTasks"][number]) 
   acceptanceCriteria: cleanStringList(draft.acceptanceCriteria),
   implementationPlan: cleanStringList(draft.implementationPlan),
   assumptions: cleanStringList(draft.assumptions),
-  plannedFiles: cleanStringList(draft.plannedFiles)
+  plannedFiles: cleanStringList(draft.plannedFiles),
+  blockedByTitles: cleanStringList(draft.blockedByTitles)
 });
 
 const hierarchyPlanTitle = (plan: HierarchyDraftPlan): string => {
@@ -1700,7 +2099,7 @@ const createHierarchyDraftPromise = async (
   input: CreateDraftInput,
   dependencies: TicketDraftDependencies = {}
 ): Promise<HierarchyDraftOutcome> => {
-  const { projectPath, idea, effort, ticketId, draftScope, planKind, intakeAnswers, intakeKnownFacts, relatedTicketIds, matchedEpicId, matchedFeatureId } =
+  const { projectPath, idea, effort, agentModel, ticketId, draftScope, planKind, intakeAnswers, intakeKnownFacts, relatedTicketIds, matchedEpicId, matchedFeatureId } =
     input;
   if (!planKind) throw new Error("Hierarchy drafting requires planKind from intake.");
   const requestId = dependencies.createRequestId?.() ?? newId("hdr");
@@ -1711,21 +2110,22 @@ const createHierarchyDraftPromise = async (
   const scope = draftScope ?? scopeForPlanKind(planKind);
   const scopeProfile = DRAFT_SCOPE_PROFILES[scope];
   let progressInterval: DraftProgressIntervalHandle | null = null;
-  const logBase = { requestId, projectPath, ideaLength: idea.length, scope, planKind };
+  const provider = structuredAgentProviderForDraft(dependencies);
+  const hierarchyScope = agentLogScope(provider.providerId, "draft");
+  const logBase = { requestId, projectPath, ideaLength: idea.length, scope, planKind, providerId: provider.providerId };
 
-  await logInfo("codex:draft", "starting hierarchy ticket draft", logBase);
+  await logInfo(hierarchyScope, "starting hierarchy ticket draft", logBase);
   try {
-    await reportTicketDraftProgress(dependencies, "Checking Codex availability for hierarchy drafting.");
+    await reportTicketDraftProgress(dependencies, `Checking ${providerDisplayLabel(provider.providerId)} availability for hierarchy drafting.`);
     await ensureTicketDraftAgentAvailable(dependencies, requestId, durationMs, {
-      unavailable: "Codex CLI was not found in the SDK bundle or on PATH. Install or expose Codex before drafting tickets.",
-      unauthenticated: "Codex is not authenticated. Run `codex login` in your terminal, then try drafting again."
+      unavailable: `${providerDisplayLabel(provider.providerId)} CLI was not found. Install or expose the agent CLI before drafting tickets.`,
+      unauthenticated: `${providerDisplayLabel(provider.providerId)} is not authenticated. Sign in to the agent CLI, then try drafting again.`
     });
 
     const [config, board] = await Promise.all([readProjectConfig(projectPath), readBoard(projectPath)]);
     const existingDraftTicket = ticketId ? await readTicket(projectPath, ticketId) : null;
     const effectiveEffort = existingDraftTicket?.frontMatter.effort ?? effort ?? config.settings.defaultTicketEffort;
     const draftClarifications = ticketId ? await readClarificationQuestions(projectPath, ticketId) : [];
-    const provider = structuredAgentProviderForDraft(dependencies);
     const intakeContext = `Draft scope: ${scope} (${scopeProfile.label})
 Plan kind: ${planKind}
 ${hierarchyDraftGuidanceForPlanKind(planKind, input)}
@@ -1744,9 +2144,11 @@ ${formatClarificationsForPrompt(draftClarifications)}
 Existing draft ticket markdown:
 ${existingDraftTicket?.markdown ?? "No existing draft ticket markdown was loaded."}`
       : "No prior clarification records are attached to this new draft.";
+    const projectContextSection = await resolveProjectContextPromptSection(projectPath);
+    const projectContextBlock = formatProjectContextBlock(projectContextSection);
     const prompt = `You are helping Relay auto-plan implementation work on a kanban board.
 
-The intake pass already chose planKind "${planKind}". Produce a hierarchy draft matching that plan — do not change planKind.
+${projectContextBlock}The intake pass already chose planKind "${planKind}". Produce a hierarchy draft matching that plan — do not change planKind.
 
 This is read-only. Research the codebase and return structured JSON only.
 
@@ -1755,6 +2157,7 @@ ${hierarchyDraftGuidanceForPlanKind(planKind, input)}
 Return draftState "ready" only when the planned tickets are implementation-ready. Otherwise return draftState "needs_clarification" with blockingClarificationQuestions.
 
 Keep lean tasks bite-sized (one Codex run each).
+Optional blockedByTitles: exact titles of sibling lean tasks in the same feature batch (same leanTasks list or the same feature stub's leanTasks). Use only when execution order matters; omit for independent tasks.
 
 ${DRAFT_SUMMARY_PROMPT_GUIDANCE}
 
@@ -1787,7 +2190,7 @@ ${idea}`;
       prompt,
       outputSchema: hierarchyDraftPlanSchemaJson,
       mode: "read_only",
-      effort: effectiveEffort,
+      ...draftAgentRunRequestExtras(effectiveEffort, agentModel),
       networkAccessEnabled: DRAFT_AGENT_NETWORK_ACCESS_ENABLED,
       webSearchMode: DRAFT_AGENT_WEB_SEARCH_MODE,
       signal: abortController.signal
@@ -1796,8 +2199,30 @@ ${idea}`;
       clearInterval(progressInterval);
       progressInterval = null;
     }
-    const parsed = parseSchema(hierarchyDraftPlanSchema, normalizeLegacyStandalonePlanPayload(result.output));
+    const hierarchyArtifactContext = agentStructuredRunArtifactContext(
+      projectPath,
+      "ticket.hierarchy_draft",
+      provider.providerId,
+      requestId,
+      dependencies,
+      ticketId
+    );
+    await persistAgentStructuredRunResponse(hierarchyArtifactContext, result);
+    let parsed: HierarchyDraftPlan;
+    try {
+      parsed = parseSchema(hierarchyDraftPlanSchema, normalizeLegacyStandalonePlanPayload(result.output));
+    } catch (error) {
+      await persistAgentStructuredRunResponse(hierarchyArtifactContext, result, {
+        phase: "validation_failed",
+        validationError: errorMessage(error, "unknown")
+      });
+      throw error;
+    }
     if (parsed.planKind !== planKind) {
+      await persistAgentStructuredRunResponse(hierarchyArtifactContext, result, {
+        phase: "validation_failed",
+        validationError: "invalid_plan_kind"
+      });
       throw ticketDraftError(
         "invalid_response",
         requestId,
@@ -1813,7 +2238,7 @@ ${idea}`;
       durationMs: durationMs(),
       signalAborted: abortController.signal.aborted
     });
-    await logError("codex:draft", "hierarchy ticket draft failed", draftError, { ...logBase, ...draftError.toPayload() });
+    await logError(hierarchyScope, "hierarchy ticket draft failed", draftError, { ...logBase, ...draftError.toPayload() });
     throw draftError;
   } finally {
     if (progressInterval) clearInterval(progressInterval);
@@ -1835,7 +2260,7 @@ const createHierarchyDraftOutcome = (
   );
 
 const createTicketDraftPromise = async (
-  { projectPath, idea, effort, preferredTicketType, ticketId, draftScope, intakeAnswers, intakeKnownFacts, relatedTicketIds }: CreateDraftInput,
+  { projectPath, idea, effort, agentModel, preferredTicketType, ticketId, draftScope, intakeAnswers, intakeKnownFacts, relatedTicketIds }: CreateDraftInput,
   dependencies: TicketDraftDependencies = {}
 ): Promise<TicketDraftOutcome> => {
   const requestId = dependencies.createRequestId?.() ?? newId("tdr");
@@ -1846,28 +2271,28 @@ const createTicketDraftPromise = async (
   const scope = defaultDraftScopeForInput({ draftScope, preferredTicketType });
   const scopeProfile = DRAFT_SCOPE_PROFILES[scope];
   let progressInterval: DraftProgressIntervalHandle | null = null;
-  const logBase = { requestId, projectPath, ideaLength: idea.length, scope };
+  const provider = structuredAgentProviderForDraft(dependencies);
+  const draftLogScope = agentLogScope(provider.providerId, "draft");
+  const logBase = { requestId, projectPath, ideaLength: idea.length, scope, providerId: provider.providerId };
 
-  await logInfo("codex:draft", "starting ticket draft", logBase);
+  await logInfo(draftLogScope, "starting ticket draft", logBase);
 
   try {
-    await reportTicketDraftProgress(dependencies, "Checking Codex availability for ticket drafting.");
+    await reportTicketDraftProgress(dependencies, `Checking ${providerDisplayLabel(provider.providerId)} availability for ticket drafting.`);
     await ensureTicketDraftAgentAvailable(dependencies, requestId, durationMs, {
-      unavailable: "Codex CLI was not found in the SDK bundle or on PATH. Install or expose Codex before drafting tickets.",
-      unauthenticated: "Codex is not authenticated. Run `codex login` in your terminal, then try drafting again."
+      unavailable: `${providerDisplayLabel(provider.providerId)} CLI was not found. Install or expose the agent CLI before drafting tickets.`,
+      unauthenticated: `${providerDisplayLabel(provider.providerId)} is not authenticated. Sign in to the agent CLI, then try drafting again.`
     });
 
     const [config, board] = await Promise.all([readProjectConfig(projectPath), readBoard(projectPath)]);
     const existingDraftTicket = ticketId ? await readTicket(projectPath, ticketId) : null;
     const effectiveEffort = existingDraftTicket?.frontMatter.effort ?? effort ?? config.settings.defaultTicketEffort;
     const draftClarifications = ticketId ? await readClarificationQuestions(projectPath, ticketId) : [];
-    const provider = structuredAgentProviderForDraft(dependencies);
+    const draftPreferredTicketType = effectiveDraftPreferredTicketType(preferredTicketType);
     const ticketTypeGuidance =
-      preferredTicketType === "epic"
+      draftPreferredTicketType === "epic"
         ? "The user selected Epic mode. Return ticketType \"epic\" and decompose the work into feature stubs in featureStubs (not tasks). subtickets and leanTasks must be empty arrays."
-        : preferredTicketType === "feature"
-          ? "The user selected Feature mode. Return ticketType \"feature\" and decompose executable work into leanTasks (bite-sized tasks). Every leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. subtickets and featureStubs must be empty arrays."
-          : "Return ticketType \"feature\" with exactly one leanTask for the executable work. That leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. subtickets and featureStubs must be empty arrays.";
+        : "The user selected Feature mode. Return ticketType \"feature\" and decompose executable work into leanTasks (bite-sized tasks). Every leanTask must include plannedFiles as an optimistic non-empty list of exact repo-relative file paths expected to change. subtickets and featureStubs must be empty arrays. Never return ticketType \"task\" for the root draft.";
     const clarificationContext = ticketId
       ? `Clarification records already attached to this draft ticket:
 ${formatClarificationsForPrompt(draftClarifications)}
@@ -1885,9 +2310,11 @@ ${formatRelatedTicketsForPrompt(board, relatedTicketIds)}
 
 Answered intake questions:
 ${formatDraftIntakeAnswersForPrompt(intakeAnswers)}`;
+    const projectContextSection = await resolveProjectContextPromptSection(projectPath);
+    const projectContextBlock = formatProjectContextBlock(projectContextSection);
     const prompt = `You are helping create a local software implementation ticket for Relay.
 
-The user will provide a rough idea. Convert it into an implementation-ready ticket for a coding agent and human developer.
+${projectContextBlock}The user will provide a rough idea. Convert it into an implementation-ready ticket for a coding agent and human developer.
 
 This is a read-only structured work unit. You may inspect the local project, current board context, linked ticket references, and external sources as needed, but do not create, edit, move, rename, or delete files or Relay tickets.
 
@@ -1915,6 +2342,7 @@ Do not include large copied source blocks or long page excerpts.
 Relay supports epic, feature, and task ticket types. ${ticketTypeGuidance}
 For epic drafts, the parent epic describes the overall outcome and featureStubs are capability-level feature tickets (not executable tasks). Do not put tasks directly under epics.
 For feature drafts, leanTasks are bite-sized executable tasks with focused requirements and acceptanceCriteria — keep each lean task small enough for one Codex run.
+Optional blockedByTitles: exact titles of sibling lean tasks in the same feature's leanTasks batch only. Use when one lean task must wait for another in that batch; omit when tasks are independent.
 Every leanTask must include plannedFiles: an optimistic non-empty list of exact repo-relative file paths expected to change.
 For ordinary task drafts, subtickets, featureStubs, and leanTasks must be empty arrays. Do not create nested epics.
 For task drafts, plannedFiles must be a non-empty optimistic list of exact repo-relative file paths Codex may create or modify.
@@ -1935,6 +2363,10 @@ ${clarificationContext}
 
 User idea:
 ${idea}`;
+    const draftPrompt =
+      provider.providerId === "cursor"
+        ? await appendCursorTicketDraftPromptGuidance(prompt, projectPath, ticketDraftSchemaJson)
+        : prompt;
 
     await reportTicketDraftProgress(dependencies, "The agent is writing the implementation-ready ticket draft. This can take several minutes.");
     const progressIntervalMs = dependencies.draftProgressIntervalMs ?? 60_000;
@@ -1950,10 +2382,10 @@ ${idea}`;
     const result = await provider.runStructured({
       kind: "ticket.draft",
       projectPath,
-      prompt,
+      prompt: draftPrompt,
       outputSchema: ticketDraftSchemaJson,
       mode: "read_only",
-      effort: effectiveEffort,
+      ...draftAgentRunRequestExtras(effectiveEffort, agentModel),
       networkAccessEnabled: DRAFT_AGENT_NETWORK_ACCESS_ENABLED,
       webSearchMode: DRAFT_AGENT_WEB_SEARCH_MODE,
       signal: abortController.signal
@@ -1962,22 +2394,42 @@ ${idea}`;
       clearInterval(progressInterval);
       progressInterval = null;
     }
+    const draftArtifactContext = agentStructuredRunArtifactContext(
+      projectPath,
+      "ticket.draft",
+      provider.providerId,
+      requestId,
+      dependencies,
+      ticketId
+    );
+    await persistAgentStructuredRunResponse(draftArtifactContext, result);
     await reportTicketDraftProgress(dependencies, "The agent returned a draft; validating the structured ticket.");
     let parsed: TicketDraftOutcome;
     try {
       const parsedDraft = parseSchema(ticketDraftSchema, result.output);
       parsed = normalizeTicketDraftOutcome(parsedDraft, scope);
     } catch (error) {
+      const artifactPaths = await persistAgentStructuredRunResponse(draftArtifactContext, result, {
+        phase: "validation_failed",
+        validationError: errorMessage(error, "unknown")
+      });
+      await logError(draftLogScope, "ticket draft schema validation failed", error, {
+        ...logBase,
+        failurePhase: "schema_validation",
+        rawResponseLength: result.rawResponse.length,
+        validationError: errorMessage(error, "unknown"),
+        agentArtifacts: artifactPaths?.relativePaths ?? null
+      });
       throw ticketDraftError(
         "invalid_response",
         requestId,
         durationMs(),
         "The agent returned an invalid ticket draft. Your rough idea is still available; retry the agent when ready.",
-        "invalid_codex_response",
+        "invalid_agent_response",
         { cause: error }
       );
     }
-    await logInfo("codex:draft", "ticket draft completed", {
+    await logInfo(draftLogScope, "ticket draft completed", {
       ...logBase,
       durationMs: durationMs(),
       title: parsed.draft.title,
@@ -1998,9 +2450,9 @@ ${idea}`;
     });
     const failureMeta = { ...logBase, ...draftError.toPayload() };
     if (draftError.code === "timeout" || draftError.code === "cancelled") {
-      await logWarn("codex:draft", "ticket draft did not complete", failureMeta);
+      await logWarn(draftLogScope, "ticket draft did not complete", failureMeta);
     } else {
-      await logError("codex:draft", "ticket draft failed", draftError, failureMeta);
+      await logError(draftLogScope, "ticket draft failed", draftError, failureMeta);
     }
     throw draftError;
   } finally {
@@ -2059,10 +2511,14 @@ export const startTicketDraftRun = async (
   const runId = dependencies.createRunId?.() ?? newId("run");
   const threadId = draftRunThreadId(runId);
   const abortController = new AbortController();
+  const provider = await resolveRuntimeAgentProvider(dependencies);
 
   const ticket = await createPendingTicketDraft(projectPath, { ...input, projectPath, idea }, runId);
   await submitTicketDraftWork({ ...input, projectPath, idea }, { runId, ticketId: ticket.frontMatter.id });
-  const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", { message: "Ticket draft generation started." });
+  const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", {
+    message: "Ticket draft generation started.",
+    metadata: { providerId: provider.providerId }
+  });
   const emitDraftEvent = async (event: RelayCodexEvent): Promise<void> => {
     try {
       await emitRunEventForDependencies(dependencies.runEventSink, projectPath, ticket.frontMatter.id, runId, threadId, event);
@@ -2094,6 +2550,8 @@ export const startTicketDraftRun = async (
 
   const draftDependencies: TicketDraftStartDependencies = {
     ...dependencies,
+    runId,
+    agentProvider: provider,
     abortController,
     onProgress: async (message) => {
       await dependencies.onProgress?.(message);
@@ -2112,6 +2570,7 @@ export const startTicketDraftRun = async (
         projectPath,
         idea,
         effort: ticket.frontMatter.effort,
+        agentModel: input.agentModel,
         preferredTicketType: input.preferredTicketType,
         ticketId: ticket.frontMatter.id,
         draftScope: input.draftScope,
@@ -2132,6 +2591,7 @@ export const startTicketDraftRun = async (
             idea,
             scopeOverride: autoHierarchy ? undefined : draftIntakeScopeOverrideForCreateInput(input),
             effort: ticket.frontMatter.effort,
+            agentModel: input.agentModel,
             autoHierarchy
           },
           draftDependencies
@@ -2231,11 +2691,14 @@ export const startTicketDraftRun = async (
           return;
         }
 
-        const rootTicketId = await applyHierarchyDraftPlan(projectPath, ticket.frontMatter.id, hierarchyOutcome.plan, runId);
+        const placeholderTicketId = ticket.frontMatter.id;
+        const rootTicketId = await applyHierarchyDraftPlan(projectPath, placeholderTicketId, hierarchyOutcome.plan, runId);
+        const resolvedTicketId = rootTicketId !== placeholderTicketId ? rootTicketId : undefined;
         await emitDraftEvent({
           type: "run.completed",
           finalResponse: `Hierarchy draft completed; open ${rootTicketId}: ${hierarchyOutcome.title}`,
           finalStatus: "draft_complete",
+          ...(resolvedTicketId ? { resolvedTicketId } : {}),
           timestamp: nowIso()
         });
         await logInfo("codex:draft", "async hierarchy draft applied", {
@@ -2592,6 +3055,7 @@ export const startTicketRedraftRun = async (
   const runId = dependencies.createRunId?.() ?? newId("run");
   const threadId = draftRunThreadId(runId);
   const abortController = new AbortController();
+  const provider = await resolveRuntimeAgentProvider(dependencies);
   const draftingTicket = await setExistingTicketRedraftInProgress(projectPath, existingTicket, runId);
   await submitTicketRedraftWork(
     {
@@ -2604,7 +3068,10 @@ export const startTicketRedraftRun = async (
     },
     { runId }
   );
-  const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", { message: "Ticket redraft generation started." });
+  const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", {
+    message: "Ticket redraft generation started.",
+    metadata: { providerId: provider.providerId }
+  });
   const emitDraftEvent = async (event: RelayCodexEvent): Promise<void> => {
     try {
       await emitRunEventForDependencies(dependencies.runEventSink, projectPath, existingTicket.frontMatter.id, runId, threadId, event);
@@ -2636,6 +3103,8 @@ export const startTicketRedraftRun = async (
 
   const draftDependencies: TicketDraftStartDependencies = {
     ...dependencies,
+    runId,
+    agentProvider: provider,
     abortController,
     onProgress: async (message) => {
       await dependencies.onProgress?.(message);
@@ -2834,9 +3303,13 @@ export const maybeResumeTicketDraftAfterClarification = async (
   const runId = dependencies.createRunId?.() ?? newId("run");
   const threadId = draftRunThreadId(runId);
   const abortController = new AbortController();
+  const provider = await resolveRuntimeAgentProvider(dependencies);
   const draftingTicket = await setExistingDraftInProgress(projectPath, ticketId, runId);
   await submitTicketDraftWork({ projectPath, ticketId, idea, effort: draftingTicket.frontMatter.effort }, { runId, ticketId });
-  const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", { message: "Ticket draft resumed after clarification." });
+  const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", {
+    message: "Ticket draft resumed after clarification.",
+    metadata: { providerId: provider.providerId }
+  });
   const emitDraftEvent = async (event: RelayCodexEvent): Promise<void> => {
     try {
       await emitRunEventForDependencies(dependencies.runEventSink, projectPath, ticketId, runId, threadId, event);
@@ -2868,6 +3341,8 @@ export const maybeResumeTicketDraftAfterClarification = async (
 
   const draftDependencies: TicketDraftStartDependencies = {
     ...dependencies,
+    runId,
+    agentProvider: provider,
     abortController,
     onProgress: async (message) => {
       await dependencies.onProgress?.(message);
@@ -2990,6 +3465,182 @@ const finalTextFromItem = (item: ThreadItem): string | null => {
   return null;
 };
 
+const parseProviderRawEvents = (rawResponse: string): Record<string, unknown>[] => {
+  const trimmed = rawResponse.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return parsed.filter((value): value is Record<string, unknown> => typeof value === "object" && value !== null);
+    return typeof parsed === "object" && parsed !== null ? [parsed as Record<string, unknown>] : [];
+  } catch {
+    return trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return typeof parsed === "object" && parsed !== null ? [parsed as Record<string, unknown>] : [];
+        } catch {
+          return [];
+        }
+      });
+  }
+};
+
+const stringValue = (value: unknown): string | null => (typeof value === "string" && value.trim() ? value.trim() : null);
+
+const stringListValue = (value: unknown): string[] =>
+  Array.isArray(value) ? value.flatMap((item) => (typeof item === "string" && item.trim() ? [item.trim()] : [])) : [];
+
+const recordValue = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+
+const providerEventType = (event: Record<string, unknown>): string =>
+  [
+    stringValue(event.type),
+    stringValue(event.event),
+    stringValue(event.kind),
+    stringValue(event.name),
+    stringValue(event.subtype)
+  ]
+    .filter(Boolean)
+    .join(".")
+    .toLowerCase();
+
+const providerPathFromEvent = (event: Record<string, unknown>): string | null =>
+  stringValue(event.path) ??
+  stringValue(event.file_path) ??
+  stringValue(event.filePath) ??
+  stringValue(recordValue(event.file)?.path);
+
+const providerCommandFromEvent = (event: Record<string, unknown>): string | null =>
+  stringValue(event.command) ??
+  stringValue(event.cmd) ??
+  stringValue(event.input) ??
+  stringValue(recordValue(event.command_execution)?.command);
+
+const normalizeProviderTextEvents = (event: Record<string, unknown>, timestamp: string): RelayCodexEvent[] => {
+  const type = providerEventType(event);
+  if (/(message|text|content).*(delta|chunk|stream)|^(delta|message)$/i.test(type)) {
+    const text =
+      stringValue(event.text) ??
+      stringValue(event.delta) ??
+      stringValue(event.message) ??
+      stringValue(event.content) ??
+      stringValue(event.output_text);
+    return text ? [{ type: "agent.message.delta", text, timestamp }] : [];
+  }
+  if (/(message|text|content).*(complete|completed|final)|final[_ .-]?text/i.test(type)) {
+    const text =
+      stringValue(event.text) ??
+      stringValue(event.message) ??
+      stringValue(event.content) ??
+      stringValue(event.output_text) ??
+      stringValue(event.result);
+    return text ? [{ type: "agent.message.completed", text, timestamp }] : [];
+  }
+  return [];
+};
+
+const normalizeProviderNativeEvent = (event: Record<string, unknown>): RelayCodexEvent[] => {
+  const timestamp = nowIso();
+  const type = providerEventType(event);
+
+  const approvalId =
+    stringValue(event.approval_id) ?? stringValue(event.approvalId) ?? stringValue(recordValue(event.approval)?.id);
+  if (approvalId && /(approval|permission)/i.test(type) && /(resolved|approved|denied|declined)/i.test(type)) {
+    const decision =
+      stringValue(event.decision) ??
+      (/(approved|accepted)/i.test(type) ? "approved" : /(denied|declined|rejected)/i.test(type) ? "declined" : "resolved");
+    return [{ type: "approval.resolved", approvalId, decision, timestamp }];
+  }
+  if (approvalId && /(approval|permission)/i.test(type)) {
+    const kind =
+      /(command)/i.test(type) ? "command" : /(file)/i.test(type) ? "file-change" : /(network|web)/i.test(type) ? "network" : "other";
+    return [{ type: "approval.requested", approvalId, kind, payload: event, timestamp }];
+  }
+
+  const todoItems = recordValue(event.todo)?.items ?? event.items ?? event.todos;
+  if ((type.includes("todo") || Array.isArray(todoItems)) && Array.isArray(todoItems)) {
+    const items = todoItems
+      .map((item) => {
+        const record = recordValue(item);
+        const text = record ? stringValue(record.text) ?? stringValue(record.content) : null;
+        const completed = record ? Boolean(record.completed ?? record.done ?? record.checked) : false;
+        return text ? { text, completed } : null;
+      })
+      .filter((item): item is { text: string; completed: boolean } => item !== null);
+    return items.length > 0 ? [{ type: "todo.updated", items, timestamp }] : [];
+  }
+
+  const mcp = recordValue(event.mcp) ?? event;
+  if ((type.includes("mcp") || (mcp.server && mcp.tool)) && stringValue(mcp.server) && stringValue(mcp.tool)) {
+    const status = /(fail|error)/i.test(type)
+      ? "failed"
+      : /(complete|done|success)/i.test(type)
+        ? "completed"
+        : "in_progress";
+    return [
+      {
+        type: "mcp.tool_call",
+        server: stringValue(mcp.server)!,
+        tool: stringValue(mcp.tool)!,
+        status,
+        ...(stringValue(mcp.error) ?? stringValue(recordValue(mcp.error)?.message)
+          ? { error: stringValue(mcp.error) ?? stringValue(recordValue(mcp.error)?.message) ?? undefined }
+          : {}),
+        timestamp
+      }
+    ];
+  }
+
+  const query = stringValue(event.query) ?? stringValue(event.search_query) ?? stringValue(recordValue(event.search)?.query);
+  if ((type.includes("search") || query) && query) {
+    return [{ type: "web.search", query, timestamp }];
+  }
+
+  const path = providerPathFromEvent(event);
+  if (
+    path &&
+    (/(file|edit|write|patch|create|delete|rename)/i.test(type) ||
+      stringValue(event.change_type) !== null ||
+      stringValue(event.kind) !== null)
+  ) {
+    const kind = stringValue(event.kind) ?? stringValue(event.change_type) ?? stringValue(event.changeType) ?? "updated";
+    return [{ type: "file.change", path, kind, summary: `${kind} ${path}`, timestamp }];
+  }
+
+  const command = providerCommandFromEvent(event);
+  if (command && /(command|exec|shell|bash|terminal)/i.test(type) && /(start|begin|run|spawn)/i.test(type)) {
+    return [{ type: "command.started", command, cwd: stringValue(event.cwd) ?? undefined, timestamp }];
+  }
+  const stdout = stringValue(event.stdout) ?? stringListValue(event.stdout_chunks).join("");
+  const stderr = stringValue(event.stderr) ?? stringListValue(event.stderr_chunks).join("");
+  if (stdout) return [{ type: "command.output", stream: "stdout", text: stdout, timestamp }];
+  if (stderr) return [{ type: "command.output", stream: "stderr", text: stderr, timestamp }];
+  if ((command || type.includes("command")) && /(complete|completed|exit|finished|declined|fail|failed)/i.test(type)) {
+    const status = /(declined|denied)/i.test(type) ? "declined" : /(fail|error)/i.test(type) ? "failed" : "completed";
+    return [{ type: "command.completed", status, timestamp }];
+  }
+
+  return normalizeProviderTextEvents(event, timestamp);
+};
+
+const providerNativeFailureMessage = (events: readonly Record<string, unknown>[]): string | null => {
+  for (const event of events) {
+    const type = providerEventType(event);
+    if (!/(fail|error|abort|cancel)/i.test(type)) continue;
+    const message =
+      stringValue(event.message) ??
+      stringValue(event.error) ??
+      stringValue(recordValue(event.error)?.message) ??
+      stringValue(event.details);
+    if (message) return message;
+  }
+  return null;
+};
+
 const normalizeItemEvent = (
   event: Extract<ThreadEvent, { type: "item.started" | "item.updated" | "item.completed" }>,
   outputOffsets: Map<string, number>
@@ -3108,8 +3759,8 @@ const assertAgentMarkdownBody = (markdown: string, fieldName: string): string =>
   return normalized;
 };
 
-const parseAgentTicketUpdate = (value: string): AgentTicketUpdate => {
-  const parsed = parseSchema(agentTicketUpdateSchema, parseJsonResponse(value));
+const parseAgentTicketUpdate = (value: unknown): AgentTicketUpdate => {
+  const parsed = parseSchema(agentTicketUpdateSchema, typeof value === "string" ? parseJsonResponse(value) : value);
   const title = normalizeWhitespace(parsed.title);
   if (!title) throw new Error("Agent ticket update must include a title.");
 
@@ -3144,21 +3795,79 @@ const applyAgentTicketPatch = (currentMarkdown: string, update: AgentTicketUpdat
 type TicketUpdatePurpose = NonNullable<AgentTicketUpdateInput["purpose"]>;
 
 const scopeRecoveryPurpose = "scope_recovery" as const;
+const archivePurpose = "archive" as const;
 
-const formatTicketUpdatePlannedFilesGuidance = (purpose: TicketUpdatePurpose): string =>
-  purpose === scopeRecoveryPurpose
-    ? '- plannedFiles: REQUIRED for this task scope recovery. Return the complete updated non-empty repo-relative planned scope, including the current scope plus every approved extra path.'
-    : '- plannedFiles: optional. Omit it unless the request explicitly asks to change planned scope for a task ticket.';
+const archiveSectionRetentionGuidance = (ticketType: TicketRecord["frontMatter"]["ticketType"]): string => {
+  switch (ticketType) {
+    case "epic":
+      return "Tier: epic (soft). Keep a short Context section when useful. Trim verbose lists, implementation notes, and historical detail.";
+    case "feature":
+      return "Tier: feature (aggressive). Drop Implementation Notes and Test Plan sections. Shorten Context to essentials. Keep Requirements and Acceptance Criteria as lean bullets.";
+    case "task":
+      return "Tier: task (most aggressive). Remove Context and Goal sections entirely. Keep Requirements and Acceptance Criteria only as lean bullet lists.";
+    default:
+      return "Tier: default. Produce a materially shorter archived body while preserving the ticket's essential intent.";
+  }
+};
+
+const buildArchiveTicketUpdatePrompt = (
+  ticket: TicketRecord,
+  projectName: string,
+  projectContextSection = ""
+): string => {
+  const projectContextBlock = formatProjectContextBlock(projectContextSection);
+  return `You are archiving one completed Relay ticket into project history.
+
+${projectContextBlock}Produce a lean archived markdown body for long-term storage. Do not implement code. Do not modify repository files. Do not move tickets or change run metadata.
+
+Return only structured JSON matching the requested schema:
+- title: preserve the existing title unless a minor tightening improves clarity.
+- priority: preserve the current priority unless clearly wrong.
+- labels: preserve the current labels unless a small cleanup is obviously helpful.
+- authoringState: use "ready".
+${formatTicketUpdatePlannedFilesGuidance(archivePurpose)}
+- patch.summary: concise archived summary for board cards and search (one or two sentences).
+- patch.fullMarkdown: REQUIRED. Complete replacement markdown for the archived ticket. Must be materially shorter than the current body.
+- patch.appendMarkdown: must be null for archive.
+- clarificationQuestions: must be an empty array. Archive must not create clarification records.
+
+${archiveSectionRetentionGuidance(ticket.frontMatter.ticketType)}
+
+Never include YAML front matter in fullMarkdown. Preserve checklist items only when they still add traceability; otherwise drop completed checklist noise.
+
+Project: ${projectName}
+Ticket front matter, for context only:
+${JSON.stringify(ticket.frontMatter, null, 2)}
+
+Current ticket markdown:
+${ticket.markdown}`;
+};
+
+const formatTicketUpdatePlannedFilesGuidance = (purpose: TicketUpdatePurpose): string => {
+  if (purpose === archivePurpose) {
+    return "- plannedFiles: optional. Omit unless preserving task planned scope for traceability.";
+  }
+  if (purpose === scopeRecoveryPurpose) {
+    return "- plannedFiles: REQUIRED for this task scope recovery. Return the complete updated non-empty repo-relative planned scope, including the current scope plus every approved extra path.";
+  }
+  return "- plannedFiles: optional. Omit it unless the request explicitly asks to change planned scope for a task ticket.";
+};
 
 const buildTicketUpdatePrompt = (
   ticket: Awaited<ReturnType<typeof readTicket>>,
   clarifications: ClarificationQuestion[],
   request: string,
   projectName: string,
-  purpose: TicketUpdatePurpose
-): string => `You are helping update one Relay ticket.
+  purpose: TicketUpdatePurpose,
+  projectContextSection = ""
+): string => {
+  if (purpose === archivePurpose) {
+    return buildArchiveTicketUpdatePrompt(ticket, projectName, projectContextSection);
+  }
+  const projectContextBlock = formatProjectContextBlock(projectContextSection);
+  return `You are helping update one Relay ticket.
 
-Update the ticket content only. Do not implement the ticket. Do not modify files. Do not move the ticket to another column. Do not change run history or Codex execution metadata.
+${projectContextBlock}Update the ticket content only. Do not implement the ticket. Do not modify files. Do not move the ticket to another column. Do not change run history or Codex execution metadata.
 
 This is a long-lived Relay authoring loop. The user may refine this ticket many times before clicking Implement. Preserve useful existing ticket content by default. Return a patch, not a blind rewrite.
 
@@ -3189,6 +3898,7 @@ ${ticket.markdown}
 
 User change request:
 ${request}`;
+};
 
 const readScopeRecoveryClarification = async (
   projectPath: string,
@@ -3244,20 +3954,23 @@ const startTicketUpdateRunPromise = async (
 
   await logInfo("codex:ticket-update", "starting ticket update run", { projectPath, ticketId, requestLength: request.length });
   let currentThreadId = `pending_${runId}`;
-  const outputOffsets = new Map<string, number>();
-
-  let streamed: Awaited<ReturnType<TicketUpdateThread["runStreamed"]>>;
+  let provider: AgentProvider;
+  let prompt = "";
   try {
     const config = await readProjectConfig(projectPath);
     const ticket = await readTicket(projectPath, ticketId);
+    if (purpose === archivePurpose && ticket.frontMatter.status !== RELAY_COMPLETED_STATUS) {
+      throw new Error("Only completed tickets can be archived.");
+    }
     const clarifications = await readClarificationQuestions(projectPath, ticketId);
+    provider = await resolveRuntimeAgentProvider(dependencies);
     await submitTicketUpdateWork({ ...input, projectPath, request }, { runId });
-    const codex = dependencies.createCodexClient?.() ?? (await createCodex());
-    const thread = codex.startThread(await ticketUpdateThreadOptionsForProject(projectPath));
-    currentThreadId = thread.id ?? currentThreadId;
-    const prompt = buildTicketUpdatePrompt(ticket, clarifications, request, config.name, purpose);
-    streamed = await thread.runStreamed(prompt, { outputSchema: agentTicketUpdateSchemaJson, signal: abortController.signal });
-    const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", { message: "Ticket update agent started." });
+    const projectContextSection = await resolveProjectContextPromptSection(projectPath);
+    prompt = buildTicketUpdatePrompt(ticket, clarifications, request, config.name, purpose, projectContextSection);
+    const startedWork = await markWorkRunStatusSafely(projectPath, runId, "running", {
+      message: "Ticket update agent started.",
+      metadata: { providerId: provider.providerId }
+    });
     await updateTicketUpdateRunAttempt(runId, {
       attemptId: startedWork?.currentAttempt?.attemptId,
       leaseToken: startedWork?.currentAttempt?.leaseToken
@@ -3272,27 +3985,7 @@ const startTicketUpdateRunPromise = async (
   }
 
   return new Promise<AgentTicketUpdateStartResult>((resolve) => {
-    let started = false;
-    const resolveStarted = (): void => {
-      if (!started) {
-        started = true;
-        resolve({ runId, threadId: currentThreadId });
-      }
-    };
-
-    const emitStarted = async (): Promise<void> => {
-      if (started) return;
-      await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
-        type: "run.started",
-        runId,
-        threadId: currentThreadId,
-        timestamp: nowIso()
-      });
-      resolveStarted();
-    };
-
     const emitFailure = async (message: string, finalStatus: RunStatus = "failed"): Promise<void> => {
-      await emitStarted();
       await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
         type: "run.failed",
         message,
@@ -3306,175 +3999,229 @@ const startTicketUpdateRunPromise = async (
     };
 
     void (async () => {
-      let finalResponse = "";
       try {
-        for await (const event of streamed.events) {
-          if (event.type === "thread.started") {
-            currentThreadId = event.thread_id;
-            await emitStarted();
-            continue;
-          }
+        await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+          type: "run.started",
+          runId,
+          threadId: currentThreadId,
+          timestamp: nowIso()
+        });
+        resolve({ runId, threadId: currentThreadId });
 
-          await emitStarted();
-
-          if (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") {
-            const text = finalTextFromItem(event.item);
-            if (event.item.type === "agent_message" && text) finalResponse = text;
-            const normalized = normalizeItemEvent(event, outputOffsets);
-            for (const relayEvent of normalized) {
-              await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, relayEvent);
+        const result = await provider.runStructured<AgentTicketUpdate>({
+          kind: "ticket.update",
+          projectPath,
+          prompt,
+          outputSchema: agentTicketUpdateSchemaJson,
+          mode: "read_only",
+          networkAccessEnabled: false,
+          webSearchMode: "disabled",
+          signal: abortController.signal
+        });
+        const ticketUpdateArtifactContext: AgentRunArtifactContext = {
+          projectPath,
+          kind: "ticket.update",
+          providerId: provider.providerId,
+          ticketId,
+          runId,
+          requestId: runId
+        };
+        await persistAgentStructuredRunResponse(ticketUpdateArtifactContext, result);
+        if (result.providerSessionRef) {
+          currentThreadId = result.providerSessionRef.externalId;
+          await markWorkRunStatusSafely(projectPath, runId, "running", {
+            metadata: {
+              providerId: provider.providerId,
+              providerSessionRef: result.providerSessionRef
             }
-            continue;
-          }
+          });
+        }
 
-          if (event.type === "turn.failed" || event.type === "error") {
-            const message = event.type === "turn.failed" ? event.error.message : event.message;
-            await emitFailure(message);
-            return;
-          }
+        let update: AgentTicketUpdate;
+        try {
+          update = parseAgentTicketUpdate(result.output);
+        } catch (error) {
+          const artifactPaths = await persistAgentStructuredRunResponse(ticketUpdateArtifactContext, result, {
+            phase: "validation_failed",
+            validationError: errorMessage(error, "Invalid ticket update.")
+          });
+          await emitFailure(`Agent ticket update was invalid and was not applied: ${errorMessage(error, "Invalid ticket update.")}`);
+          await logWarn("codex:ticket-update", "ticket update output rejected", {
+            projectPath,
+            ticketId,
+            runId,
+            threadId: currentThreadId,
+            error: errorMessage(error, "Invalid ticket update."),
+            agentArtifacts: artifactPaths?.relativePaths ?? null
+          });
+          return;
+        }
 
-          if (event.type === "turn.completed") {
-            let update: AgentTicketUpdate;
-            try {
-              update = parseAgentTicketUpdate(finalResponse);
-            } catch (error) {
-              await emitFailure(`Agent ticket update was invalid and was not applied: ${errorMessage(error, "Invalid ticket update.")}`);
-              await logWarn("codex:ticket-update", "ticket update output rejected", {
-                projectPath,
-                ticketId,
-                runId,
-                threadId: currentThreadId,
-                error: errorMessage(error, "Invalid ticket update.")
-              });
-              return;
+        try {
+          const latest = await readTicket(projectPath, ticketId);
+          const isScopeRecovery = purpose === scopeRecoveryPurpose;
+          const isArchive = purpose === archivePurpose;
+          if (isScopeRecovery && update.clarificationQuestions.length > 0) {
+            throw new Error("Scope recovery updates cannot create new clarification questions.");
+          }
+          if (isArchive) {
+            if (latest.frontMatter.status !== RELAY_COMPLETED_STATUS) {
+              throw new Error("Only completed tickets can be archived.");
             }
-
-            try {
-              const latest = await readTicket(projectPath, ticketId);
-              const isScopeRecovery = purpose === scopeRecoveryPurpose;
-              if (isScopeRecovery && update.clarificationQuestions.length > 0) {
-                throw new Error("Scope recovery updates cannot create new clarification questions.");
+            if (update.clarificationQuestions.length > 0) {
+              throw new Error("Archive updates cannot create new clarification questions.");
+            }
+            if (!update.patch.fullMarkdown) {
+              throw new Error("Archive updates must return patch.fullMarkdown.");
+            }
+            const summarized = await writeTicket(projectPath, {
+              ...latest,
+              markdown: update.patch.fullMarkdown,
+              frontMatter: {
+                ...latest.frontMatter,
+                title: update.title,
+                priority: update.priority,
+                labels: update.labels,
+                summary: update.patch.summary,
+                authoringState: update.authoringState,
+                plannedFiles: update.plannedFiles ?? latest.frontMatter.plannedFiles
               }
-              const nextMarkdown = applyAgentTicketPatch(latest.markdown, update);
-              const nextAuthoringState = isScopeRecovery ? "ready" : update.clarificationQuestions.length > 0 ? "needs_input" : update.authoringState;
-              const scopeRecoveryClarification =
-                isScopeRecovery ? await readScopeRecoveryClarification(projectPath, ticketId, input.clarificationQuestionId) : null;
-              const persisted = await writeTicket(projectPath, {
-                ...latest,
-                markdown: nextMarkdown,
-                frontMatter: {
-                  ...latest.frontMatter,
-                  title: update.title,
-                  priority: update.priority,
-                  labels: update.labels,
-                  authoringState: nextAuthoringState,
-                  runStatus: isScopeRecovery ? "idle" : latest.frontMatter.runStatus,
-                  plannedFiles:
-                    isScopeRecovery && scopeRecoveryClarification
-                      ? mergedScopeRecoveryPlannedFiles(latest, update, scopeRecoveryClarification, projectPath)
-                      : update.plannedFiles ?? latest.frontMatter.plannedFiles
-                }
-              });
-
-              if (isScopeRecovery) {
-                const config = await readProjectConfig(projectPath);
-                const readyStatus = config.columns.some((column) => column.id === RELAY_READY_STATUS)
-                  ? RELAY_READY_STATUS
-                  : persisted.frontMatter.status;
-                const readyTicket =
-                  persisted.frontMatter.status === readyStatus
-                    ? persisted
-                    : await transitionTicketStatus(projectPath, ticketId, readyStatus, {
-                        actor: "user",
-                        source: "clarification_ui"
-                      });
-                try {
-                  await (dependencies.reconcileTicketQueueState ?? reconcileTicketQueueState)(projectPath, ticketId);
-                } catch (error) {
-                  await logWarn("codex:ticket-update", "scope recovery updated ticket but queue reconciliation failed", {
-                    projectPath,
-                    ticketId,
-                    runId,
-                    error: errorMessage(error, "Reconcile failed.")
-                  });
-                }
-                await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
-                  type: "run.completed",
-                  finalResponse: `Task scope redraft completed. ${update.patch.summary}`,
-                  usage: event.usage,
-                  finalStatus: "completed",
-                  timestamp: nowIso()
-                });
-                await logInfo("codex:ticket-update", "scope recovery ticket update completed", {
-                  projectPath,
-                  ticketId,
-                  runId,
-                  threadId: currentThreadId,
-                  status: readyTicket.frontMatter.status
-                });
-                await markWorkRunStatusSafely(projectPath, runId, "completed", {
-                  result: { ticketId, clarificationQuestionCount: 0, purpose },
-                  message: "Task scope recovery completed."
-                });
-                return;
-              }
-
-              if (update.clarificationQuestions.length > 0) {
-                await createClarificationQuestions(
-                  projectPath,
-                  ticketId,
-                  update.clarificationQuestions.map((question) => ({ question })),
-                  {
-                    actor: "codex",
+            });
+            const archived =
+              summarized.frontMatter.status === RELAY_ARCHIVE_STATUS
+                ? summarized
+                : await transitionTicketStatus(projectPath, ticketId, RELAY_ARCHIVE_STATUS, {
+                    actor: "user",
                     source: "manual_ticket_edit",
-                    runId,
-                    codexThreadId: currentThreadId
-                  }
-                );
-              }
-
-              await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
-                type: "run.completed",
-                finalResponse:
-                  update.clarificationQuestions.length > 0
-                    ? `Ticket refined and blocked with ${update.clarificationQuestions.length} new clarification question${
-                        update.clarificationQuestions.length === 1 ? "" : "s"
-                      }. ${update.patch.summary}`
-                    : `Ticket refined. ${update.patch.summary}`,
-                usage: event.usage,
-                finalStatus: "completed",
-                timestamp: nowIso()
-              });
-              await logInfo("codex:ticket-update", "ticket update run completed", {
-                projectPath,
-                ticketId,
-                runId,
-                threadId: currentThreadId,
-                clarificationQuestionCount: update.clarificationQuestions.length
-              });
-              await markWorkRunStatusSafely(
-                projectPath,
-                runId,
-                update.clarificationQuestions.length > 0 ? "blocked" : "completed",
-                {
-                  result: { ticketId, clarificationQuestionCount: update.clarificationQuestions.length },
-                  message:
-                    update.clarificationQuestions.length > 0
-                      ? "Ticket update is waiting on clarification."
-                      : "Ticket update completed."
-                }
-              );
-            } catch (error) {
-              await emitFailure(`Ticket update could not be persisted: ${errorMessage(error, "Persistence failed.")}`);
-              await logError("codex:ticket-update", "ticket update persistence failed", error, {
-                projectPath,
-                ticketId,
-                runId,
-                threadId: currentThreadId
-              });
-            }
+                    runId
+                  });
+            await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+              type: "run.completed",
+              finalResponse: `Ticket archived. ${update.patch.summary}`,
+              finalStatus: "completed",
+              timestamp: nowIso()
+            });
+            await logInfo("codex:ticket-update", "archive ticket update completed", {
+              projectPath,
+              ticketId,
+              runId,
+              threadId: currentThreadId,
+              status: archived.frontMatter.status
+            });
+            await markWorkRunStatusSafely(projectPath, runId, "completed", {
+              result: { ticketId, clarificationQuestionCount: 0, purpose },
+              message: "Ticket archive completed."
+            });
             return;
           }
+
+          const nextMarkdown = applyAgentTicketPatch(latest.markdown, update);
+          const nextAuthoringState = isScopeRecovery ? "ready" : update.clarificationQuestions.length > 0 ? "needs_input" : update.authoringState;
+          const scopeRecoveryClarification =
+            isScopeRecovery ? await readScopeRecoveryClarification(projectPath, ticketId, input.clarificationQuestionId) : null;
+          const persisted = await writeTicket(projectPath, {
+            ...latest,
+            markdown: nextMarkdown,
+            frontMatter: {
+              ...latest.frontMatter,
+              title: update.title,
+              priority: update.priority,
+              labels: update.labels,
+              authoringState: nextAuthoringState,
+              runStatus: isScopeRecovery ? "idle" : latest.frontMatter.runStatus,
+              plannedFiles:
+                isScopeRecovery && scopeRecoveryClarification
+                  ? mergedScopeRecoveryPlannedFiles(latest, update, scopeRecoveryClarification, projectPath)
+                  : update.plannedFiles ?? latest.frontMatter.plannedFiles
+            }
+          });
+
+          if (isScopeRecovery) {
+            const config = await readProjectConfig(projectPath);
+            const readyStatus = config.columns.some((column) => column.id === RELAY_READY_STATUS)
+              ? RELAY_READY_STATUS
+              : persisted.frontMatter.status;
+            const readyTicket =
+              persisted.frontMatter.status === readyStatus
+                ? persisted
+                : await transitionTicketStatus(projectPath, ticketId, readyStatus, {
+                    actor: "user",
+                    source: "clarification_ui"
+                  });
+            try {
+              await (dependencies.reconcileTicketQueueState ?? reconcileTicketQueueState)(projectPath, ticketId);
+            } catch (error) {
+              await logWarn("codex:ticket-update", "scope recovery updated ticket but queue reconciliation failed", {
+                projectPath,
+                ticketId,
+                runId,
+                error: errorMessage(error, "Reconcile failed.")
+              });
+            }
+            await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+              type: "run.completed",
+              finalResponse: `Task scope redraft completed. ${update.patch.summary}`,
+              finalStatus: "completed",
+              timestamp: nowIso()
+            });
+            await logInfo("codex:ticket-update", "scope recovery ticket update completed", {
+              projectPath,
+              ticketId,
+              runId,
+              threadId: currentThreadId,
+              status: readyTicket.frontMatter.status
+            });
+            await markWorkRunStatusSafely(projectPath, runId, "completed", {
+              result: { ticketId, clarificationQuestionCount: 0, purpose },
+              message: "Task scope recovery completed."
+            });
+            return;
+          }
+
+          if (update.clarificationQuestions.length > 0) {
+            await createClarificationQuestions(
+              projectPath,
+              ticketId,
+              update.clarificationQuestions.map((question) => ({ question })),
+              {
+                actor: "codex",
+                source: "manual_ticket_edit",
+                runId,
+                codexThreadId: currentThreadId
+              }
+            );
+          }
+
+          await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+            type: "run.completed",
+            finalResponse:
+              update.clarificationQuestions.length > 0
+                ? `Ticket refined and blocked with ${update.clarificationQuestions.length} new clarification question${
+                    update.clarificationQuestions.length === 1 ? "" : "s"
+                  }. ${update.patch.summary}`
+                : `Ticket refined. ${update.patch.summary}`,
+            finalStatus: "completed",
+            timestamp: nowIso()
+          });
+          await logInfo("codex:ticket-update", "ticket update run completed", {
+            projectPath,
+            ticketId,
+            runId,
+            threadId: currentThreadId,
+            clarificationQuestionCount: update.clarificationQuestions.length
+          });
+          await markWorkRunStatusSafely(projectPath, runId, update.clarificationQuestions.length > 0 ? "blocked" : "completed", {
+            result: { ticketId, clarificationQuestionCount: update.clarificationQuestions.length },
+            message: update.clarificationQuestions.length > 0 ? "Ticket update is waiting on clarification." : "Ticket update completed."
+          });
+        } catch (error) {
+          await emitFailure(`Ticket update could not be persisted: ${errorMessage(error, "Persistence failed.")}`);
+          await logError("codex:ticket-update", "ticket update persistence failed", error, {
+            projectPath,
+            ticketId,
+            runId,
+            threadId: currentThreadId
+          });
         }
       } catch (error) {
         const message = abortController.signal.aborted ? "Ticket update was cancelled." : errorMessage(error, "Ticket update failed.");
@@ -3512,6 +4259,79 @@ export const cancelTicketUpdateRun = async (runId: string): Promise<void> => {
   await markWorkRunStatusSafely(run.projectPath, runId, "cancelled", { message: "Ticket update cancellation requested." });
 };
 
+export type TicketArchiveResult = {
+  readonly ticket: TicketRecord;
+  readonly board: BoardSnapshot;
+};
+
+const ARCHIVE_POLL_INTERVAL_MS = 500;
+const ARCHIVE_POLL_TIMEOUT_MS = 120_000;
+
+const assertArchiveStatusConfigured = async (projectPath: string): Promise<void> => {
+  const config = await readProjectConfig(projectPath);
+  if (!config.columns.some((column) => column.id === RELAY_ARCHIVE_STATUS)) {
+    throw new Error("Archive status is not configured for this project.");
+  }
+};
+
+const waitForTicketArchived = async (projectPath: string, ticketId: string): Promise<void> => {
+  const deadline = Date.now() + ARCHIVE_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const board = await readBoard(projectPath);
+    const summary = board.tickets.find((ticket) => ticket.id === ticketId);
+    if (summary?.status === RELAY_ARCHIVE_STATUS) return;
+    if (summary && summary.status !== RELAY_COMPLETED_STATUS) {
+      throw new Error(`Archive did not complete for ${summary.title}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, ARCHIVE_POLL_INTERVAL_MS));
+  }
+  throw new Error("Archive timed out waiting for the agent to finish.");
+};
+
+const readTicketArchiveSnapshot = async (projectPath: string, ticketId: string): Promise<TicketArchiveResult> => ({
+  ticket: await readTicket(projectPath, ticketId),
+  board: await readBoard(projectPath)
+});
+
+export const archiveTicket = async (
+  projectPath: string,
+  ticketId: string,
+  dependencies: TicketUpdateDependencies = {}
+): Promise<TicketArchiveResult> => {
+  const resolvedProjectPath = await resolveBackendPath(projectPath);
+  await assertArchiveStatusConfigured(resolvedProjectPath);
+  await startTicketUpdateRun(
+    {
+      projectPath: resolvedProjectPath,
+      ticketId,
+      request: ARCHIVE_TICKET_UPDATE_REQUEST,
+      purpose: archivePurpose
+    },
+    dependencies
+  );
+  await waitForTicketArchived(resolvedProjectPath, ticketId);
+  return readTicketArchiveSnapshot(resolvedProjectPath, ticketId);
+};
+
+export const archiveTicketBundle = async (
+  projectPath: string,
+  ticketIds: readonly string[],
+  dependencies: TicketUpdateDependencies = {}
+): Promise<TicketArchiveResult> => {
+  const resolvedProjectPath = await resolveBackendPath(projectPath);
+  const uniqueIds = [...new Set(ticketIds)];
+  if (uniqueIds.length === 0) throw new Error("Provide at least one ticket id to archive.");
+
+  const board = await readBoard(resolvedProjectPath);
+  const sortedIds = sortArchiveBundleIds(uniqueIds, board.tickets);
+  let lastResult: TicketArchiveResult | null = null;
+  for (const ticketId of sortedIds) {
+    lastResult = await archiveTicket(resolvedProjectPath, ticketId, dependencies);
+  }
+  if (!lastResult) throw new Error("Provide at least one ticket id to archive.");
+  return lastResult;
+};
+
 const subagentExecutionGuidance = `Subagent guidance:
 - Use subagents only when available and useful for this ticket; skip them for small or tightly coupled work where delegation adds overhead.
 - Plan locally first, keep urgent blocking critical-path work local, and delegate only independent sidecar tasks that can run in parallel.
@@ -3521,10 +4341,13 @@ const subagentExecutionGuidance = `Subagent guidance:
 const buildExecutionPrompt = (
   ticketMarkdown: string,
   clarifications: ClarificationQuestion[],
-  plannedScope: readonly string[]
-): string => `You are working inside the local project folder for this Relay ticket.
+  plannedScope: readonly string[],
+  projectContextSection = ""
+): string => {
+  const projectContextBlock = formatProjectContextBlock(projectContextSection);
+  return `You are working inside the local project folder for this Relay ticket.
 
-Follow the ticket exactly. Ask for clarification if the ticket is missing a required product or implementation decision.
+${projectContextBlock}Follow the ticket exactly. Ask for clarification if the ticket is missing a required product or implementation decision.
 
 ${subagentExecutionGuidance}
 
@@ -3552,6 +4375,7 @@ Do not mark the ticket completed yourself. At the end, provide:
 
 Ticket:
 ${ticketMarkdown}`;
+};
 
 const markdownImagePattern = /!\[[^\]\n]*\]\(([^)\n]+)\)/g;
 const urlSchemePattern = /^[a-z][a-z0-9+.-]*:/i;
@@ -3901,7 +4725,8 @@ export const buildExecutionInput = async (
   clarifications: ClarificationQuestion[],
   plannedScope: readonly string[]
 ): Promise<CodexRunInput> => {
-  const prompt = buildExecutionPrompt(ticketMarkdown, clarifications, plannedScope);
+  const projectContextSection = await resolveProjectContextPromptSection(projectPath);
+  const prompt = buildExecutionPrompt(ticketMarkdown, clarifications, plannedScope, projectContextSection);
   const imagePaths = await extractLocalMarkdownImagePaths(projectPath, ticketMarkdown);
   if (imagePaths.length === 0) return prompt;
 
@@ -4161,7 +4986,9 @@ const preflightCodexRunInternal = async (
     if (ticket.frontMatter.ticketType === "task" && plannedScope.length > 0) {
       const pathLockConflicts = await pathLockConflictsFor(projectPath, ticketId, plannedScope);
       for (const conflict of pathLockConflicts) {
-        errors.push(`\`${conflict.path}\` is locked by task ${conflict.holderTicketId}.`);
+        warnings.push(
+          `\`${conflict.path}\` is locked by task ${conflict.holderTicketId}. The ticket can move to Ready, but the agent will not start until the path is free.`
+        );
       }
     }
 
@@ -4263,6 +5090,25 @@ const deferRunForLockedPath = async ({
   wakeProjectSchedulerSoon(projectPath);
 };
 
+const implementationThreadIdFromSessionRef = (sessionRef: { providerId: string; externalId: string } | null | undefined): string | null => {
+  if (!sessionRef?.externalId) return null;
+  return sessionRef.providerId === "codex" ? sessionRef.externalId : encodeProviderSessionRef(sessionRef);
+};
+
+const providerSessionRefForImplementationResume = (
+  providerId: string,
+  storedSessionRef: WorkRunSnapshot["providerSessionRef"],
+  encodedThreadId: string | null,
+  resume: boolean,
+  freshThread: boolean | undefined
+): WorkRunSnapshot["providerSessionRef"] => {
+  if (!resume || freshThread) return null;
+  if (storedSessionRef?.providerId === providerId) return storedSessionRef;
+  const decoded = decodeProviderSessionId(encodedThreadId);
+  if (decoded?.providerId === providerId) return decoded;
+  return null;
+};
+
 const startQueuedRunNow = async (
   input: StartRunInput,
   resume: boolean,
@@ -4274,6 +5120,8 @@ const startQueuedRunNow = async (
   const freshThread = input.freshThread;
   const runEventSink = dependencies.runEventSink;
   let currentThreadId = `pending_${runId}`;
+  const workSnapshot = await readWorkRunSnapshot(projectPath, runId);
+  const storedProviderId = (workSnapshot?.providerId ?? "codex") as AgentProviderId;
   await logInfo("codex:run", "starting queued run", { projectPath, ticketId, runId, resume, freshThread });
   if (!(await getQueuedImplementationRun(runId))) {
     await completeImplementationRun(runId);
@@ -4299,6 +5147,16 @@ const startQueuedRunNow = async (
   if (!(await getQueuedImplementationRun(runId))) {
     await completeImplementationRun(runId);
     return null;
+  }
+  if (storedProviderId !== "codex") {
+    if (!workSnapshot) {
+      throw new Error(`Queued implementation work ${runId} could not be found.`);
+    }
+    const provider = await resolveRuntimeAgentProvider({
+      ...dependencies,
+      selectedProviderId: storedProviderId
+    });
+    return startQueuedProviderRunNow(input, resume, runId, provider, workSnapshot, dependencies);
   }
   let config: Awaited<ReturnType<typeof readProjectConfig>>;
   let ticket: Awaited<ReturnType<typeof readTicket>>;
@@ -4516,6 +5374,9 @@ const startQueuedRunNow = async (
               await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, relayEvent);
               if (relayEvent.type === "file.change") {
                 const normalizedPath = normalizeScopedRepoPath(relayEvent.path, projectPath);
+                if (normalizedPath && isRelayManagedPath(normalizedPath)) {
+                  continue;
+                }
                 if (!normalizedPath || !plannedScopeSet.has(normalizedPath)) {
                   const outOfScopePath =
                     normalizeScopedRepoPath(relayEvent.path, projectPath) ??
@@ -4701,6 +5562,341 @@ const startQueuedRunNow = async (
   return started;
 };
 
+const startQueuedProviderRunNow = async (
+  input: StartRunInput,
+  resume: boolean,
+  runId: string,
+  provider: AgentProvider,
+  workSnapshot: WorkRunSnapshot,
+  dependencies: CodexRunDependencies = {}
+): Promise<CodexRunStartResult | null> => {
+  const projectPath = await resolveBackendPath(input.projectPath);
+  const ticketId = input.ticketId;
+  const freshThread = input.freshThread;
+  const runEventSink = dependencies.runEventSink;
+  let currentThreadId = `pending_${runId}`;
+  const abortController = new AbortController();
+  try {
+    const config = await readProjectConfig(projectPath);
+    const ticket = await readTicket(projectPath, ticketId);
+    const clarifications = await readClarificationQuestions(projectPath, ticketId);
+    const plannedScope = normalizedPlannedScopeForTicket(ticket, projectPath);
+    const lockAcquire = await tryAcquirePathLocks(projectPath, ticketId, runId, plannedScope);
+    if (!lockAcquire.ok) {
+      throw new Error(
+        lockAcquire.conflicts.map((conflict) => `\`${conflict.path}\` is locked by task ${conflict.holderTicketId}`).join(" ")
+      );
+    }
+    let providerSessionRef = providerSessionRefForImplementationResume(
+      provider.providerId,
+      workSnapshot.providerSessionRef,
+      ticket.frontMatter.codexThreadId,
+      resume,
+      freshThread
+    );
+    currentThreadId = implementationThreadIdFromSessionRef(providerSessionRef) ?? currentThreadId;
+    if (!(await getQueuedImplementationRun(runId))) {
+      await completeImplementationRun(runId);
+      return null;
+    }
+
+    await registerImplementationActive(runId, {
+      abortController,
+      ticketId,
+      projectPath
+    });
+    const runStartedAt = nowIso();
+    const inProgressStatus = config.columns.some((column) => column.id === RELAY_IN_PROGRESS_STATUS)
+      ? RELAY_IN_PROGRESS_STATUS
+      : ticket.frontMatter.status;
+    if (abortController.signal.aborted) {
+      throw new Error("Agent run was cancelled before execution started.");
+    }
+    await captureRunGitBaseline(projectPath, ticketId, runId, runStartedAt);
+    await markWorkRunStatusSafely(projectPath, runId, "running", {
+      message: `${provider.providerId} implementation run started.`,
+      metadata: {
+        providerId: provider.providerId,
+        ...(providerSessionRef ? { providerSessionRef } : {})
+      }
+    });
+    await updateTicketRunState(projectPath, ticketId, {
+      authoringState: "ready",
+      runStatus: "running",
+      lastRunId: runId,
+      lastRunStartedAt: runStartedAt
+    });
+    const transitioned = await transitionTicketStatus(projectPath, ticketId, inProgressStatus, {
+      actor: "codex",
+      source: "agent_execution",
+      runId
+    });
+    if (ticket.frontMatter.status !== transitioned.frontMatter.status) {
+      await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+        type: "ticket.status_changed",
+        fromStatus: ticket.frontMatter.status,
+        toStatus: transitioned.frontMatter.status,
+        actor: "codex",
+        source: "agent_execution",
+        timestamp: nowIso()
+      });
+    }
+
+    const applyProviderSessionRef = async (nextSessionRef: typeof providerSessionRef): Promise<void> => {
+      if (!nextSessionRef) return;
+      providerSessionRef = nextSessionRef;
+      const nextThreadId = implementationThreadIdFromSessionRef(providerSessionRef);
+      if (!nextThreadId || nextThreadId === currentThreadId) return;
+      currentThreadId = nextThreadId;
+      await markWorkRunStatusSafely(projectPath, runId, "running", {
+        metadata: {
+          providerId: provider.providerId,
+          providerSessionRef
+        }
+      });
+      await updateTicketRunState(projectPath, ticketId, {
+        codexThreadId: currentThreadId,
+        authoringState: "ready",
+        runStatus: "running",
+        lastRunId: runId,
+        lastRunStartedAt: runStartedAt
+      });
+    };
+
+    let runStartedEmitted = false;
+    const emitProviderRunStarted = async (): Promise<void> => {
+      if (runStartedEmitted) return;
+      runStartedEmitted = true;
+      await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+        type: "run.started",
+        runId,
+        threadId: currentThreadId,
+        timestamp: nowIso()
+      });
+    };
+
+    const plannedScopeSet = new Set(plannedScope);
+    const handleProviderRelayEvent = async (relayEvent: RendererRunEvent): Promise<"continue" | "deferred"> => {
+      await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, relayEvent);
+      if (relayEvent.type !== "file.change") return "continue";
+      const normalizedPath = normalizeScopedRepoPath(relayEvent.path, projectPath);
+      if (normalizedPath && isRelayManagedPath(normalizedPath)) {
+        return "continue";
+      }
+      if (!normalizedPath || !plannedScopeSet.has(normalizedPath)) {
+        const outOfScopePath =
+          normalizeScopedRepoPath(relayEvent.path, projectPath) ??
+          normalizeScopedRepoPath(relayEvent.path) ??
+          (relayEvent.path.trim() || relayEvent.path);
+        if (!outOfScopePath) return "continue";
+        const conflicts = await pathLockConflictsFor(projectPath, ticketId, [outOfScopePath]);
+        if (conflicts.length > 0) {
+          abortController.abort();
+          await deferRunForLockedPath({
+            projectPath,
+            ticketId,
+            runId,
+            threadId: currentThreadId,
+            filePath: outOfScopePath,
+            conflict: conflicts[0],
+            runEventSink,
+            abortController
+          });
+          return "deferred";
+        }
+        const acquired = await tryAcquirePathLocks(projectPath, ticketId, runId, [outOfScopePath]);
+        if (!acquired.ok) {
+          abortController.abort();
+          await deferRunForLockedPath({
+            projectPath,
+            ticketId,
+            runId,
+            threadId: currentThreadId,
+            filePath: outOfScopePath,
+            conflict: acquired.conflicts[0],
+            runEventSink,
+            abortController
+          });
+          return "deferred";
+        }
+        const appended = await appendPlannedFileToTicket(projectPath, ticketId, outOfScopePath);
+        if (appended) plannedScopeSet.add(appended.path);
+      }
+      return "continue";
+    };
+
+    const handleProviderRawEvent = async (rawEvent: Record<string, unknown>): Promise<"continue" | "deferred"> => {
+      const nativeFailure = providerNativeFailureMessage([rawEvent]);
+      if (nativeFailure) {
+        throw new Error(nativeFailure);
+      }
+      for (const relayEvent of normalizeProviderNativeEvent(rawEvent)) {
+        const state = await handleProviderRelayEvent(relayEvent);
+        if (state === "deferred") return state;
+      }
+      return "continue";
+    };
+
+    const projectContextSection = await resolveProjectContextPromptSection(projectPath);
+    const request = {
+      kind: "ticket.implementation",
+      projectPath,
+      prompt: buildExecutionPrompt(ticket.markdown, clarifications, plannedScope, projectContextSection),
+      mode: "write",
+      effort: ticket.frontMatter.effort,
+      networkAccessEnabled: config.settings.codexNetworkAccessEnabled,
+      webSearchMode: config.settings.codexWebSearchMode,
+      signal: abortController.signal,
+      providerSessionRef
+    } as const;
+
+    let result: TextAgentResult;
+    if (provider.runTextStream) {
+      const streamed = await provider.runTextStream(request);
+      await emitProviderRunStarted();
+      for await (const streamEvent of streamed.events) {
+        if (streamEvent.providerSessionRef) {
+          await applyProviderSessionRef(streamEvent.providerSessionRef);
+        }
+        if (!streamEvent.rawEvent) continue;
+        const state = await handleProviderRawEvent(streamEvent.rawEvent);
+        if (state === "deferred") {
+          return { state: "started", runId, threadId: currentThreadId };
+        }
+      }
+      result = await streamed.completed;
+    } else {
+      result = await provider.runText(request);
+      await applyProviderSessionRef(result.providerSessionRef ?? providerSessionRef ?? null);
+      await emitProviderRunStarted();
+      const rawEvents = parseProviderRawEvents(result.rawResponse);
+      for (const rawEvent of rawEvents) {
+        const state = await handleProviderRawEvent(rawEvent);
+        if (state === "deferred") {
+          return { state: "started", runId, threadId: currentThreadId };
+        }
+      }
+    }
+
+    await applyProviderSessionRef(result.providerSessionRef ?? providerSessionRef ?? null);
+
+    const handoff = result.text || "The agent completed the run without a final text response.";
+    const clarificationRequest = extractClarificationRequest(handoff);
+    if (clarificationRequest.length > 0) {
+      const questions = await createClarificationQuestions(projectPath, ticketId, clarificationRequest, {
+        actor: "codex",
+        source: "agent_execution",
+        runId,
+        codexThreadId: currentThreadId
+      });
+      const updated = await readTicket(projectPath, ticketId);
+      const targetStatus = config.columns.some((column) => column.id === RELAY_NEEDS_CLARIFICATION_STATUS)
+        ? RELAY_NEEDS_CLARIFICATION_STATUS
+        : updated.frontMatter.status;
+      await updateTicketRunState(projectPath, ticketId, {
+        authoringState: "needs_input",
+        runStatus: "blocked",
+        lastRunId: runId,
+        codexThreadId: currentThreadId,
+        markdown: appendCodexHandoff(updated.markdown, handoff)
+      });
+      const blockedTransition = await transitionTicketStatus(projectPath, ticketId, targetStatus, {
+        actor: "codex",
+        source: "agent_execution",
+        runId
+      });
+      if (updated.frontMatter.status !== blockedTransition.frontMatter.status) {
+        await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+          type: "ticket.status_changed",
+          fromStatus: updated.frontMatter.status,
+          toStatus: blockedTransition.frontMatter.status,
+          actor: "codex",
+          source: "agent_execution",
+          timestamp: nowIso()
+        });
+      }
+      await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+        type: "clarification.requested",
+        questions,
+        timestamp: nowIso()
+      });
+      await markWorkRunStatusSafely(projectPath, runId, "blocked", {
+        result: { ticketId, clarificationQuestionCount: questions.length },
+        message: `${provider.providerId} implementation is blocked on clarification.`
+      });
+      return { state: "started", runId, threadId: currentThreadId };
+    }
+
+    const updated = await readTicket(projectPath, ticketId);
+    const targetStatus = config.columns.some((column) => column.id === RELAY_REVIEW_STATUS)
+      ? RELAY_REVIEW_STATUS
+      : updated.frontMatter.status;
+    await updateTicketRunState(projectPath, ticketId, {
+      authoringState: "ready",
+      runStatus: "completed",
+      lastRunId: runId,
+      codexThreadId: currentThreadId,
+      markdown: appendCodexHandoff(updated.markdown, handoff)
+    });
+    const completedTransition = await transitionTicketStatus(projectPath, ticketId, targetStatus, {
+      actor: "codex",
+      source: "agent_execution",
+      runId
+    });
+    if (updated.frontMatter.status !== completedTransition.frontMatter.status) {
+      await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+        type: "ticket.status_changed",
+        fromStatus: updated.frontMatter.status,
+        toStatus: completedTransition.frontMatter.status,
+        actor: "codex",
+        source: "agent_execution",
+        timestamp: nowIso()
+      });
+    }
+    await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+      type: "run.completed",
+      finalResponse: handoff,
+      finalStatus: "completed",
+      timestamp: nowIso()
+    });
+    await markWorkRunStatusSafely(projectPath, runId, "completed", {
+      result: { ticketId, threadId: currentThreadId },
+      message: `${provider.providerId} implementation completed.`
+    });
+    return { state: "started", runId, threadId: currentThreadId };
+  } catch (error) {
+    const aborted = abortController.signal.aborted;
+    await logError("codex:run", aborted ? "run cancelled" : "run failed", error, { projectPath, ticketId, runId, providerId: provider.providerId });
+    let abortedStatus: "paused" | "cancelled" = "cancelled";
+    if (aborted) {
+      const current = await readTicket(projectPath, ticketId);
+      if (current.frontMatter.runStatus === "paused") {
+        abortedStatus = "paused";
+      } else if (current.frontMatter.lastRunId === runId && current.frontMatter.runStatus === "running") {
+        await pauseImplementationTicket(projectPath, ticketId);
+        abortedStatus = "paused";
+      }
+    } else {
+      await updateTicketRunState(projectPath, ticketId, { runStatus: "failed" });
+    }
+    await emitRunEventForDependencies(runEventSink, projectPath, ticketId, runId, currentThreadId, {
+      type: "run.failed",
+      message: error instanceof Error ? error.message : "Agent run failed.",
+      finalStatus: aborted ? abortedStatus : "failed",
+      timestamp: nowIso()
+    });
+    await markWorkRunStatusSafely(projectPath, runId, aborted ? (abortedStatus === "paused" ? "suspended" : "cancelled") : "failed", {
+      error,
+      message: error instanceof Error ? error.message : "Agent run failed."
+    });
+    throw error;
+  } finally {
+    await releasePathLocksForRun(projectPath, ticketId, runId);
+    await completeImplementationRun(runId);
+    wakeProjectSchedulerSoon(projectPath);
+  }
+};
+
 const enqueueCodexRunPromise = async (
   input: StartRunInput,
   resume: boolean,
@@ -4716,7 +5912,8 @@ const enqueueCodexRunPromise = async (
   }
 
   const runId = dependencies.createRunId?.() ?? newId("run");
-  await submitTicketImplementationWork(normalizedInput, { runId, resume });
+  const providerId = await resolveImplementationProviderId(dependencies);
+  await submitTicketImplementationWork(normalizedInput, { runId, resume, providerId });
   await enqueueImplementationRun(runId, {
     input: normalizedInput,
     resume,
@@ -4769,7 +5966,15 @@ export const reconcileTicketQueueState = async (
     if (ticket.frontMatter.status === RELAY_READY_STATUS || ticket.frontMatter.status === RELAY_IN_PROGRESS_STATUS) {
       const resume = ticket.frontMatter.status === RELAY_IN_PROGRESS_STATUS;
       if (!(await getQueuedImplementationRun(ticket.frontMatter.lastRunId))) {
-        await submitTicketImplementationWork({ projectPath: resolvedProjectPath, ticketId }, { runId: ticket.frontMatter.lastRunId, resume });
+        const existingWork = await readWorkRunSnapshot(resolvedProjectPath, ticket.frontMatter.lastRunId);
+        await submitTicketImplementationWork(
+          { projectPath: resolvedProjectPath, ticketId },
+          {
+            runId: ticket.frontMatter.lastRunId,
+            resume,
+            providerId: existingWork?.providerId ?? (await resolveImplementationProviderId(dependencies))
+          }
+        );
         await enqueueImplementationRun(ticket.frontMatter.lastRunId, {
           input: { projectPath: resolvedProjectPath, ticketId },
           resume,
@@ -4795,9 +6000,10 @@ export const reconcileTicketQueueState = async (
       throw new Error(preflight.errors.join(" "));
     }
     const runId = dependencies.createRunId?.() ?? newId("run");
+    const providerId = await resolveImplementationProviderId(dependencies);
     await submitTicketImplementationWork(
       { projectPath: resolvedProjectPath, ticketId },
-      { runId, resume: Boolean(ticket.frontMatter.codexThreadId) }
+      { runId, resume: Boolean(ticket.frontMatter.codexThreadId), providerId }
     );
     await enqueueImplementationRun(runId, {
       input: { projectPath: resolvedProjectPath, ticketId },

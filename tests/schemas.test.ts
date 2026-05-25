@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Schema } from "effect";
 import {
+  appRegistrySchema,
   agentTicketUpdateSchema,
   projectConfigSchema,
   relayCodexEventSchema,
@@ -9,6 +10,7 @@ import {
   runLogLineSchema,
   draftIntakeResultSchema,
   hierarchyDraftPlanSchema,
+  leanTaskDraftSchema,
   ticketDraftSchema,
   ticketFrontMatterSchema
 } from "../src/shared/schemas";
@@ -23,6 +25,21 @@ const expectSchemaError = (error: unknown, message?: RegExp): true => {
   }
   return true;
 };
+
+const validLeanTaskDraft = (patch: Record<string, unknown> = {}) => ({
+  title: "Task B",
+  summary: "Lean summary.",
+  priority: "medium",
+  labels: [],
+  context: "",
+  goal: "Ship change.",
+  requirements: ["Requirement."],
+  acceptanceCriteria: ["Acceptance."],
+  implementationPlan: ["Implementation step."],
+  assumptions: [],
+  plannedFiles: ["src/example.ts"],
+  ...patch
+});
 
 const validDraftBase = (patch: Partial<TicketDraftSubticket> = {}): TicketDraftSubticket => ({
   title: "Draft title",
@@ -102,6 +119,52 @@ test("ticket front matter decodes Date timestamps, legacy defaults, and passthro
   assert.equal(queued.lastRunStartedAt, "2026-05-11T09:45:00.000Z");
 });
 
+test("lean task draft schema defaults blockedByTitles and accepts sibling title dependencies", () => {
+  const withoutBlockers = parseSchema(leanTaskDraftSchema, validLeanTaskDraft());
+  assert.deepEqual(withoutBlockers.blockedByTitles, []);
+
+  const withBlockers = parseSchema(
+    leanTaskDraftSchema,
+    validLeanTaskDraft({ blockedByTitles: ["Task A", "Task B"] })
+  );
+  assert.deepEqual(withBlockers.blockedByTitles, ["Task A", "Task B"]);
+});
+
+test("hierarchy draft plan parses leanTasks with blockedByTitles", () => {
+  const parsed = parseSchema(hierarchyDraftPlanSchema, {
+    planKind: "feature_tree",
+    draftState: "ready",
+    blockingClarificationQuestions: [],
+    matchedEpicId: null,
+    matchedFeatureId: null,
+    root: validDraftBase({ title: "Auth feature" }),
+    features: [],
+    leanTasks: [
+      validLeanTaskDraft({ title: "Task A" }),
+      validLeanTaskDraft({ title: "Task B", blockedByTitles: ["Task A"] })
+    ],
+    research: {
+      generatedAt: "",
+      checkedUrls: [],
+      inspectedFiles: [],
+      limitations: [],
+      limits: {
+        maxResearchMs: 0,
+        maxUrls: 0,
+        maxUrlFetchMs: 0,
+        maxUrlContentChars: 0,
+        maxFilesToScan: 0,
+        maxFilesToRead: 0,
+        maxFileReadChars: 0,
+        maxMatchesPerFile: 0
+      }
+    }
+  });
+
+  assert.equal(parsed.leanTasks.length, 2);
+  assert.deepEqual(parsed.leanTasks[1]?.blockedByTitles, ["Task A"]);
+});
+
 test("hierarchy draft schema requires plannedFiles on lean tasks", () => {
   assert.throws(
     () =>
@@ -156,7 +219,21 @@ test("project settings decode legacy configs with conservative SDK thread option
   assert.equal(config.settings.codexNetworkAccessEnabled, false);
   assert.equal(config.settings.codexWebSearchMode, "disabled");
   assert.deepEqual(config.settings.codexAdditionalDirectories, []);
-  assert.equal(config.settings.agentConcurrency, 1);
+  assert.equal(config.settings.agentConcurrency, 3);
+});
+
+test("app registry defaults legacy installs to the codex provider selection", () => {
+  const registry = parseSchema(appRegistrySchema, {
+    schemaVersion: 1,
+    projects: [],
+    ui: {
+      lastProjectPath: null,
+      theme: "system"
+    }
+  });
+
+  assert.equal(registry.selectedProviderId, "codex");
+  assert.equal(registry.voiceInput.whisperCommandPath, null);
 });
 
 test("project settings validate SDK approval, reasoning, and web search enums", () => {
@@ -219,7 +296,7 @@ test("schemas preserve passthrough roots, strip default object extras, and rejec
   });
 
   assert.equal((config as typeof config & { rootExtra: unknown }).rootExtra, "preserved");
-  assert.equal(config.settings.agentConcurrency, 1);
+  assert.equal(config.settings.agentConcurrency, 3);
   assert.equal("columnExtra" in (config.columns[0] as object), false);
   assert.equal("settingsExtra" in (config.settings as object), false);
 
@@ -244,10 +321,10 @@ test("schemas preserve passthrough roots, strip default object extras, and rejec
     ...config,
     settings: {
       ...config.settings,
-      agentConcurrency: 2
+      agentConcurrency: 3
     }
   });
-  assert.equal(explicitConcurrency.settings.agentConcurrency, 2);
+  assert.equal(explicitConcurrency.settings.agentConcurrency, 3);
 
   assert.throws(
     () =>

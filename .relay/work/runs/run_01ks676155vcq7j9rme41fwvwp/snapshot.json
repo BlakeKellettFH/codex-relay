@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks676155vcq7j9rme41fwvwp",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks67615hd7b0n4nk1qw56s7e",
+  "runId": "run_01ks676155vcq7j9rme41fwvwp",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ks67615hd7b0n4nk1qw56s7e:run_01ks676155vcq7j9rme41fwvwp",
+  "status": "cancelled",
+  "attempts": 1,
+  "createdAt": "2026-05-21T21:31:06.816Z",
+  "updatedAt": "2026-05-22T07:10:28.035Z",
+  "lastAppliedEventSequence": 6,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": null,
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "i want to create a new feature, to be able to manage a context doc/ in the .relay. i want the agents to acknowledge this context doc with proprity and it will state context for the overall toolkit fir this project. Such as coding styles, and documentation on the project and features explaining what we trying to do etc. \n\nso in the directory panel, under the todo, ready, inprocess etc, we should have another folder called context, and it should be togglable to minify and expand.\n\nwhen we expand we should see all the files in that directory being the context, and we should be able to click on the file and view its context in a markdown file in a modal., it should show the preview and edit toggle so we can edit it also",
+    "priority": "medium",
+    "agentModel": "auto",
+    "preferredTicketType": "epic",
+    "draftScope": "epic",
+    "runIntake": true,
+    "runId": "run_01ks676155vcq7j9rme41fwvwp",
+    "ticketId": "tkt_01ks67615hd7b0n4nk1qw56s7e"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent",
+    "clarificationQuestionCount": 1,
+    "recovered": true,
+    "reason": "missing_ticket",
+    "ticketId": "tkt_01ks67615hd7b0n4nk1qw56s7e"
+  },
+  "message": "Recovered ticket work by cancelling it because the ticket is missing."
+}

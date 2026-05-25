@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ks5f5gp3x5jx884dxgkcy4xa",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ks5er9n1e1t05wsncg3k3gcz",
+  "runId": "run_01ks5f5gp3x5jx884dxgkcy4xa",
+  "subject": "ticket",
+  "action": "implement",
+  "kind": "ticket.implementation",
+  "idempotencyKey": "ticket.implementation:/Users/blakekellett/repos/codex-relay:tkt_01ks5er9n1e1t05wsncg3k3gcz:run_01ks5f5gp3x5jx884dxgkcy4xa",
+  "status": "completed",
+  "attempts": 1,
+  "createdAt": "2026-05-21T14:31:24.106Z",
+  "updatedAt": "2026-05-21T14:31:48.391Z",
+  "lastAppliedEventSequence": 6,
+  "executor": "agent",
+  "providerId": "cursor",
+  "requiredCapabilities": [
+    "agent.code-edit",
+    "agent.resume"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ks5f5gq8ads5t7ndzgzwa7x6",
+    "leaseToken": "lease_01ks5f5gq9ab9wtkc8nxrq4sjx",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-21T14:31:24.136Z",
+    "heartbeatAt": "2026-05-21T14:31:48.324Z",
+    "startedAt": "2026-05-21T14:31:24.294Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "ticketId": "tkt_01ks5er9n1e1t05wsncg3k3gcz",
+    "freshThread": false,
+    "resume": false,
+    "runId": "run_01ks5f5gp3x5jx884dxgkcy4xa"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "resume": false,
+    "executor": "agent"
+  },
+  "message": "cursor implementation completed.",
+  "result": {
+    "ticketId": "tkt_01ks5er9n1e1t05wsncg3k3gcz",
+    "threadId": "pending_run_01ks5f5gp3x5jx884dxgkcy4xa"
+  }
+}

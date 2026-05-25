@@ -1,6 +1,6 @@
 import type { ServerResponse } from "node:http";
 import { Effect, Layer } from "effect";
-import type { RendererRunEvent } from "@shared/schemas";
+import type { RendererRunEvent, RepositoryChatStreamEvent } from "@shared/schemas";
 import { RunEventSink, rendererRunEventFromRelayEvent, writeRunLogEffect } from "../services/run-events";
 
 const clients = new Set<ServerResponse>();
@@ -40,6 +40,16 @@ export const publishRelayHttpRunEvent = (event: RendererRunEvent): void => {
       continue;
     }
     writeSseEvent(client, "run-event", event);
+  }
+};
+
+export const publishRelayHttpRepositoryChatEvent = (event: RepositoryChatStreamEvent): void => {
+  for (const client of clients) {
+    if (client.destroyed) {
+      clients.delete(client);
+      continue;
+    }
+    writeSseEvent(client, "repository-chat-event", event);
   }
 };
 

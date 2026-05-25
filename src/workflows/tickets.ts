@@ -1,5 +1,7 @@
 import { Effect, Path } from "effect";
+import { archiveTicket as runArchiveTicket, archiveTicketBundle as runArchiveTicketBundle } from "../services/codex";
 import { parseOpenClarificationQuestionsFromMarkdown } from "../services/clarificationParser";
+import { fromPromise } from "../runtime";
 import type {
   ClarificationAnswerInput,
   EpicSubticketCreateInput,
@@ -89,6 +91,12 @@ export const saveTicketAttachment = (input: TicketAttachmentSaveInput) =>
 
 export const moveTicket = (input: TicketMoveInput) =>
   Storage.use((storage) => storage.moveTicket(input));
+
+export const archiveTicket = (projectPath: string, ticketId: string) =>
+  fromPromise(() => runArchiveTicket(projectPath, ticketId));
+
+export const archiveTicketBundle = (projectPath: string, ticketIds: readonly string[]) =>
+  fromPromise(() => runArchiveTicketBundle(projectPath, ticketIds));
 
 export const listClarifications = (projectPath: string, ticketId: string) =>
   Effect.gen(function*() {

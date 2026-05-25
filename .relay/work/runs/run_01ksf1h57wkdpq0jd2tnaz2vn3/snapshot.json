@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "workId": "run_01ksf1h57wkdpq0jd2tnaz2vn3",
+  "projectPath": "/Users/blakekellett/repos/codex-relay",
+  "ticketId": "tkt_01ksf1h58s4jebdadpbe89mqg8",
+  "runId": "run_01ksf1h57wkdpq0jd2tnaz2vn3",
+  "subject": "ticket",
+  "action": "draft",
+  "kind": "ticket.draft",
+  "idempotencyKey": "ticket.draft:/Users/blakekellett/repos/codex-relay:tkt_01ksf1h58s4jebdadpbe89mqg8:run_01ksf1h57wkdpq0jd2tnaz2vn3",
+  "status": "running",
+  "attempts": 1,
+  "createdAt": "2026-05-25T07:45:29.889Z",
+  "updatedAt": "2026-05-25T07:45:29.900Z",
+  "lastAppliedEventSequence": 4,
+  "executor": "agent",
+  "providerId": "codex",
+  "requiredCapabilities": [
+    "agent.structured-output"
+  ],
+  "providerSessionRef": null,
+  "currentAttempt": {
+    "attemptId": "attempt_01ksf1h59bfby2ce9rr4fzwg3q",
+    "leaseToken": "lease_01ksf1h59bqkrk7qvjtdvmek5a",
+    "executor": "agent",
+    "providerId": "cursor",
+    "claimedAt": "2026-05-25T07:45:29.899Z",
+    "heartbeatAt": "2026-05-25T07:45:29.900Z",
+    "startedAt": "2026-05-25T07:45:29.900Z",
+    "providerSessionRef": null
+  },
+  "payload": {
+    "projectPath": "/Users/blakekellett/repos/codex-relay",
+    "idea": "Repository chat context:\nUser: i want to be able to have an accept on a epic and feature from the review tickets. if all tasks of a feature are complete or in review i want to be able to click accept on the whole feature and it should accept all tasks tickets as well as the feature ticket\n\nCreate a ticket from this latest user request:\nUser: i want to be able to have an accept on a epic and feature from the review tickets. if all tasks of a feature are complete or in review i want to be able to click accept on the whole feature and it should accept all tasks tickets as well as the feature ticket",
+    "priority": "medium",
+    "agentModel": "auto",
+    "preferredTicketType": "feature",
+    "draftScope": "product_feature",
+    "runIntake": true,
+    "runId": "run_01ksf1h57wkdpq0jd2tnaz2vn3",
+    "ticketId": "tkt_01ksf1h58s4jebdadpbe89mqg8"
+  },
+  "metadata": {
+    "providerId": "cursor",
+    "executor": "agent"
+  },
+  "message": "Ticket draft generation started."
+}

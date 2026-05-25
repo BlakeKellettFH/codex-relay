@@ -1,5 +1,5 @@
 import { Effect, FileSystem, Path } from "effect";
-import { normalizeRepoPathList } from "@shared/pathScope";
+import { filterPathsForPathScope, normalizeRepoPathList } from "@shared/pathScope";
 import { RELAY_SCHEMA_VERSION } from "@shared/schemas";
 import { runBackendEffect } from "../../runtime";
 import { logInfo, logWarn } from "../../runtime/Logging";
@@ -71,7 +71,7 @@ const writeStore = async (projectPath: string, store: PathLockStore): Promise<vo
 const lockKey = (ticketId: string, runId: string, filePath: string): string => `${ticketId}:${runId}:${filePath}`;
 
 const normalizePaths = (projectPath: string, paths: readonly string[]): string[] =>
-  normalizeRepoPathList(paths, projectPath);
+  filterPathsForPathScope(normalizeRepoPathList(paths, projectPath));
 
 export const pathLockConflictsFor = async (
   projectPathInput: string,

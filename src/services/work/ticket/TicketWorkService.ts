@@ -37,7 +37,7 @@ export type TicketWorkService = {
   ) => TicketWorkEffect<WorkHandle>;
   readonly submitImplementation: (
     input: StartRunInput,
-    options: { readonly runId: string; readonly resume: boolean }
+    options: { readonly runId: string; readonly resume: boolean; readonly providerId?: string | null }
   ) => TicketWorkEffect<WorkHandle>;
 };
 
@@ -126,6 +126,7 @@ const submitImplementation: TicketWorkService["submitImplementation"] = (input, 
   Effect.gen(function*() {
     const projectPath = yield* resolvePath(input.projectPath);
     const engine = yield* WorkEngine;
+    const providerId = options.providerId ?? "codex";
     return yield* submitTicketWork(engine, {
       workId: options.runId,
       projectPath,
@@ -135,10 +136,10 @@ const submitImplementation: TicketWorkService["submitImplementation"] = (input, 
       action: "implement",
       idempotencyKey: idempotencyKey(["ticket.implementation", projectPath, input.ticketId, options.runId]),
       executor: "agent",
-      providerId: "codex",
+      providerId,
       requiredCapabilities: ["agent.code-edit", "agent.resume"],
       payload: { ...input, projectPath, runId: options.runId, resume: options.resume },
-      metadata: { providerId: "codex", resume: options.resume }
+      metadata: { providerId, resume: options.resume }
     });
   });
 
